@@ -457,7 +457,8 @@ function lbMove(d) {
 async function openSettings() {
   els.settings.hidden = false;
   try {
-    const s = await api("/api/status");
+    // refresh=1 → server asks SD to rescan its models dir, fresh list
+    const s = await api("/api/status?refresh=1");
     els.shSdok.textContent = s.sd_ok ? "· connected" : "· unreachable";
     els.shCur.textContent = s.current_model ? `· now: ${s.current_model}` : "";
     els.shLlm.value = (s.llm || []).join(", ");

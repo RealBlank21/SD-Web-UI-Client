@@ -745,7 +745,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
         now = time.time()
-        if now - self.app.models_cache["ts"] > 300:
+        force = "refresh" in (parse_qs(urlparse(self.path).query) or {})
+        if force or now - self.app.models_cache["ts"] > 300:
+            if force:                                     # ask SD to rescan
+                try:
+                    requests.get(
+                        f"{agent.client.base_url}"
+                        f"/sdapi/v1/refresh-checkpoints", timeout=10)
+                except Exception:
+                    pass
             try:
                 r = requests.get(
                     f"{agent.client.base_url}/sdapi/v1/sd-models", timeout=6)
