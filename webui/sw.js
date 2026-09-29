@@ -1,7 +1,7 @@
 /* SD Agent service worker — app-shell caching for offline launch.
    Network-first for API/dynamic content; cache-first for static assets. */
 
-const CACHE = "sdagent-v1";
+const CACHE = "sdagent-v2";
 const SHELL = [
   "/", "/index.html", "/static/style.css", "/static/app.js",
   "/manifest.webmanifest", "/static/icon-192.png", "/static/icon-512.png",
@@ -31,17 +31,15 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
-  // app shell: cache-first, refresh in background
+  // app shell: network-first so updates apply immediately; cache fallback
+  // keeps the app openable offline
   e.respondWith(
-    caches.match(e.request).then((hit) => {
-      const net = fetch(e.request).then((resp) => {
-        if (resp.ok) {
-          const copy = resp.clone();
-          caches.open(CACHE).then((c) => c.put(e.request, copy));
-        }
-        return resp;
-      }).catch(() => hit);
-      return hit || net;
-    })
+    fetch(e.request).then((resp) => {
+      if (resp.ok) {
+        const copy = resp.clone();
+        caches.open(CACHE).then((c) => c.put(e.request, copy));
+      }
+      return resp;
+    }).catch(() => caches.match(e.request))
   );
 });

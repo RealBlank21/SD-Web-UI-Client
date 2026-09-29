@@ -561,8 +561,12 @@ function switchView(v) {
 /* ------------------------------------------------------------------ misc */
 
 function autosize() {
-  els.input.style.height = "auto";
-  els.input.style.height = Math.min(els.input.scrollHeight, 110) + "px";
+  const t = els.input;
+  // collapse to 0 first so scrollHeight reports true CONTENT height
+  // (measuring at the current height can return the box height on mobile)
+  t.style.height = "0px";
+  // +2px for the 1px top/bottom borders (border-box)
+  t.style.height = Math.min(t.scrollHeight + 2, 110) + "px";
 }
 
 async function newChat() {
@@ -700,6 +704,7 @@ let inited = false;
 async function init() {
   if (inited) return;
   inited = true;
+  switchView("chat");                     // ensure chat + composer are shown
   autosize();
   refreshStatus();
   try {
