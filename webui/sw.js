@@ -13,10 +13,14 @@ self.addEventListener("install", (e) => {
 });
 
 self.addEventListener("activate", (e) => {
-  e.waitUntil(caches.keys().then((keys) =>
-    Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
-  ));
-  self.clients.claim();
+  e.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
+    await self.clients.claim();
+    // tell open pages we took over so they can reload onto fresh assets
+    const msgs = await self.clients.matchAll({ type: "window" });
+    for (const c of msgs) c.postMessage({ type: "sw-takeover", cache: CACHE });
+  })());
 });
 
 self.addEventListener("fetch", (e) => {

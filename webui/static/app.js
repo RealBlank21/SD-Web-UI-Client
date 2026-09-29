@@ -756,5 +756,15 @@ function timelineImages(timeline) {
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").catch(() => { /* optional */ });
+
+    // When a new service worker takes over (e.g. right after an update),
+    // this page was rendered with possibly-stale assets — reload once.
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      if (e.data && e.data.type === "sw-takeover" &&
+          !sessionStorage.getItem("sw-reloaded")) {
+        sessionStorage.setItem("sw-reloaded", "1");
+        location.reload();
+      }
+    });
   });
 }
