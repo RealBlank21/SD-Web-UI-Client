@@ -1,0 +1,15 @@
+# Caddy reverse proxy for the SD Agent web app.
+# Merge the site block below into your Caddyfile (or drop this file into
+# /etc/caddy/ if you use imports).
+
+image.blanketcodestudio.com {
+	# TLS is automatic (ACME / Let's Encrypt)
+
+	reverse_proxy localhost:8000 {
+		# stream the chat SSE events immediately — no buffering
+		flush_interval -1
+	}
+
+	# generous body limit is unnecessary (JSON only), but allow big
+	# metadata responses; default is fine. No extra headers needed.
+}

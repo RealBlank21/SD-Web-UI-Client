@@ -1,0 +1,20 @@
+# copy this to model_guide.txt to give the LLM per-checkpoint prompt/settings
+# guidance (same format as the original example_prompts_for_each_model.txt).
+# Optional — without it the agent uses its built-in example style.
+
+# ---- example entry ----
+# novaAnimeXL_ilV190 (novaAnimeXL_ilV190.safetensors [fa486caafc])
+#
+# Prompt:
+# masterpiece, best quality, amazing quality, very aesthetic, absurdres, newest,
+# 1girl, solo, <character/subject tags>, <composition tags>, <lighting tags>,
+# detailed background, depth of field
+#
+# Negative prompt:
+# photorealistic, 3d, extra digits, multiple views, split view, lowres, bad anatomy,
+# bad hands, worst quality, bad quality, sketch, jpeg artifacts, signature,
+# watermark, (censored, bar_censor, mosaic_censor:1.2), simple background
+#
+# Settings:
+# cfg_scale: 4.5, steps: 20, sampler_name: Euler a
+# width: 832, height: 1216, clip_skip: 2
