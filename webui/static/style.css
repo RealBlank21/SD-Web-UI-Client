@@ -354,6 +354,7 @@ button:active { transform: scale(.97); }
 /* compact mode: native-resolution picture, scaled to the chat column */
 body.compact .gen-meta { display: none; }
 body.compact .tool-start, body.compact .models { display: none; }
+body.compact .msg { max-width: 100%; }
 body.compact .gen {
   align-self: stretch; width: 100%; max-width: 100%;
   background: transparent; border: 0; border-radius: 0;
