@@ -125,9 +125,11 @@ function addGeneration(evt) {
   const thumbs = el("div", "gen-thumbs");
   for (const f of evt.files || []) {
     const img = document.createElement("img");
-    img.src = "/thumb/" + f.split("/").pop();
+    const name = f.split("/").pop();
+    img.dataset.name = name;
+    img.src = imgSrcFor(name);
     img.loading = "lazy";
-    img.addEventListener("click", () => openLightbox(f.split("/").pop()));
+    img.addEventListener("click", () => openLightbox(name));
     thumbs.appendChild(img);
   }
   card.appendChild(thumbs);
@@ -560,12 +562,25 @@ function switchView(v) {
 
 /* ------------------------------------------------------------- appearance */
 
+// compact shows native-resolution images; verbose uses small thumbnails
+function imgSrcFor(name) {
+  const compact = document.body.classList.contains("compact");
+  return (compact ? "/outputs/" : "/thumb/") + name;
+}
+
+function refreshGenSrcs() {
+  for (const img of els.msgs.querySelectorAll(".gen-thumbs img")) {
+    if (img.dataset.name) img.src = imgSrcFor(img.dataset.name);
+  }
+}
+
 function applyAppearance() {
   const mode = localStorage.getItem("appearance") || "verbose";
   document.body.classList.toggle("compact", mode === "compact");
   for (const b of document.querySelectorAll("#sh-appearance button")) {
     b.classList.toggle("on", b.dataset.mode === mode);
   }
+  refreshGenSrcs();
 }
 
 for (const b of document.querySelectorAll("#sh-appearance button")) {
