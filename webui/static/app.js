@@ -558,6 +558,24 @@ function switchView(v) {
   if (v === "gallery") loadGallery();
 }
 
+/* ------------------------------------------------------------- appearance */
+
+function applyAppearance() {
+  const mode = localStorage.getItem("appearance") || "verbose";
+  document.body.classList.toggle("compact", mode === "compact");
+  for (const b of document.querySelectorAll("#sh-appearance button")) {
+    b.classList.toggle("on", b.dataset.mode === mode);
+  }
+}
+
+for (const b of document.querySelectorAll("#sh-appearance button")) {
+  b.addEventListener("click", () => {
+    localStorage.setItem("appearance", b.dataset.mode);
+    applyAppearance();
+    toast(b.dataset.mode === "compact" ? "Compact mode" : "Verbose mode");
+  });
+}
+
 /* ------------------------------------------------------------------ misc */
 
 function autosize() {
@@ -705,6 +723,7 @@ async function init() {
   if (inited) return;
   inited = true;
   switchView("chat");                     // ensure chat + composer are shown
+  applyAppearance();
   autosize();
   refreshStatus();
   try {
