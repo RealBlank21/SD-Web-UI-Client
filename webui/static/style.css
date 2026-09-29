@@ -351,11 +351,17 @@ button:active { transform: scale(.97); }
 }
 .seg button.on { background: var(--panel2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
 
-/* compact mode: images and conversation only */
+/* compact mode: large pictures, no metadata */
 body.compact .gen-meta { display: none; }
-body.compact .gen-thumbs { padding: 6px; }
-body.compact .gen-thumbs img { width: 120px; height: 120px; }
 body.compact .tool-start, body.compact .models { display: none; }
+body.compact .gen { background: transparent; border: 0; border-radius: 0; }
+body.compact .gen-thumbs { padding: 2px 0; gap: 8px; background: transparent; flex-wrap: wrap; }
+body.compact .gen-thumbs img {
+  width: auto; height: auto;
+  max-width: min(100%, 340px); max-height: 62vh;
+  border-radius: 12px;
+  box-shadow: 0 1px 10px rgba(0, 0, 0, .45);
+}
 
 /* ----------------------------------------------------------------- toast */
 
