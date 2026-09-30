@@ -690,6 +690,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e)}, 500)
                 return
             self._json({"ok": True})
+        elif path == "/api/delete_event":
+            body = self._body()
+            try:
+                idx = int(body.get("index", -1))
+            except (TypeError, ValueError):
+                idx = -1
+            tl = self.app.agent.timeline
+            if not (0 <= idx < len(tl)):
+                self._json({"error": "bad index"}, 400)
+                return
+            evt = tl.pop(idx)
+            self.app.agent._save_state()
+            self._json({"ok": True, "removed": evt.get("type")})
         else:
             self.send_error(404)
 

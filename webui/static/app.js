@@ -120,8 +120,10 @@ function addBubble(kind, text) {
   return m;
 }
 
-function addGeneration(evt) {
+function addGeneration(evt, idx) {
   const card = el("div", "gen");
+  if (idx != null) card.dataset.idx = idx;
+  if (evt.files && evt.files.length) card.dataset.file = evt.files[0].split("/").pop();
   const thumbs = el("div", "gen-thumbs");
   for (const f of evt.files || []) {
     const img = document.createElement("img");
@@ -194,20 +196,21 @@ function lastTool() {
 
 function renderHistory(timeline) {
   els.msgs.textContent = "";
-  for (const evt of timeline) {
-    if (evt.type === "user") addBubble("user", evt.text);
-    else if (evt.type === "reply") addBubble("ai", evt.text);
-    else if (evt.type === "error") addBubble("error", evt.text);
-    else if (evt.type === "tool_error") addBubble("error", `✗ ${evt.name} — ${evt.error}`);
-    else if (evt.type === "generation") { addGeneration(evt); markToolDone(lastTool()); }
-    else if (evt.type === "models") addModels(evt);
-    else if (evt.type === "tool_start") addToolStart(evt.name);
-  }
+  timeline.forEach((evt, i) => {
+    if (evt.type === "user") { const m = addBubble("user", evt.text); m.dataset.idx = i; }
+    else if (evt.type === "reply") { const m = addBubble("ai", evt.text); m.dataset.idx = i; }
+    else if (evt.type === "error") { const m = addBubble("error", evt.text); m.dataset.idx = i; }
+    else if (evt.type === "tool_error") { const m = addBubble("error", `✗ ${evt.name} — ${evt.error}`); m.dataset.idx = i; }
+    else if (evt.type === "generation") { addGeneration(evt, i); markToolDone(lastTool()); }
+    else if (evt.type === "models") { addModels(evt); els.msgs.lastChild.dataset.idx = i; }
+    else if (evt.type === "tool_start") { addToolStart(evt.name); els.msgs.lastChild.dataset.idx = i; }
+  });
   if (!timeline.length) {
     const hint = el("div", "empty");
     hint.innerHTML = '<div class="empty-spark">✦</div>Describe an image and the agent will draw it.';
     els.msgs.appendChild(hint);
   }
+  evtCounter = timeline.length;
   scrollDown(false);
 }
 
@@ -260,6 +263,11 @@ async function sendMessage() {
   if (!text || busy) return;
   els.input.value = "";
   autosize();
+  await sendText(text);
+}
+
+async function sendText(text) {
+  if (!text || busy) return;
   setBusy(true);
   switchView("chat");
 
@@ -328,9 +336,18 @@ function consumeSSE(resp) {
   return next();
 }
 
+let evtCounter = 0;       // next timeline index for live events
+
+function tagIdx(node) {
+  node.dataset.idx = evtCounter++;
+  return node;
+}
+
 function handleEvent(evt) {
   switch (evt.type) {
-    case "user": break; // already shown
+    case "user":
+      evtCounter++;
+      break; // already shown
     case "status":
       pill(esc(evt.text), false);
       break;
@@ -344,16 +361,18 @@ function handleEvent(evt) {
     case "tool_start":
       markToolDone(lastTool());
       addToolStart(evt.name);
+      tagIdx(els.msgs.lastChild);
       pill(evt.name + "…", false);
       break;
     case "generation":
       markToolDone(evt.gen && (evt.gen.denoising_strength != null) ? "edit_image" : "generate_image");
-      addGeneration(evt);
+      addGeneration(evt, evtCounter++);
       pill("done — loading images…", false);
       break;
     case "models":
       markToolDone("list_sd_models");
       addModels(evt);
+      tagIdx(els.msgs.lastChild);
       break;
     case "tool_error":
       markToolDone(lastTool());
@@ -362,12 +381,12 @@ function handleEvent(evt) {
     case "reply":
       stopProgressPolling();
       markToolDone(lastTool());
-      addBubble("ai", evt.text);
+      tagIdx(addBubble("ai", evt.text));
       break;
     case "error":
       stopProgressPolling();
       markToolDone(lastTool());
-      addBubble("error", evt.text);
+      tagIdx(addBubble("error", evt.text));
       break;
     case "done":
       stopProgressPolling();
@@ -638,6 +657,134 @@ async function deleteImage(name) {
   }
 }
 
+/* --------------------------------------------- context menu (hold / right-click) */
+
+const ctxEl = $("ctx"), ctxCard = $("ctx-card");
+let lpTimer = null, lpStart = null;
+
+function openCtx(items, previewSrc) {
+  ctxCard.textContent = "";
+  if (previewSrc) {
+    const pv = el("div", "ctx-preview");
+    const img = document.createElement("img");
+    img.src = previewSrc;
+    pv.appendChild(img);
+    ctxCard.appendChild(pv);
+  }
+  for (const it of items) {
+    const b = el("button", it.danger ? "danger" : "", it.label);
+    b.addEventListener("click", () => { closeCtx(); it.action(); });
+    ctxCard.appendChild(b);
+  }
+  ctxEl.hidden = false;
+}
+
+function closeCtx() { ctxEl.hidden = true; }
+
+ctxEl.addEventListener("click", (e) => { if (e.target === ctxEl) closeCtx(); });
+
+function ctxItemsFor(el) {
+  if (el.classList.contains("gen")) {
+    const name = el.dataset.file;
+    const items = [];
+    if (name) items.push({ label: "↻ Regenerate", action: () => openRegen(name) });
+    if (name) items.push({ label: "✎ Edit in chat", action: () => {
+      switchView("chat");
+      els.input.value = `Edit ${name} — `;
+      autosize(); els.input.focus(); els.send.classList.add("ready");
+    }});
+    items.push({ label: "🗑 Delete from chat", danger: true, action: () => deleteChatEvent(el) });
+    return { items, previewSrc: name ? "/thumb/" + name : null };
+  }
+  if (el.classList.contains("msg")) {
+    const items = [];
+    if (!el.classList.contains("error")) {
+      items.push({ label: "⧉ Copy", action: () => copyText(el.textContent) });
+    }
+    items.push({ label: "🗑 Delete", danger: true, action: () => deleteChatEvent(el) });
+    return { items, previewSrc: null };
+  }
+  return null;
+}
+
+async function deleteChatEvent(el) {
+  const idx = el.dataset.idx;
+  if (idx == null) { el.remove(); return; }
+  if (!confirm("Remove this from the chat?")) return;
+  try {
+    await api("/api/delete_event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index: +idx }),
+    });
+    el.remove();
+  } catch (e) {
+    if (e.message !== "locked") toast("Delete failed: " + e.message, true);
+  }
+}
+
+els.msgs.addEventListener("contextmenu", (e) => {
+  const target = e.target.closest(".gen, .msg");
+  if (!target) return;
+  e.preventDefault();
+  const ctx = ctxItemsFor(target);
+  if (ctx) openCtx(ctx.items, ctx.previewSrc);
+});
+
+els.msgs.addEventListener("touchstart", (e) => {
+  const target = e.target.closest(".gen, .msg");
+  if (!target || busy) return;
+  lpStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, target };
+  lpTimer = setTimeout(() => {
+    lpTimer = null;
+    if (navigator.vibrate) navigator.vibrate(25);
+    const ctx = ctxItemsFor(lpStart.target);
+    if (ctx) openCtx(ctx.items, ctx.previewSrc);
+    lpStart = null;
+  }, 550);
+}, { passive: true });
+
+els.msgs.addEventListener("touchmove", (e) => {
+  if (!lpTimer || !lpStart) return;
+  const dx = e.touches[0].clientX - lpStart.x;
+  const dy = e.touches[0].clientY - lpStart.y;
+  if (dx * dx + dy * dy > 144) { clearTimeout(lpTimer); lpTimer = null; }
+}, { passive: true });
+
+els.msgs.addEventListener("touchend", () => {
+  if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+}, { passive: true });
+
+/* ------------------------------------------------------- regenerate sheet */
+
+let regenName = null;
+const regenEl = $("regen"), regenText = $("regen-text");
+
+function openRegen(name) {
+  regenName = name;
+  regenText.value = "";
+  regenEl.hidden = false;
+  setTimeout(() => regenText.focus(), 60);
+}
+
+$("regen-cancel").addEventListener("click", () => { regenEl.hidden = true; });
+regenEl.addEventListener("click", (e) => { if (e.target === regenEl) regenEl.hidden = true; });
+$("regen-go").addEventListener("click", () => {
+  const instr = regenText.value.trim();
+  regenEl.hidden = true;
+  if (!regenName) return;
+  const text = instr
+    ? `Regenerate ${regenName} — ${instr}`
+    : `Regenerate ${regenName}`;
+  sendText(text);
+});
+regenText.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    $("regen-go").click();
+  }
+});
+
 /* ----------------------------------------------------------------- wires */
 
 els.send.addEventListener("click", sendMessage);
@@ -728,6 +875,10 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "ArrowRight") lbMove(1);
   } else if (e.key === "Escape" && !els.settings.hidden) {
     els.settings.hidden = true;
+  } else if (e.key === "Escape" && !ctxEl.hidden) {
+    closeCtx();
+  } else if (e.key === "Escape" && !regenEl.hidden) {
+    regenEl.hidden = true;
   }
 });
 

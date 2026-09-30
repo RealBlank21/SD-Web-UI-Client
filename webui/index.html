@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=9">
+<link rel="stylesheet" href="/static/style.css?v=11">
 </head>
 <body>
 
@@ -166,10 +166,27 @@
   </div>
 </div>
 
+<div id="ctx" hidden>
+  <div class="ctx-card" id="ctx-card"></div>
+</div>
+
+<div id="regen" hidden>
+  <div class="regen-card">
+    <b>Regenerate image</b>
+    <p class="dim">Describe the change — or leave empty for a fresh variation.</p>
+    <textarea id="regen-text" rows="3" placeholder="e.g. make the shirt a hoodie"
+              enterkeyhint="done"></textarea>
+    <div class="regen-actions">
+      <button id="regen-cancel">Cancel</button>
+      <button id="regen-go">Regenerate</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" hidden></div>
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=10"></script>
+<script src="/static/app.js?v=11"></script>
 </body>
 </html>

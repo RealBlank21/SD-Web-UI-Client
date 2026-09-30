@@ -382,3 +382,68 @@ body.compact .gen-thumbs img {
 }
 #toast.err { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, var(--line)); }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
+
+/* ------------------------------------------------- context menu (hold) */
+
+#ctx {
+  position: fixed; inset: 0; z-index: 70;
+  background: rgba(5, 7, 12, .6);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.ctx-card {
+  width: 100%; max-width: 300px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 16px; overflow: hidden;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .5);
+}
+.ctx-card button {
+  display: flex; width: 100%; text-align: left;
+  padding: 13px 18px; font-size: 14.5px; gap: 10px; align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+.ctx-card button:last-child { border-bottom: 0; }
+.ctx-card button:active { background: var(--panel2); }
+.ctx-card button.danger { color: var(--err); }
+.ctx-card .ctx-preview {
+  max-height: 120px; margin: 14px 14px 4px; border-radius: 10px;
+  display: flex; justify-content: center; overflow: hidden;
+}
+.ctx-card .ctx-preview img { max-width: 100%; max-height: 120px; border-radius: 10px; }
+
+/* ------------------------------------------------------- regen sheet */
+
+#regen {
+  position: fixed; inset: 0; z-index: 75;
+  background: rgba(5, 7, 12, .7);
+  display: flex; align-items: flex-end;
+}
+.regen-card {
+  width: 100%;
+  background: var(--panel); border-top: 1px solid var(--line);
+  border-radius: 18px 18px 0 0;
+  padding: 16px 16px calc(env(safe-area-inset-bottom) + 16px);
+  display: flex; flex-direction: column; gap: 10px;
+}
+@media (min-width: 640px) {
+  #regen { align-items: center; justify-content: center; }
+  .regen-card { width: 440px; border-radius: 18px; border: 1px solid var(--line); }
+}
+.regen-card b { font-size: 15.5px; }
+.regen-card p { font-size: 12.5px; }
+#regen-text {
+  width: 100%; resize: none; font: inherit; font-size: 15px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 11px;
+  padding: 10px 12px; outline: none;
+}
+#regen-text:focus { border-color: #4a3f78; }
+.regen-actions { display: flex; gap: 8px; }
+.regen-actions button {
+  flex: 1; padding: 11px; border-radius: 11px; font-size: 14px;
+  background: var(--panel2); border: 1px solid var(--line);
+}
+.regen-actions #regen-go {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #14101f; border: 0;
+}
