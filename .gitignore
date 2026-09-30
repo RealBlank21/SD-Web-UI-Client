@@ -5,3 +5,4 @@ outputs/
 .venv/
 cookies.txt
 body.json
+deploy/remote.json
