@@ -141,7 +141,12 @@ def load_session_secret() -> bytes:
 CHARS_FILE = DATA_DIR / "characters.json"
 CHATS_DIR = DATA_DIR / "chats"
 AVATAR_DIR = DATA_DIR / "avatars"
+COVER_DIR = DATA_DIR / "covers"     # opening images: char + scenario covers
 CHAR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+# cover file keys: "char-<cid>" or "sc-<cid>.<sid>" (dot = char/scen split)
+COVER_KEY_RE = re.compile(
+    r"^(?:char-[a-z0-9][a-z0-9-]{0,40}"
+    r"|sc-[a-z0-9][a-z0-9-]{0,40}\.[a-z0-9][a-z0-9-]{0,48})$")
 CHAT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{0,40}$")
 DEFAULT_CHAT_FILE = CHATS_DIR / "default.json"
 
@@ -181,6 +186,77 @@ def save_characters(chars: list) -> None:
 def slugify(name: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return s[:40] or "char"
+
+
+# ------------------------------------------------------------------- covers
+
+def cover_file(key: str) -> Path | None:
+    """Existing cover image for a key: covers/<key>.<ext>."""
+    if not COVER_KEY_RE.match(key or ""):
+        return None
+    try:
+        for f in COVER_DIR.glob(key + ".*"):
+            return f
+    except OSError:
+        pass
+    return None
+
+
+def cover_url(key: str) -> str:
+    """Public URL of a cover (mtime-versioned), or '' when there is none."""
+    f = cover_file(key)
+    if f and f.is_file():
+        try:
+            return ("/api/cover/" + key + "?v="
+                    + str(int(f.stat().st_mtime)))
+        except OSError:
+            pass
+    return ""
+
+
+def write_cover(key: str, dataurl: str) -> bool:
+    """Decode a data:image URL into covers/<key>.<ext>, replacing any
+    previous cover for the key (the extension may change between saves)."""
+    m = re.match(r"data:image/(png|jpe?g|webp);base64,(.+)", dataurl, re.S)
+    if not m or len(dataurl) > 12_000_000:
+        return False
+    ext = "jpg" if m.group(1).startswith("jp") else m.group(1)
+    try:
+        data = base64.b64decode(m.group(2))
+        COVER_DIR.mkdir(parents=True, exist_ok=True)
+        for old in COVER_DIR.glob(key + ".*"):
+            old.unlink()
+        (COVER_DIR / (key + "." + ext)).write_bytes(data)
+        return True
+    except Exception:
+        return False
+
+
+def remove_cover(key: str) -> None:
+    try:
+        for old in COVER_DIR.glob(key + ".*"):
+            old.unlink()
+    except OSError:
+        pass
+
+
+# One-shot meta prompt for the character form's "Generate with AI" button.
+# Deliberately independent of the roleplay system prompt.
+CHAR_MAKER_PROMPT = (
+    "You design roleplay character cards for a chat app that also generates "
+    "images with Stable Diffusion. The user gives a loose idea; invent "
+    "fitting details when it is vague. Reply with ONLY a JSON object - no "
+    "markdown, no commentary - with exactly these keys:\n"
+    '"name": the character\'s name (1-4 words)\n'
+    '"appearance": Stable Diffusion booru tags for their fixed look, '
+    "comma-separated (8-20 tags: hair, eyes, body, outfit, distinguishing "
+    "features)\n"
+    '"persona": how they think, speak and behave - 3-6 sentences written as '
+    "directions for a roleplay system prompt\n"
+    '"greeting": their first message in a new chat, in character, with '
+    "*actions in asterisks*, 2-5 sentences\n"
+    'Example shape: {"name": "...", "appearance": "...", "persona": "...", '
+    '"greeting": "..."}')
 
 
 # ------------------------------------------------------------------ personas
@@ -408,16 +484,25 @@ class Agent:
         self._seed_greeting()
 
     def _seed_greeting(self):
-        """First AI message of a fresh chat: the bound scenario's first
-        message if there is one, else the character's greeting."""
+        """Opening events of a fresh chat: a cover image (the bound
+        scenario's first image, else the character's) and the first AI
+        message — the scenario's first message if there is one, else the
+        character's greeting."""
+        cov = ""
         g = ""
         if self.scenario_id and self.char:
             sc = next((s for s in (self.char.get("scenarios") or [])
                        if s.get("id") == self.scenario_id), None)
             if sc:
                 g = (sc.get("first_message") or "").strip()
+                cov = cover_url("sc-" + self.char["id"] + "."
+                                + self.scenario_id)
         if not g:
             g = (self.char or {}).get("greeting", "").strip()
+        if not cov and self.char:
+            cov = cover_url("char-" + self.char["id"])
+        if cov:
+            self.timeline.append({"type": "cover", "src": cov})
         if g:
             self.messages.append({"role": "assistant", "content": g})
             self.timeline.append({"type": "reply", "text": g})
@@ -1309,6 +1394,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_personas_list()
         elif path.startswith("/api/avatar/"):
             self.api_avatar(path[len("/api/avatar/"):])
+        elif path.startswith("/api/cover/"):
+            self.api_cover(path[len("/api/cover/"):])
         elif path == "/api/image_info":
             self.api_image_info()
         else:
@@ -1351,6 +1438,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/regenerate":
             self.api_regenerate()
         elif path == "/api/chat/new":
+            self._body()          # drain request body (keep-alive framing)
             agent = self.app.agent
             if not agent.lock.acquire(blocking=False):
                 self._json({"error": "busy — a turn is already running"},
@@ -1383,6 +1471,10 @@ class Handler(BaseHTTPRequestHandler):
             self.api_scenario_delete()
         elif path == "/api/chat/scenario":
             self.api_chat_scenario()
+        elif path == "/api/char/generate":
+            self.api_char_generate()
+        elif path == "/api/image/generate":
+            self.api_image_generate()
         elif path == "/api/settings":
             self.api_settings()
         elif path == "/api/model":
@@ -1646,6 +1738,17 @@ class Handler(BaseHTTPRequestHandler):
             pass
         return None
 
+    @staticmethod
+    def _scenario_out(cid: str, s: dict) -> dict:
+        """Scenario dict as seen by the client — adds its cover URL."""
+        s = dict(s)
+        cov = cover_url("sc-" + cid + "." + str(s.get("id", "")))
+        if cov:
+            s["cover"] = cov
+        else:
+            s.pop("cover", None)
+        return s
+
     def api_characters_list(self):
         cards = load_characters()
         out = []
@@ -1658,6 +1761,12 @@ class Handler(BaseHTTPRequestHandler):
                                    + "?v=" + str(int(av.stat().st_mtime)))
                 except OSError:
                     pass
+            cov = cover_url("char-" + c["id"])
+            if cov:
+                c["cover"] = cov
+            if isinstance(c.get("scenarios"), list):
+                c["scenarios"] = [self._scenario_out(c["id"], s)
+                                  for s in c["scenarios"]]
             try:
                 c["chats"] = len(self.app.agent._list_chats(c["id"]))
             except Exception:
@@ -1670,6 +1779,14 @@ class Handler(BaseHTTPRequestHandler):
     def api_avatar(self, cid_raw: str):
         cid = _safe_name(cid_raw.strip().lower()) or ""
         f = self._avatar_path(cid)
+        if f and f.is_file():
+            self._file(f, cache="private, max-age=86400")
+        else:
+            self.send_error(404)
+
+    def api_cover(self, key_raw: str):
+        key = _safe_name(key_raw.strip().lower()) or ""
+        f = cover_file(key)
         if f and f.is_file():
             self._file(f, cache="private, max-age=86400")
         else:
@@ -1693,7 +1810,6 @@ class Handler(BaseHTTPRequestHandler):
         card = dict(existing) if existing else {
             "id": cid, "created": int(time.time())}
         card["name"] = name
-        card["tagline"] = str(body.get("tagline", "")).strip()[:200]
         card["appearance"] = str(body.get("appearance", "")).strip()[:4000]
         card["persona"] = str(body.get("persona", "")).strip()[:8000]
         card["greeting"] = str(body.get("greeting", "")).strip()[:2000]
@@ -1726,13 +1842,26 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"data:image/(png|jpe?g|webp);base64,(.+)", avatar,
                      re.S)
         if m and len(avatar) < 3_500_000:
-            AVATAR_DIR.mkdir(parents=True, exist_ok=True)
             ext = "jpg" if m.group(1).startswith("jp") else m.group(1)
             try:
+                AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+                for old in AVATAR_DIR.glob(cid + ".*"):
+                    old.unlink()            # extension may change between saves
                 (AVATAR_DIR / f"{cid}.{ext}").write_bytes(
                     base64.b64decode(m.group(2)))
             except Exception:
                 pass
+        if body.get("avatar_remove"):
+            try:
+                for old in AVATAR_DIR.glob(cid + ".*"):
+                    old.unlink()
+            except OSError:
+                pass
+        cover = str(body.get("cover", "") or "")
+        if cover:
+            write_cover("char-" + cid, cover)
+        if body.get("cover_remove"):
+            remove_cover("char-" + cid)
         if existing:
             cards = [card if c.get("id") == cid else c for c in cards]
         else:
@@ -1792,6 +1921,12 @@ class Handler(BaseHTTPRequestHandler):
             if av:
                 try:
                     av.unlink()
+                except OSError:
+                    pass
+            remove_cover("char-" + cid)
+            for f in COVER_DIR.glob("sc-" + cid + ".*"):
+                try:
+                    f.unlink()
                 except OSError:
                     pass
             self._json({"ok": True})
@@ -1985,13 +2120,20 @@ class Handler(BaseHTTPRequestHandler):
         card["scenarios"] = scenarios
         cards = [card if c.get("id") == cid else c for c in cards]
         save_characters(cards)
+        cover = str(body.get("cover", "") or "")
+        if cover:
+            write_cover(f"sc-{cid}.{sid}", cover)
+        if body.get("cover_remove"):
+            remove_cover(f"sc-{cid}.{sid}")
         agent = self.app.agent
         if agent.char and agent.char["id"] == cid:
             agent.char = card
             if agent.messages and \
                     agent.messages[0].get("role") == "system":
                 agent.messages[0] = agent._sys_msg()
-        self._json({"ok": True, "id": sid, "scenarios": scenarios})
+        self._json({"ok": True, "id": sid,
+                    "scenarios": [self._scenario_out(cid, x)
+                                  for x in scenarios]})
 
     def api_scenario_delete(self):
         body = self._body()
@@ -2009,6 +2151,7 @@ class Handler(BaseHTTPRequestHandler):
         card["scenarios"] = [s for s in scenarios if s.get("id") != sid]
         cards = [card if c.get("id") == cid else c for c in cards]
         save_characters(cards)
+        remove_cover(f"sc-{cid}.{sid}")
         agent = self.app.agent
         if agent.char and agent.char["id"] == cid:
             agent.char = card
@@ -2040,6 +2183,135 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             agent.lock.release()
         self._json({"ok": True, "timeline": agent.timeline})
+
+    def api_char_generate(self):
+        """Character form's 'Generate with AI': LLM drafts a full card
+        (name / appearance tags / persona / greeting) from a description."""
+        body = self._body()          # read first — never leak the body when
+        agent = self.app.agent       # an early error returns on keep-alive
+        if not agent.has_key():
+            self._json({"error": "no_api_key"}, 400)
+            return
+        prompt = str(body.get("prompt", "")).strip()
+        if not prompt:
+            self._json({"error": "describe the character first"}, 400)
+            return
+        try:
+            data = agent.llm_complete(
+                [{"role": "system", "content": CHAR_MAKER_PROMPT},
+                 {"role": "user", "content": prompt[:4000]}],
+                temperature=0.9, max_tokens=1500)
+        except LLMError as e:
+            self._json({"error": scrub_paths(str(e))}, 502)
+            return
+        content = (data["choices"][0].get("message") or {}).get("content") \
+            or ""
+        s, e = content.find("{"), content.rfind("}")
+        d = {}
+        if s >= 0 and e > s:
+            try:
+                parsed = json.loads(content[s:e + 1])
+                if isinstance(parsed, dict):
+                    d = parsed
+            except json.JSONDecodeError:
+                pass
+        if not str(d.get("name", "")).strip():
+            self._json({"error": "the model returned no character — "
+                                 "try again"}, 502)
+            return
+        self._json({
+            "name": str(d.get("name", "")).strip()[:60],
+            "appearance":
+                scrub_paths(str(d.get("appearance", "")).strip())[:4000],
+            "persona":
+                scrub_paths(str(d.get("persona", "")).strip())[:8000],
+            "greeting":
+                scrub_paths(str(d.get("greeting", "")).strip())[:2000],
+        })
+
+    def api_image_generate(self):
+        """One-off SD generation for the character form / scenario page:
+        the avatar (square, cropped client-side style) or an opening cover
+        image. Saves into outputs/ (so it shows in the gallery + lightbox)
+        and returns a data URL the form holds until Save."""
+        agent = self.app.agent
+        body = self._body()          # read first — never leak the body when
+        if not agent.lock.acquire(blocking=False):   # the busy 409 returns
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            purpose = str(body.get("purpose", ""))
+            prompt = str(body.get("prompt", "")).strip()
+            if not prompt:
+                self._json({"error": "prompt required"}, 400)
+                return
+            appearance = str(body.get("appearance", "")).strip()[:4000]
+            if appearance:
+                prompt = ensure_tags(prompt, appearance)
+            card = None
+            cid = str(body.get("char_id", "")).strip()
+            if cid:
+                card = next((c for c in load_characters()
+                             if c.get("id") == cid), None)
+            args: dict = {"prompt": prompt,
+                          "negative_prompt":
+                              str(body.get("negative_prompt", "")).strip()}
+            if purpose == "avatar":
+                args["width"] = args["height"] = 1024   # square to crop from
+            else:
+                size: list = []
+                m = re.match(r"^(\d{3,4})x(\d{3,4})$",
+                             str(body.get("size", "")).strip())
+                if m:
+                    size = [int(m.group(1)), int(m.group(2))]
+                elif isinstance(card, dict) \
+                        and isinstance(card.get("size"), list) \
+                        and len(card["size"]) == 2:
+                    size = card["size"]
+                if len(size) == 2:
+                    args["width"], args["height"] = size
+            cp = (card or {}).get("checkpoint", "")
+            cp = str(cp).strip() if cp else ""
+            if cp:
+                args["model"] = cp
+            try:
+                result = execute_tool(agent.client, "generate_image", args,
+                                      OUT_DIR)
+            except Exception as e:                     # noqa: BLE001 — report
+                self._json({"error": scrub_paths(
+                    f"{type(e).__name__}: {e}")}, 502)
+                return
+            files = [Path(f).name for f in result.get("saved_files", [])]
+            if not files:
+                self._json({"error": "generation produced no image"}, 502)
+                return
+            name = files[0]
+            out: dict = {"ok": True, "name": name, "url": "/outputs/" + name}
+            try:
+                from io import BytesIO
+                from PIL import Image
+                if purpose == "avatar":
+                    with Image.open(OUT_DIR / name) as im:
+                        side = min(im.size)
+                        sq = im.convert("RGB").crop((
+                            (im.width - side) // 2, (im.height - side) // 2,
+                            (im.width + side) // 2, (im.height + side) // 2))
+                        sq.thumbnail((256, 256))
+                        buf = BytesIO()
+                        sq.save(buf, "JPEG", quality=86)
+                    out["avatar"] = ("data:image/jpeg;base64,"
+                                     + base64.b64encode(
+                                         buf.getvalue()).decode())
+                else:
+                    out["cover"] = ("data:image/png;base64,"
+                                    + base64.b64encode(
+                                        (OUT_DIR / name).read_bytes()
+                                    ).decode())
+            except Exception:                          # noqa: BLE001
+                pass                                   # URL-only fallback
+            self._json(out)
+        finally:
+            agent.lock.release()
 
     def api_model(self):
         body = self._body()

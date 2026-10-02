@@ -41,9 +41,18 @@ const els = {
   shUsername: $("sh-username"),
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
   shScene: $("sh-scene"),
-  chName: $("ch-name"), chTagline: $("ch-tagline"),
+  chName: $("ch-name"),
   chAvatarImg: $("ch-avatar-img"), chAvatarBtn: $("ch-avatar-btn"),
-  chAvatarFile: $("ch-avatar-file"),
+  chAvatarFile: $("ch-avatar-file"), chAvatarAi: $("ch-avatar-ai"),
+  chAvatarClear: $("ch-avatar-clear"),
+  chCoverImg: $("ch-cover-img"), chCoverBtn: $("ch-cover-btn"),
+  chCoverFile: $("ch-cover-file"), chCoverAi: $("ch-cover-ai"),
+  chCoverClear: $("ch-cover-clear"), chAiFab: $("ch-aifab"),
+  aiSheet: $("aisheet"), aiTitle: $("ai-title"), aiHint: $("ai-hint"),
+  aiText: $("ai-text"), aiGo: $("ai-go"), aiCancel: $("ai-cancel"),
+  scsCoverImg: $("scs-cover-img"), scsCoverBtn: $("scs-cover-btn"),
+  scsCoverFile: $("scs-cover-file"), scsCoverAi: $("scs-cover-ai"),
+  scsCoverClear: $("scs-cover-clear"),
   chAppearance: $("ch-appearance"), chPersona: $("ch-persona"),
   chGreeting: $("ch-greeting"), chModel: $("ch-model"), chSize: $("ch-size"),
   chTemp: $("ch-temp"), chMaxtok: $("ch-maxtok"),
@@ -352,6 +361,20 @@ function lastTool() {
   return list.length ? list[list.length - 1].dataset.tool : "";
 }
 
+/* opening cover image of a fresh chat (character's or scenario's
+   "first image") — static picture, no carousel / regen menu */
+function addCoverCard(evt) {
+  if (!evt.src) return;
+  const card = el("div", "cover-card");
+  const img = document.createElement("img");
+  img.loading = "lazy";
+  img.alt = "";
+  img.src = evt.src;
+  card.appendChild(img);
+  els.msgs.appendChild(card);
+  scrollDown(true);
+}
+
 function renderHistory(timeline) {
   els.msgs.textContent = "";
   variantIndex.clear();
@@ -361,6 +384,7 @@ function renderHistory(timeline) {
     else if (evt.type === "error") { const m = addBubble("error", evt.text); m.dataset.idx = i; }
     else if (evt.type === "tool_error") { const m = addBubble("error", `✗ ${evt.name} — ${evt.error}`); m.dataset.idx = i; }
     else if (evt.type === "generation") { addGeneration(evt, i); markToolDone(lastTool()); }
+    else if (evt.type === "cover") { addCoverCard(evt); }
     else if (evt.type === "models") { addModels(evt); els.msgs.lastChild.dataset.idx = i; }
     else if (evt.type === "tool_start") { addToolStart(evt.name); els.msgs.lastChild.dataset.idx = i; }
   });
@@ -739,6 +763,9 @@ async function loadModel() {
 let statusModels = [];        // checkpoint titles cache for the char form
 let editCharId = null;        // null = creating new
 let pendingAvatar = "";       // dataURL while editing
+let pendingCover = "";        // character's first image, dataURL while editing
+let pendingScCover = "";      // scenario's first image, dataURL while editing
+let clearAvatar = false, clearCover = false, clearScCover = false;
 
 async function refreshChars() {
   try {
@@ -762,8 +789,7 @@ function charRows(filter) {
     rows.push({ plain: true });
   }
   for (const c of chars) {
-    if (q && !(c.name || "").toLowerCase().includes(q) &&
-        !(c.tagline || "").toLowerCase().includes(q)) continue;
+    if (q && !(c.name || "").toLowerCase().includes(q)) continue;
     rows.push(c);
   }
   return rows;
@@ -809,7 +835,6 @@ function renderCharList() {
     }
     const tx = el("div", "char-text");
     tx.appendChild(el("b", null, c.name || c.id));
-    if (c.tagline) tx.appendChild(el("span", "dim", c.tagline));
     if (c.chats > 0) {
       tx.appendChild(el("span", "dim",
         c.chats + (c.chats === 1 ? " chat" : " chats")));
@@ -850,13 +875,20 @@ function selectChar(id) {
   });
 }
 
+function setPreview(img, clearBtn, src) {
+  if (src) { img.src = src; img.hidden = false; }
+  else { img.removeAttribute("src"); img.hidden = true; }
+  if (clearBtn) clearBtn.hidden = !src;
+}
+
 function openCharForm(card) {
   editCharId = card ? card.id : null;
   pendingAvatar = "";
+  pendingCover = "";
+  clearAvatar = clearCover = clearScCover = false;
   scenarioCharId = card ? card.id : null;
   els.chTitle.textContent = card ? "Edit character" : "New character";
   els.chName.value = card ? card.name : "";
-  els.chTagline.value = card ? (card.tagline || "") : "";
   els.chAppearance.value = card ? (card.appearance || "") : "";
   els.chPersona.value = card ? (card.persona || "") : "";
   els.chGreeting.value = card ? (card.greeting || "") : "";
@@ -879,6 +911,9 @@ function openCharForm(card) {
   } else {
     els.chAvatarImg.hidden = true;
   }
+  els.chAvatarClear.hidden = !(card && card.avatar);
+  setPreview(els.chCoverImg, els.chCoverClear,
+    (card && card.cover) || "");
   els.chDelete.hidden = !card;
   renderScenarioList();
   els.pageChform.hidden = false;
@@ -894,7 +929,6 @@ async function saveCharForm() {
   const payload = {
     id: editCharId || "",
     name,
-    tagline: els.chTagline.value.trim(),
     appearance: els.chAppearance.value.trim(),
     persona: els.chPersona.value.trim(),
     greeting: els.chGreeting.value.trim(),
@@ -904,6 +938,9 @@ async function saveCharForm() {
   if (!isNaN(temp)) payload.temp = Math.min(2, Math.max(0.1, temp));
   if (!isNaN(mtok)) payload.max_tokens = Math.min(8192, Math.max(16, mtok));
   if (pendingAvatar) payload.avatar = pendingAvatar;
+  if (clearAvatar) payload.avatar_remove = true;
+  if (pendingCover) payload.cover = pendingCover;
+  if (clearCover) payload.cover_remove = true;
   const btn = els.cfSave;
   const orig = btn.textContent;
   btn.disabled = true;
@@ -920,6 +957,8 @@ async function saveCharForm() {
       activeCharId = d.id;
     }
     pendingAvatar = "";
+    pendingCover = "";
+    clearAvatar = clearCover = false;
     els.pageChform.hidden = true;
     await refreshChars();
     refreshStatus();
@@ -968,13 +1007,159 @@ function pickAvatar(file) {
       ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2,
         side, side, 0, 0, S, S);
       pendingAvatar = canvas.toDataURL("image/jpeg", 0.85);
+      clearAvatar = false;
       els.chAvatarImg.src = pendingAvatar;
       els.chAvatarImg.hidden = false;
+      els.chAvatarClear.hidden = false;
     };
     img.src = reader.result;
   };
   reader.readAsDataURL(file);
 }
+
+/* cover (first image) picker — keep native resolution when it fits, else
+   scale the long side to 1216px so the save payload stays reasonable */
+function pickCover(file, which) {
+  if (!file || !file.type.startsWith("image/")) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const apply = (dataUrl) => {
+      if (which === "sc") {
+        pendingScCover = dataUrl; clearScCover = false;
+        setPreview(els.scsCoverImg, els.scsCoverClear, pendingScCover);
+      } else {
+        pendingCover = dataUrl; clearCover = false;
+        setPreview(els.chCoverImg, els.chCoverClear, pendingCover);
+      }
+    };
+    const img = new Image();
+    img.onload = () => {
+      const long = Math.max(img.width, img.height);
+      if (long <= 1216) { apply(reader.result); return; }
+      const k = 1216 / long;
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * k);
+      canvas.height = Math.round(img.height * k);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      apply(canvas.toDataURL("image/jpeg", 0.9));
+    };
+    img.onerror = () => apply(reader.result);
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+/* ------------------------------- AI generate sheet (character form) ----- */
+
+let aiMode = null;
+
+const AI_MODES = {
+  character: {
+    title: "Generate character",
+    hint: "Describe the character you want — the AI drafts the name, look "
+          + "tags, personality and greeting.",
+    placeholder: "e.g. a dry-humored knight who secretly paints flowers",
+    prefill: () => "",
+  },
+  avatar: {
+    title: "Generate avatar",
+    hint: "Describe the portrait — the character's look tags are added "
+          + "automatically. The result is square.",
+    placeholder: "e.g. portrait, soft candlelight, slight smile",
+    prefill: () => els.chAppearance.value.trim(),
+  },
+  "char-cover": {
+    title: "Generate first image",
+    hint: "Describe the opening scene — this image opens every new chat "
+          + "with this character.",
+    placeholder: "e.g. leaning on a rainy window at night, glancing back",
+    prefill: () => els.chAppearance.value.trim(),
+  },
+  "scenario-cover": {
+    title: "Generate first image",
+    hint: "Describe the scene — this image shows when a chat with this "
+          + "scenario starts.",
+    placeholder: "e.g. a rooftop in heavy rain, city lights below",
+    prefill: () => els.scsDesc.value.trim().slice(0, 600),
+  },
+};
+
+function openAiSheet(mode) {
+  const m = AI_MODES[mode];
+  if (!m) return;
+  aiMode = mode;
+  els.aiTitle.textContent = m.title;
+  els.aiHint.textContent = m.hint;
+  els.aiText.value = m.prefill();
+  els.aiText.placeholder = m.placeholder;
+  els.aiGo.disabled = false;
+  els.aiGo.textContent = "Generate";
+  els.aiSheet.hidden = false;
+  setTimeout(() => els.aiText.focus(), 60);
+}
+
+async function runAiGenerate() {
+  const mode = aiMode;
+  if (!mode) return;
+  const text = els.aiText.value.trim();
+  if (!text) { toast("Describe it first", true); return; }
+  const btn = els.aiGo;
+  btn.disabled = true;
+  btn.textContent = "Generating…";
+  try {
+    if (mode === "character") {
+      const d = await api("/api/char/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: text }),
+      });
+      els.chName.value = d.name || els.chName.value;
+      els.chAppearance.value = d.appearance || "";
+      els.chPersona.value = d.persona || "";
+      els.chGreeting.value = d.greeting || "";
+      els.aiSheet.hidden = true;
+      toast("Character drafted — review and save");
+      return;
+    }
+    const payload = {
+      purpose: mode === "avatar" ? "avatar"
+        : mode === "char-cover" ? "char_cover" : "scenario_cover",
+      prompt: text,
+      char_id: editCharId || "",
+      appearance: els.chAppearance.value.trim(),
+      size: els.chSize.value,
+    };
+    if (mode === "scenario-cover") payload.scenario_id = editScenarioId || "";
+    const d = await api("/api/image/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (mode === "avatar") {
+      pendingAvatar = d.avatar || "";
+      setPreview(els.chAvatarImg, els.chAvatarClear, pendingAvatar);
+    } else if (mode === "char-cover") {
+      pendingCover = d.cover || "";
+      setPreview(els.chCoverImg, els.chCoverClear, pendingCover);
+    } else {
+      pendingScCover = d.cover || "";
+      setPreview(els.scsCoverImg, els.scsCoverClear, pendingScCover);
+    }
+    els.aiSheet.hidden = true;
+    toast((pendingAvatar || pendingCover || pendingScCover)
+      ? "Generated — save to keep it" : "Image is in the gallery");
+  } catch (e) {
+    if (e.message !== "locked") toast("Generate failed: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Generate";
+  }
+}
+
+els.aiGo.addEventListener("click", runAiGenerate);
+els.aiCancel.addEventListener("click", () => {
+  els.aiSheet.hidden = true;
+});
 
 function charCtx(row) {
   const id = row.dataset.charid;
@@ -1013,6 +1198,24 @@ els.chAvatarFile.addEventListener("change", () => {
   if (els.chAvatarFile.files[0]) pickAvatar(els.chAvatarFile.files[0]);
   els.chAvatarFile.value = "";
 });
+els.chAvatarAi.addEventListener("click", () => openAiSheet("avatar"));
+els.chAvatarClear.addEventListener("click", () => {
+  pendingAvatar = "";
+  clearAvatar = true;
+  setPreview(els.chAvatarImg, els.chAvatarClear, "");
+});
+els.chCoverBtn.addEventListener("click", () => els.chCoverFile.click());
+els.chCoverFile.addEventListener("change", () => {
+  if (els.chCoverFile.files[0]) pickCover(els.chCoverFile.files[0], "ch");
+  els.chCoverFile.value = "";
+});
+els.chCoverAi.addEventListener("click", () => openAiSheet("char-cover"));
+els.chCoverClear.addEventListener("click", () => {
+  pendingCover = "";
+  clearCover = true;
+  setPreview(els.chCoverImg, els.chCoverClear, "");
+});
+els.chAiFab.addEventListener("click", () => openAiSheet("character"));
 els.charSearch.addEventListener("input", renderCharList);
 
 /* long-press / right-click on character cards */
@@ -1860,10 +2063,13 @@ function renderScenarioList() {
 
 function openScenarioForm(s) {
   editScenarioId = s ? s.id : null;
+  pendingScCover = "";
+  clearScCover = false;
   els.scsTitle.textContent = s ? "Edit scenario" : "New scenario";
   els.scsName.value = s ? (s.name || "") : "";
   els.scsDesc.value = s ? (s.description || "") : "";
   els.scsFirst.value = s ? (s.first_message || "") : "";
+  setPreview(els.scsCoverImg, els.scsCoverClear, (s && s.cover) || "");
   els.scsDelete.hidden = !s;
   els.pageScenario.hidden = false;
   setTimeout(() => els.scsName.focus(), 60);
@@ -1872,21 +2078,26 @@ function openScenarioForm(s) {
 async function saveScenarioForm() {
   const name = els.scsName.value.trim();
   if (!name) { toast("Name required", true); return; }
+  const payload = {
+    char_id: scenarioCharId,
+    id: editScenarioId || "",
+    name,
+    description: els.scsDesc.value.trim(),
+    first_message: els.scsFirst.value.trim(),
+  };
+  if (pendingScCover) payload.cover = pendingScCover;
+  if (clearScCover) payload.cover_remove = true;
   try {
     const d = await api("/api/scenario", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        char_id: scenarioCharId,
-        id: editScenarioId || "",
-        name,
-        description: els.scsDesc.value.trim(),
-        first_message: els.scsFirst.value.trim(),
-      }),
+      body: JSON.stringify(payload),
     });
     const card = currentScenarioCard();
     if (card) card.scenarios = d.scenarios || [];
     renderScenarioList();
+    pendingScCover = "";
+    clearScCover = false;
     els.pageScenario.hidden = true;
     toast("Scenario saved");
   } catch (e) {
@@ -1958,6 +2169,17 @@ $("scs-back").addEventListener("click", () => {
 $("scs-save").addEventListener("click", saveScenarioForm);
 $("scs-delete").addEventListener("click", () =>
   deleteScenarioById(editScenarioId));
+els.scsCoverBtn.addEventListener("click", () => els.scsCoverFile.click());
+els.scsCoverFile.addEventListener("change", () => {
+  if (els.scsCoverFile.files[0]) pickCover(els.scsCoverFile.files[0], "sc");
+  els.scsCoverFile.value = "";
+});
+els.scsCoverAi.addEventListener("click", () => openAiSheet("scenario-cover"));
+els.scsCoverClear.addEventListener("click", () => {
+  pendingScCover = "";
+  clearScCover = true;
+  setPreview(els.scsCoverImg, els.scsCoverClear, "");
+});
 els.scList.addEventListener("contextmenu", (e) => {
   const target = e.target.closest(".sc-row");
   if (!target) return;
@@ -2033,6 +2255,8 @@ document.addEventListener("keydown", (e) => {
     closeCtx();
   } else if (e.key === "Escape" && !regenEl.hidden) {
     regenEl.hidden = true;
+  } else if (e.key === "Escape" && !els.aiSheet.hidden) {
+    els.aiSheet.hidden = true;
   }
 });
 

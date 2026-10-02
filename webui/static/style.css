@@ -336,6 +336,15 @@ button:active { transform: scale(.97); }
 /* tool/model rows are internal bookkeeping — hidden; details live in the lightbox */
 .tool-start, .models { display: none; }
 
+/* opening cover image of a fresh chat — same picture-first look as a
+   generation card, but static (no carousel, no regen menu) */
+.cover-card { align-self: stretch; width: 100%; }
+.cover-card img {
+  width: auto; height: auto; max-width: 100%;
+  border-radius: 12px;
+  box-shadow: 0 1px 10px rgba(0, 0, 0, .45);
+}
+
 .chip {
   font-size: 11px; color: var(--dim);
   background: var(--panel2); border-radius: 7px; padding: 2px 8px;
@@ -569,10 +578,29 @@ button:active { transform: scale(.97); }
 
 /* character form (sheet) */
 .ch-avatar { width: 56px; height: 56px; border-radius: 14px; object-fit: cover; flex: none; }
-.row-avatar { align-items: center; }
-#ch-avatar-btn { padding: 0 16px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 13px; height: 40px; }
+.row-avatar { align-items: center; flex-wrap: wrap; }
+#ch-avatar-btn, .imgrow-btn { padding: 0 16px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 13px; height: 40px; flex: none; }
+.aibtn {
+  padding: 0 13px; height: 40px; border-radius: 10px; flex: none;
+  font-size: 13px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel2));
+}
+.aibtn:active { transform: scale(.95); }
+.clear-img {
+  width: 34px; height: 34px; border-radius: 50%; flex: none;
+  border: 1px solid var(--line); background: var(--panel2);
+  color: var(--dim); font-size: 13px; line-height: 1;
+}
+.clear-img:active { color: var(--err); transform: scale(.92); }
+.cover-prev {
+  width: 96px; height: 60px; border-radius: 10px; object-fit: cover; flex: none;
+  border: 1px solid var(--line); background: var(--panel2);
+}
 #ch-form .row button { margin-top: 0; }
 #ch-delete { margin-top: 10px; }
+/* the AI FAB floats over the character form page */
+#ch-aifab span { font-size: 26px; color: #14101f; }
+#page-chform .page-body { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
 
 /* compact mode is gone: the chat is always picture-first (styles merged above) */
 
@@ -580,7 +608,7 @@ button:active { transform: scale(.97); }
 
 #toast {
   position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 80px);
-  transform: translateX(-50%); z-index: 80;
+  transform: translateX(-50%); z-index: 86;
   background: var(--panel2); border: 1px solid var(--line);
   color: var(--text); font-size: 13px;
   border-radius: 99px; padding: 9px 18px;
@@ -618,13 +646,15 @@ button:active { transform: scale(.97); }
 }
 .ctx-card .ctx-preview img { max-width: 100%; max-height: 120px; border-radius: 10px; }
 
-/* ------------------------------------------------------- regen sheet */
+/* ------------------------------------------------- regen / AI sheets */
 
-#regen {
+#regen, #aisheet {
   position: fixed; inset: 0; z-index: 75;
   background: rgba(5, 7, 12, .7);
   display: flex; align-items: flex-end;
 }
+/* the AI sheet opens on top of full-screen pages (z-80) */
+#aisheet { z-index: 85; }
 .regen-card {
   width: 100%;
   background: var(--panel); border-top: 1px solid var(--line);
@@ -633,7 +663,7 @@ button:active { transform: scale(.97); }
   display: flex; flex-direction: column; gap: 10px;
 }
 @media (min-width: 640px) {
-  #regen { align-items: center; justify-content: center; }
+  #regen, #aisheet { align-items: center; justify-content: center; }
   .regen-card { width: 440px; border-radius: 18px; border: 1px solid var(--line); }
 }
 .regen-card b { font-size: 15.5px; }
