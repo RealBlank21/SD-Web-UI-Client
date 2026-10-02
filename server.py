@@ -43,12 +43,13 @@ sys.path.insert(0, str(ROOT))
 
 from sd_client import SDClient, SDWebUIError
 from agent_core import (                      # vendored agent brain
+    DEFAULT_BASE_PROMPT,
     DEFAULT_LLM,
     LLMError,
     MAX_TOOL_ROUNDS,
-    SYSTEM_PROMPT,
     _clean_assistant_msg,
     _is_auth_error,
+    effective_system_prompt,
     execute_tool,
 )
 
@@ -93,6 +94,7 @@ DEFAULT_CONFIG = {
     "openrouter_key": "",
     "llm_models": [DEFAULT_LLM],
     "sd_url": "http://100.93.220.68:7860",
+    "system_prompt": "",   # custom system message; "" = built-in default
 }
 
 
@@ -136,18 +138,27 @@ class Agent:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.client = SDClient(base_url=cfg["sd_url"])
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [self._sys_msg()]
         self.timeline = []
         self.lock = threading.Lock()     # one turn at a time
         self.status_cb = None            # set while a turn streams
 
     # ------------------------------------------------------------ config
 
+    def _sys_msg(self) -> dict:
+        """Opening system message (custom override or built-in default)."""
+        return {"role": "system",
+                "content": effective_system_prompt(
+                    self.cfg.get("system_prompt"))}
+
     def apply_config(self, cfg: dict):
-        """Hot-apply new settings (LLM chain / key / SD URL)."""
+        """Hot-apply new settings (LLM chain / key / SD URL / system msg)."""
         self.cfg = cfg
         if self.client.base_url != cfg["sd_url"]:
             self.client = SDClient(base_url=cfg["sd_url"])
+        # keep the running conversation on the new system message
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0] = self._sys_msg()
 
     @property
     def llm_models(self) -> list[str]:
@@ -197,7 +208,7 @@ class Agent:
     # -------------------------------------------------------------- turn
 
     def clear(self):
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.messages = [self._sys_msg()]
         self.timeline = []
         self._save_state()
 
@@ -216,8 +227,7 @@ class Agent:
         try:
             d = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             if isinstance(d.get("messages"), list):
-                self.messages = [{"role": "system",
-                                  "content": SYSTEM_PROMPT}] + d["messages"]
+                self.messages = [self._sys_msg()] + d["messages"]
             self.timeline = d.get("timeline") or []
         except Exception:
             pass
@@ -819,11 +829,15 @@ class Handler(BaseHTTPRequestHandler):
             key = cfg["openrouter_key"]
             masked = (key[:7] + "…" + key[-4:]) if len(key) > 14 \
                 else ("set" if key else "")
+            override = cfg.get("system_prompt") or ""
             self._json({"sd_url": cfg["sd_url"], "llm": cfg["llm_models"],
-                        "key_masked": masked, "has_key": bool(key)})
+                        "key_masked": masked, "has_key": bool(key),
+                        "system_prompt": override or DEFAULT_BASE_PROMPT,
+                        "system_prompt_custom": bool(override)})
             return
         body = self._body()
         cfg = dict(agent.cfg)
+        sys_touched = False
         if "sd_url" in body:
             url = str(body["sd_url"]).strip().rstrip("/")
             if url and not url.startswith(("http://", "https://")):
@@ -846,9 +860,26 @@ class Handler(BaseHTTPRequestHandler):
                                      "key (should start with sk-or-)"}, 400)
                 return
             cfg["openrouter_key"] = key
+        if body.get("system_prompt_reset"):
+            cfg["system_prompt"] = ""          # back to the built-in default
+            sys_touched = True
+        elif "system_prompt" in body:
+            text = str(body["system_prompt"]).strip()
+            if len(text) > 32000:
+                self._json({"error": "system message too long "
+                                     "(32000 characters max)"}, 400)
+                return
+            cfg["system_prompt"] = text        # empty = default
+            sys_touched = True
         save_config(cfg)
         agent.apply_config(cfg)
-        self._json({"ok": True})
+        if sys_touched:
+            self._json({"ok": True,
+                        "system_prompt": cfg["system_prompt"]
+                        or DEFAULT_BASE_PROMPT,
+                        "system_prompt_custom": bool(cfg["system_prompt"])})
+        else:
+            self._json({"ok": True})
 
     def api_model(self):
         body = self._body()
@@ -932,6 +963,7 @@ def main():
           f"{'' if password else '  (MISSING!)'}")
     print(f"  Key     : {'configured' if agent.has_key() else 'NOT set — add in Settings'}")
     print(f"  LLM     : {', '.join(cfg['llm_models'])}")
+    print(f"  SysMsg  : {'custom' if cfg.get('system_prompt') else 'default'}")
     print(f"  SD      : {cfg['sd_url']}  [{model}]")
     print(f"  Output  : {OUT_DIR}")
     for u in advertise_urls(args.port):

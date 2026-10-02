@@ -21,6 +21,7 @@ const els = {
   settings: $("settings"), shModels: $("sh-models"), shLoad: $("sh-load"),
   shCur: $("sh-cur"), shSd: $("sh-sd"), shLlm: $("sh-llm"), shKey: $("sh-key"),
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
+  shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
   toast: $("toast"),
 };
 
@@ -501,6 +502,8 @@ async function openSettings() {
       els.shKeymask.textContent = cfg.key_masked ? `· ${cfg.key_masked}` : "· not set";
       els.shSd.value = cfg.sd_url || "";
       if (!els.shLlm.value) els.shLlm.value = (cfg.llm || []).join(", ");
+      els.shSys.value = cfg.system_prompt || "";
+      els.shSysState.textContent = cfg.system_prompt_custom ? "· custom" : "· default";
     } catch { /* optional */ }
   } catch (e) {
     if (e.message !== "locked") toast("Status failed: " + e.message, true);
@@ -512,13 +515,14 @@ async function saveSettings(patch, btn, okMsg) {
   btn.disabled = true;
   btn.textContent = "Saving…";
   try {
-    await api("/api/settings", {
+    const d = await api("/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     });
     toast(okMsg);
     refreshStatus();
+    return d;
   } catch (e) {
     if (e.message !== "locked") toast(e.message, true);
   } finally {
@@ -821,6 +825,39 @@ $("sh-save-llm").addEventListener("click", () => {
 $("sh-save-sd").addEventListener("click", () => {
   const v = els.shSd.value.trim();
   if (v) saveSettings({ sd_url: v }, $("sh-save-sd"), "SD URL saved");
+});
+$("sh-save-sys").addEventListener("click", () => {
+  const v = els.shSys.value.trim();
+  if (!v) {
+    toast("Clear the box or use Reset to go back to the default", true);
+    return;
+  }
+  saveSettings({ system_prompt: v }, $("sh-save-sys"), "System message saved")
+    .then((d) => {
+      if (d) els.shSysState.textContent =
+        d.system_prompt_custom ? "· custom" : "· default";
+    });
+});
+$("sh-reset-sys").addEventListener("click", async () => {
+  if (!confirm("Restore the default system message?")) return;
+  const btn = $("sh-reset-sys"), orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Resetting…";
+  try {
+    const d = await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ system_prompt_reset: true }),
+    });
+    els.shSys.value = d.system_prompt || "";
+    els.shSysState.textContent = "· default";
+    toast("System message reset to default");
+  } catch (e) {
+    if (e.message !== "locked") toast("Reset failed: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
 });
 $("sh-load").addEventListener("click", loadModel);
 $("sh-logout").addEventListener("click", async () => {

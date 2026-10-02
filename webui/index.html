@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=11">
+<link rel="stylesheet" href="/static/style.css?v=12">
 </head>
 <body>
 
@@ -159,6 +159,15 @@
       </div>
       <div class="hint" id="appearance-hint">Verbose shows model, settings and seed under each image. Compact shows just the picture, large.</div>
 
+      <label>System message <span class="dim" id="sh-sysstate"></span></label>
+      <textarea id="sh-sysprompt" class="mono" rows="8" spellcheck="false"
+                autocapitalize="off" autocomplete="off"></textarea>
+      <div class="row">
+        <button id="sh-save-sys">Save message</button>
+        <button id="sh-reset-sys">Reset to default</button>
+      </div>
+      <div class="hint">Core instructions for the AI model. The model guide (model_guide.txt) is appended after this automatically. Applies from the next message on.</div>
+
       <div class="sh-sep"></div>
       <button id="sh-logout" class="danger-btn">Lock app</button>
       <div class="hint">Served by <span class="mono">server.py</span> on your home server.</div>
@@ -187,6 +196,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=11"></script>
+<script src="/static/app.js?v=12"></script>
 </body>
 </html>

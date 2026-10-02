@@ -181,8 +181,8 @@ request fits that style.
 """
 
 
-def _build_system_prompt() -> str:
-    """Base rules + per-model settings guide from the guide file (optional)."""
+def _guide_tail() -> str:
+    """Per-model settings guide from the guide file (optional section)."""
     guide_file = Path(__file__).resolve().parent / "model_guide.txt"
     content = ""
     if guide_file.exists():
@@ -215,14 +215,26 @@ def _build_system_prompt() -> str:
             f"{content}\n"
             "---- end guide ----"
         )
-        tail = guide + "\n"
-    else:
-        tail = _FALLBACK_EXAMPLE
-
-    return _BASE_SYSTEM_PROMPT + "\n\n" + tail
+        return guide + "\n"
+    return _FALLBACK_EXAMPLE
 
 
-SYSTEM_PROMPT = _build_system_prompt()
+def build_system_prompt(base: str | None = None) -> str:
+    """Compose a full system prompt: base rules + model-guide tail.
+    Pass a custom base to swap the rules while keeping the guide."""
+    return (base if base is not None else _BASE_SYSTEM_PROMPT) \
+        + "\n\n" + _guide_tail()
+
+
+DEFAULT_BASE_PROMPT = _BASE_SYSTEM_PROMPT       # what Settings edits
+DEFAULT_SYSTEM_PROMPT = build_system_prompt()   # built-in default (base+guide)
+
+
+def effective_system_prompt(override: str | None = None) -> str:
+    """The system prompt actually sent to the LLM: the custom system message
+    with the guide tail appended, or the built-in default when unset."""
+    base = (override or "").strip()
+    return build_system_prompt(base) if base else DEFAULT_SYSTEM_PROMPT
 
 
 # ------------------------------------------------------------------- tools
