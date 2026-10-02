@@ -246,6 +246,8 @@ running...).
 Do NOT generate when: the moment is pure dialogue, reactions, thinking or
 questions with nothing visually new; or when the chat is ordinary Q&A /
 technical talk rather than a visual story.
+If no image exists yet and the chat is starting a visual story or roleplay,
+generate an establishing image of the scene and characters.
 
 Reply with ONLY one JSON object and nothing else:
 {"generate": true, "prompt": "<full SD prompt>", "negative": "<negative prompt>"}

@@ -368,6 +368,8 @@ class Agent:
         emit(evt)
 
         reply = None
+        gens_before = sum(1 for e in self.timeline
+                          if e.get("type") == "generation")
         try:
             for _ in range(MAX_TOOL_ROUNDS):
                 data = self.llm_complete(self.messages)
@@ -412,7 +414,12 @@ class Agent:
             self.timeline.append(evt)
             emit(evt)
 
-        self.scene_director_pass(emit)            # best-effort auto-image
+        gens_now = sum(1 for e in self.timeline
+                       if e.get("type") == "generation")
+        # scene director only when the model itself did NOT illustrate this
+        # turn — otherwise it tends to re-render the same moment twice
+        if gens_now == gens_before:
+            self.scene_director_pass(emit)
 
     def _run_tool(self, name: str, args: dict, emit) -> dict:
         """Run one tool call in a worker thread; stream SD progress while
