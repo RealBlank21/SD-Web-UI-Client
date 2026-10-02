@@ -259,7 +259,13 @@ moment - never keep both versions. Character count first: when a person
 enters or leaves, replace the count tags (solo, 1girl, 1boy, duo, 3girls...)
 to match (e.g. solo -> duo) and add the new character's appearance tags. Same
 for location, pose, outfit, state of dress and time-of-day tags. Write rich
-booru-tag style prompts with a sensible negative prompt."""
+booru-tag style prompts with a sensible negative prompt.
+
+WHO acts matters: when the USER performs an action on the character, the image
+shows another person's contact (breast grab, groping, another's hand on
+breast, pov hands) - never self-touch tags; when the character acts on
+herself, use self-touch tags. A POV hand alone does not make the scene "duo" -
+keep "solo" unless the user's body is visible too."""
 
 
 # ------------------------------------------------------------------- tools
