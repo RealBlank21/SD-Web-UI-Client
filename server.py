@@ -26,6 +26,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -140,7 +141,22 @@ CHARS_FILE = DATA_DIR / "characters.json"
 CHATS_DIR = DATA_DIR / "chats"
 AVATAR_DIR = DATA_DIR / "avatars"
 CHAR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+CHAT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{0,40}$")
 DEFAULT_CHAT_FILE = CHATS_DIR / "default.json"
+
+
+def new_chat_id() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+
+
+def derive_title(timeline: list) -> str:
+    for evt in timeline:
+        if evt.get("type") == "user":
+            t = (evt.get("text") or "").strip()
+            if t:
+                return t[:60]
+            break
+    return "New chat"
 
 
 def load_characters() -> list:
@@ -166,6 +182,36 @@ def slugify(name: str) -> str:
     return s[:40] or "char"
 
 
+def migrate_flat_chats() -> None:
+    """Phase A → B: move single-file chats/<char>.json into per-chat files."""
+    try:
+        for f in CHATS_DIR.glob("*.json"):
+            if f == DEFAULT_CHAT_FILE:
+                continue                     # free chat stays single
+            cid = f.stem
+            if not CHAR_ID_RE.match(cid):
+                continue
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            cid_dir = CHATS_DIR / cid
+            cid_dir.mkdir(parents=True, exist_ok=True)
+            chat_id = new_chat_id()
+            payload = {
+                "id": chat_id,
+                "title": derive_title(d.get("timeline") or []),
+                "updated": int(f.stat().st_mtime),
+                "messages": d.get("messages") or [],
+                "timeline": d.get("timeline") or [],
+            }
+            (cid_dir / f"{chat_id}.json").write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            f.unlink()
+    except Exception:
+        pass
+
+
 # ------------------------------------------------------------------ agent
 
 class Agent:
@@ -175,6 +221,8 @@ class Agent:
         self.cfg = cfg
         self.client = SDClient(base_url=cfg["sd_url"])
         self.char = None                 # active character card or None
+        self.chat_id = ""                # active chat id (bound chats)
+        self._title = ""                 # active chat's title
         self._home = DEFAULT_CHAT_FILE   # where the active chat persists
         self.messages = [self._sys_msg()]
         self.timeline = []
@@ -267,23 +315,146 @@ class Agent:
 
     # -------------------------------------------------------------- turn
 
-    def clear(self):
-        self.messages = [self._sys_msg()]
-        self.timeline = []
-        g = (self.char or {}).get("greeting", "").strip()
-        if g:
-            # a new chat with a character starts with her greeting
-            self.messages.append({"role": "assistant", "content": g})
-            self.timeline.append({"type": "reply", "text": g})
-        self._save_state()
-
     # --------------------------------------------------------- characters
 
-    def _char_file(self, cid: str) -> Path:
+    def _chat_file(self, cid: str, chat_id: str = "") -> Path:
+        """Phase B: per-chat files under chats/<char>/<chat_id>.json.
+        Without a chat id this resolves the legacy single-file location."""
+        if chat_id:
+            return CHATS_DIR / cid / f"{chat_id}.json"
         return CHATS_DIR / f"{cid}.json"
 
+    def _char_dir(self, cid: str) -> Path:
+        return CHATS_DIR / cid
+
+    def _list_chats(self, cid: str) -> list[Path]:
+        """Chat files of a character, newest first."""
+        try:
+            files = [p for p in self._char_dir(cid).glob("*.json")
+                     if CHAT_ID_RE.match(p.stem)]
+        except OSError:
+            return []
+        try:
+            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            return []
+        return files
+
+    @staticmethod
+    def _load_chat_payload(path: Path) -> dict:
+        try:
+            d = json.loads(path.read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def _apply_chat_payload(self, d: dict):
+        self._title = str(d.get("title", ""))
+        msgs = d.get("messages")
+        self.messages = [self._sys_msg()] + \
+            (msgs if isinstance(msgs, list) else [])
+        self.timeline = d.get("timeline") or []
+
+    def _fresh_chat(self):
+        self.messages = [self._sys_msg()]
+        self.timeline = []
+        self._title = ""
+        self._seed_greeting()
+
+    def _seed_greeting(self):
+        g = (self.char or {}).get("greeting", "").strip()
+        if g:
+            self.messages.append({"role": "assistant", "content": g})
+            self.timeline.append({"type": "reply", "text": g})
+
+    def set_character(self, card: dict | None) -> None:
+        """Switch to a character (their newest chat) or the free chat.
+        Caller must hold the agent lock."""
+        self._save_state()                       # flush current chat home
+        self.char = card
+        if card:
+            cid = card["id"]
+            files = self._list_chats(cid)
+            if files:
+                self.chat_id = files[0].stem
+                self._home = files[0]
+                self._apply_chat_payload(self._load_chat_payload(files[0]))
+            else:
+                self.chat_id = new_chat_id()
+                self._home = self._chat_file(cid, self.chat_id)
+                self._fresh_chat()
+        else:
+            self.chat_id = ""
+            self._home = DEFAULT_CHAT_FILE
+            self._apply_chat_payload(self._load_chat_payload(
+                DEFAULT_CHAT_FILE))
+        self._save_state()
+
+    def bind_active_chat(self, card: dict) -> None:
+        """Attach the current (unbound, non-empty) chat to a new character:
+        it becomes that character's first chat file."""
+        self.char = card
+        self.chat_id = new_chat_id()
+        self._home = self._chat_file(card["id"], self.chat_id)
+        self._title = derive_title(self.timeline)
+        self._save_state()
+
+    def delete_character(self, cid: str) -> None:
+        """Remove a character's chat directory. Caller must hold the agent
+        lock when the character is active."""
+        try:
+            shutil.rmtree(self._char_dir(cid), ignore_errors=True)
+        except OSError:
+            pass
+
+    def new_chat(self) -> None:
+        """Start a fresh chat for the active character — the old one stays
+        archived. The unbound free chat simply resets in place."""
+        if not self.char:
+            self.messages = [self._sys_msg()]
+            self.timeline = []
+            self._title = ""
+            self._save_state()
+            return
+        self._save_state()
+        self.chat_id = new_chat_id()
+        self._home = self._chat_file(self.char["id"], self.chat_id)
+        self._fresh_chat()
+        self._save_state()
+
+    def select_chat(self, cid: str, chat_id: str) -> None:
+        if not (self.char and self.char["id"] == cid):
+            raise ValueError("character is not active")
+        path = self._chat_file(cid, chat_id)
+        self.chat_id = chat_id
+        self._home = path
+        self._apply_chat_payload(self._load_chat_payload(path))
+        self._save_state()
+
+    def delete_chat(self, cid: str, chat_id: str) -> None:
+        """Delete a chat; if it was the active one, fall back to the
+        character's newest remaining chat (or a fresh one)."""
+        active = bool(self.char and self.char["id"] == cid
+                      and self.chat_id == chat_id)
+        try:
+            self._chat_file(cid, chat_id).unlink(missing_ok=True)
+        except OSError:
+            pass
+        if active and self.char:
+            cid = self.char["id"]
+            files = self._list_chats(cid)
+            if files:
+                self.chat_id = files[0].stem
+                self._home = files[0]
+                self._apply_chat_payload(self._load_chat_payload(files[0]))
+            else:
+                self.chat_id = new_chat_id()
+                self._home = self._chat_file(cid, self.chat_id)
+                self._fresh_chat()
+            self._save_state()
+
     def _rehydrate_char(self):
-        """Restore the active character from the persisted chat mirror."""
+        """Restore the active character (and their active chat) at startup."""
         cid = getattr(self, "_state_char_id", "")
         self._state_char_id = ""
         if not cid:
@@ -292,89 +463,93 @@ class Agent:
                      if c.get("id") == cid), None)
         if card:
             self.char = card
-            self._home = self._char_file(cid)
-            # the system message was built without the card — rebuild it
             if self.messages and self.messages[0].get("role") == "system":
                 self.messages[0] = self._sys_msg()
+            if self.chat_id and CHAT_ID_RE.match(self.chat_id) \
+                    and self._chat_file(cid, self.chat_id).exists():
+                self._home = self._chat_file(cid, self.chat_id)
+                return
+            # mirror predates Phase B (or chat vanished) — adopt the newest
+            files = self._list_chats(cid)
+            if files:
+                self.chat_id = files[0].stem
+                self._home = files[0]
+                self._apply_chat_payload(self._load_chat_payload(files[0]))
+                return
+            self.chat_id = new_chat_id()
+            self._home = self._chat_file(cid, self.chat_id)
+            self._fresh_chat()
+            self._save_state()
         else:
             # mirror references a character that no longer exists — unbind
             self._home = DEFAULT_CHAT_FILE
-
-    def set_character(self, card: dict | None) -> None:
-        """Switch the active chat to a character (or the unbound default).
-        Caller must hold the agent lock."""
-        self._save_state()                       # flush current chat home
-        self.char = card
-        self._home = self._char_file(card["id"]) if card \
-            else DEFAULT_CHAT_FILE
-        d = {}
-        if self._home.exists():
-            try:
-                d = json.loads(self._home.read_text(encoding="utf-8"))
-            except Exception:
-                d = {}
-        msgs = d.get("messages")
-        if isinstance(msgs, list):
-            self.messages = [self._sys_msg()] + msgs
-            self.timeline = d.get("timeline") or []
-        else:
-            self.messages = [self._sys_msg()]
-            self.timeline = []
-            g = (card or {}).get("greeting", "").strip()
-            if g:
-                self.messages.append({"role": "assistant", "content": g})
-                self.timeline.append({"type": "reply", "text": g})
-        self._save_state()
-
-    def bind_active_chat(self, card: dict) -> None:
-        """Attach the current (unbound, non-empty) chat to a new character."""
-        self.char = card
-        self._home = self._char_file(card["id"])
-        self._save_state()
-
-    def delete_character(self, cid: str) -> None:
-        """Remove a character's chat file. Caller must hold the agent lock
-        when the character is active."""
-        try:
-            self._char_file(cid).unlink(missing_ok=True)
-        except OSError:
-            pass
+            self.chat_id = ""
 
     # -------------------------------------------------------- persistence
 
     def _save_state(self):
         """Persist the active chat to its home file + the restart mirror."""
         try:
-            payload = {
+            now = int(time.time())
+            mirror = {
                 "character_id": self.char["id"] if self.char else "",
+                "chat_id": self.chat_id if self.char else "",
                 "messages": self.messages[1:],
                 "timeline": self.timeline,
             }
             DATA_DIR.mkdir(parents=True, exist_ok=True)
-            if self._home != STATE_FILE:
+            if self.char:
+                cid = self.char["id"]
+                if CHAT_ID_RE.match(self.chat_id):
+                    self._char_dir(cid).mkdir(parents=True, exist_ok=True)
+                    if self._title in ("", "New chat"):
+                        # re-derive until the first real user message lands
+                        self._title = derive_title(self.timeline)[:60]
+                    payload = {
+                        "id": self.chat_id,
+                        "character_id": cid,
+                        "title": self._title,
+                        "updated": now,
+                        "messages": mirror["messages"],
+                        "timeline": self.timeline,
+                    }
+                    self._home.write_text(
+                        json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+            else:
+                payload = {"messages": mirror["messages"],
+                           "timeline": self.timeline}
                 CHATS_DIR.mkdir(parents=True, exist_ok=True)
-                self._home.write_text(
+                DEFAULT_CHAT_FILE.write_text(
                     json.dumps(payload, ensure_ascii=False),
                     encoding="utf-8")
             STATE_FILE.write_text(
-                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                json.dumps(mirror, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
 
     def _load_state(self):
         """Startup: restore the active chat from the restart mirror."""
+        self.chat_id = ""
+        self._title = ""
         if not STATE_FILE.exists():
             self._home = DEFAULT_CHAT_FILE
             return
         try:
             d = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             self._state_char_id = d.get("character_id", "")
-            self._home = self._char_file(self._state_char_id) \
-                if self._state_char_id else DEFAULT_CHAT_FILE
+            self.chat_id = d.get("chat_id", "")
+            self._title = d.get("title", "")
             if isinstance(d.get("messages"), list):
                 self.messages = [self._sys_msg()] + d["messages"]
             self.timeline = d.get("timeline") or []
         except Exception:
+            self._state_char_id = ""
+        if self._state_char_id and CHAT_ID_RE.match(self.chat_id):
+            self._home = self._chat_file(self._state_char_id, self.chat_id)
+        elif self._state_char_id:
+            self._home = None            # resolved by _rehydrate_char
+        else:
             self._home = DEFAULT_CHAT_FILE
 
     # ----------------------------------------------------- scene director
@@ -1069,6 +1244,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_settings()
         elif path == "/api/characters":
             self.api_characters_list()
+        elif path == "/api/chats":
+            self.api_chats_list()
         elif path.startswith("/api/avatar/"):
             self.api_avatar(path[len("/api/avatar/"):])
         elif path == "/api/image_info":
@@ -1112,17 +1289,21 @@ class Handler(BaseHTTPRequestHandler):
             self.api_chat()
         elif path == "/api/regenerate":
             self.api_regenerate()
-        elif path == "/api/clear":
+        elif path == "/api/chat/new":
             agent = self.app.agent
             if not agent.lock.acquire(blocking=False):
                 self._json({"error": "busy — a turn is already running"},
                            409)
                 return
             try:
-                agent.clear()
+                agent.new_chat()
             finally:
                 agent.lock.release()
             self._json({"ok": True, "timeline": agent.timeline})
+        elif path == "/api/chat/select":
+            self.api_chat_select()
+        elif path == "/api/chat/delete":
+            self.api_chat_delete()
         elif path == "/api/characters":
             self.api_characters_save()
         elif path == "/api/character/select":
@@ -1284,6 +1465,56 @@ class Handler(BaseHTTPRequestHandler):
 
         self._sse_stream(q)
 
+    def api_chats_list(self):
+        """Chat list of a character, newest first."""
+        cid = (parse_qs(urlparse(self.path).query).get("char") or [""])[0]
+        card = next((c for c in load_characters()
+                     if c.get("id") == cid), None)
+        if not card:
+            self._json({"error": "character not found"}, 404)
+            return
+        agent = self.app.agent
+        chats = []
+        for p in agent._list_chats(cid):
+            d = agent._load_chat_payload(p)
+            chats.append({"id": p.stem,
+                          "title": str(d.get("title") or "New chat"),
+                          "updated": int(p.stat().st_mtime),
+                          "messages": len(d.get("messages") or [])})
+        self._json({"chats": chats, "active": agent.chat_id})
+
+    def api_chat_select(self):
+        body = self._body()
+        cid = str(body.get("char", "")).strip()
+        chat_id = str(body.get("chat", "")).strip()
+        agent = self.app.agent
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            agent.select_chat(cid, chat_id)
+            self._json({"ok": True, "timeline": agent.timeline})
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+        except Exception as e:                      # noqa: BLE001
+            self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+        finally:
+            agent.lock.release()
+
+    def api_chat_delete(self):
+        body = self._body()
+        cid = str(body.get("char", "")).strip()
+        chat_id = str(body.get("chat", "")).strip()
+        agent = self.app.agent
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            agent.delete_chat(cid, chat_id)
+            self._json({"ok": True, "timeline": agent.timeline})
+        finally:
+            agent.lock.release()
+
     def api_status(self):
         agent = self.app.agent
         sd_ok, cur = False, ""
@@ -1354,6 +1585,10 @@ class Handler(BaseHTTPRequestHandler):
                                    + "?v=" + str(int(av.stat().st_mtime)))
                 except OSError:
                     pass
+            try:
+                c["chats"] = len(self.app.agent._list_chats(c["id"]))
+            except Exception:
+                c["chats"] = 0
             out.append(c)
         active = self.app.agent.char
         self._json({"characters": out,
@@ -1615,7 +1850,8 @@ class App:
         self.password = password
         self.session_secret = load_session_secret()
         self.models_cache = {"ts": 0.0, "models": []}
-        self.agent = Agent(load_config())       # loads chat + character too
+        migrate_flat_chats()                 # Phase A → B chat layout
+        self.agent = Agent(load_config())    # loads chat + character too
 
 
 # ------------------------------------------------------------------- main

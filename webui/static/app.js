@@ -11,6 +11,8 @@ const els = {
   charSearch: $("char-search"), charlist: $("charlist"),
   charempty: $("charempty"),
   chatScroll: $("chat-scroll"), chatCharname: $("chat-charname"),
+  btnHistory: $("btn-history"), histsheet: $("histsheet"),
+  hsList: $("hs-list"), hsNew: $("hs-new"), hsClose: $("hs-close"),
   msgs: $("msgs"), pill: $("pill"), pillText: $("pill-text"), pillBar: $("pill-bar"),
   input: $("input"), send: $("btn-send"),
   grid: $("grid"), gcount: $("gcount"), gempty: $("gempty"),
@@ -684,6 +686,10 @@ function renderCharList() {
     const tx = el("div", "char-text");
     tx.appendChild(el("b", null, c.name || c.id));
     if (c.tagline) tx.appendChild(el("span", "dim", c.tagline));
+    if (c.chats > 0) {
+      tx.appendChild(el("span", "dim",
+        c.chats + (c.chats === 1 ? " chat" : " chats")));
+    }
     if (c.id === activeCharId) tx.appendChild(el("span", "char-now", "now"));
     row.appendChild(tx);
     row.addEventListener("click", () => selectChar(c.id));
@@ -910,6 +916,7 @@ async function refreshStatus() {
     const s = await api("/api/status");
     activeCharId = s.character ? s.character.id : "";
     els.chatCharname.textContent = s.character ? s.character.name : "Free chat";
+    els.btnHistory.hidden = !s.character;
     return s;
   } catch (e) {
     if (e.message === "locked") return;
@@ -1021,7 +1028,7 @@ function autosize() {
 
 async function newChat() {
   try {
-    const d = await api("/api/clear", { method: "POST" });
+    const d = await api("/api/chat/new", { method: "POST" });
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
     toast("New chat");
@@ -1029,6 +1036,123 @@ async function newChat() {
     if (e.message !== "locked") toast("Failed: " + e.message, true);
   }
 }
+
+/* --------------------------------------------------------- chat history */
+
+function fmtChatDate(ts) {
+  const d = new Date(ts * 1000);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) {
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  if (d.getFullYear() === now.getFullYear()) {
+    return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  }
+  return d.toLocaleDateString();
+}
+
+async function openHistory() {
+  if (!activeCharId) {
+    toast("History is per character", true);
+    return;
+  }
+  try {
+    const d = await api("/api/chats?char=" + encodeURIComponent(activeCharId));
+    els.hsList.textContent = "";
+    if (!d.chats.length) {
+      els.hsList.appendChild(el("div", "hint", "No chats yet."));
+    }
+    for (const c of d.chats) {
+      const row = el("button", "hist-row" +
+        (c.id === d.active ? " active" : ""));
+      const tx = el("div", "char-text");
+      tx.appendChild(el("b", null, c.title || "New chat"));
+      tx.appendChild(el("span", "dim", fmtChatDate(c.updated) +
+        " · " + c.messages + " messages"));
+      row.appendChild(tx);
+      row.addEventListener("click", () => selectChat(c.id));
+      row.dataset.chatid = c.id;
+      els.hsList.appendChild(row);
+    }
+    els.histsheet.hidden = false;
+  } catch (e) {
+    if (e.message !== "locked") toast("History failed: " + e.message, true);
+  }
+}
+
+function selectChat(chatId) {
+  api("/api/chat/select", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ char: activeCharId, chat: chatId }),
+  }).then((d) => {
+    els.msgs.textContent = "";
+    renderHistory(d.timeline || []);
+    els.histsheet.hidden = true;
+    switchView("chat");
+  }).catch((e) => {
+    if (e.message !== "locked") toast("Open failed: " + e.message, true);
+  });
+}
+
+async function deleteChatById(chatId) {
+  try {
+    const d = await api("/api/chat/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ char: activeCharId, chat: chatId }),
+    });
+    toast("Chat deleted");
+    els.msgs.textContent = "";
+    renderHistory(d.timeline || []);
+    await openHistory();
+  } catch (e) {
+    if (e.message !== "locked") toast("Delete failed: " + e.message, true);
+  }
+}
+
+els.btnHistory.addEventListener("click", openHistory);
+els.hsClose.addEventListener("click", () => { els.histsheet.hidden = true; });
+els.histsheet.addEventListener("click", (e) => {
+  if (e.target === els.histsheet) els.histsheet.hidden = true;
+});
+els.hsNew.addEventListener("click", async () => {
+  els.histsheet.hidden = true;
+  await newChat();
+});
+els.hsList.addEventListener("contextmenu", (e) => {
+  const target = e.target.closest(".hist-row");
+  if (!target) return;
+  e.preventDefault();
+  openCtx([{ label: "🗑 Delete", danger: true,
+    action: () => deleteChatById(target.dataset.chatid) }], null);
+});
+let hsLpTimer = null, hsLpStart = null;
+els.hsList.addEventListener("touchstart", (e) => {
+  const target = e.target.closest(".hist-row");
+  if (!target) return;
+  hsLpStart = target;
+  hsLpTimer = setTimeout(() => {
+    hsLpTimer = null;
+    if (navigator.vibrate) navigator.vibrate(25);
+    openCtx([{ label: "🗑 Delete", danger: true,
+      action: () => deleteChatById(target.dataset.chatid) }], null);
+    hsLpStart = null;
+  }, 550);
+}, { passive: true });
+els.hsList.addEventListener("touchmove", (e) => {
+  if (!hsLpTimer || !hsLpStart) return;
+  if (Math.abs(e.touches[0].clientY - (hsLpStart._y || 0)) > 12) {
+    clearTimeout(hsLpTimer); hsLpTimer = null;
+  }
+}, { passive: true });
+els.hsList.addEventListener("touchstart", (e) => {
+  if (hsLpStart) hsLpStart._y = e.touches[0].clientY;
+}, { passive: true });
+els.hsList.addEventListener("touchend", () => {
+  if (hsLpTimer) { clearTimeout(hsLpTimer); hsLpTimer = null; hsLpStart = null; }
+}, { passive: true });
 
 function copyText(text) {
   navigator.clipboard.writeText(text)
@@ -1405,6 +1529,8 @@ document.addEventListener("keydown", (e) => {
     els.settings.hidden = true;
   } else if (e.key === "Escape" && !els.charsheet.hidden) {
     closeChars();
+  } else if (e.key === "Escape" && !els.histsheet.hidden) {
+    els.histsheet.hidden = true;
   } else if (e.key === "Escape" && !ctxEl.hidden) {
     closeCtx();
   } else if (e.key === "Escape" && !regenEl.hidden) {

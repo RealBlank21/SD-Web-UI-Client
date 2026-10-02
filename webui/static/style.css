@@ -137,6 +137,20 @@ button:active { transform: scale(.97); }
   flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
 }
 
+/* history sheet */
+.hist-row {
+  display: flex; align-items: center; width: 100%;
+  padding: 11px 10px; border-radius: 12px; text-align: left;
+  border: 1px solid transparent;
+}
+.hist-row:active { background: var(--panel2); }
+.hist-row.active { background: var(--panel2); border-color: var(--line); }
+.hist-row .char-text b {
+  font-size: 14px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 100%;
+}
+.hs-list { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+
 .swatch {
   width: 38px; height: 38px; border-radius: 12px; flex: none;
   background: var(--sw); border: 2px solid transparent;
