@@ -47,6 +47,7 @@ from agent_core import (                      # vendored agent brain
     DEFAULT_LLM,
     LLMError,
     MAX_TOOL_ROUNDS,
+    SCENE_DIRECTOR_PROMPT,
     _clean_assistant_msg,
     _is_auth_error,
     effective_system_prompt,
@@ -95,6 +96,7 @@ DEFAULT_CONFIG = {
     "llm_models": [DEFAULT_LLM],
     "sd_url": "http://100.93.220.68:7860",
     "system_prompt": "",   # custom system message; "" = built-in default
+    "scene_director": True,  # auto-generate an image on new visual moments
 }
 
 
@@ -232,6 +234,133 @@ class Agent:
         except Exception:
             pass
 
+    # ----------------------------------------------------- scene director
+
+    def _last_gen_args(self) -> dict:
+        """The 'gen' snapshot of the newest timeline generation."""
+        for evt in reversed(self.timeline):
+            if evt.get("type") == "generation":
+                g = evt.get("gen") or {}
+                if g.get("prompt"):
+                    return g
+        return {}
+
+    def _director_messages(self) -> list:
+        """Focused context for the scene-director decision call."""
+        last = self._last_gen_args()
+        if last:
+            sys = (SCENE_DIRECTOR_PROMPT
+                   + "\n\nLast generated image prompt:\n"
+                   + str(last.get("prompt"))
+                   + "\n\nLast negative prompt:\n"
+                   + str(last.get("negative_prompt") or "(none)"))
+        else:
+            sys = SCENE_DIRECTOR_PROMPT + \
+                "\n\nNo image has been generated yet."
+        recent = []
+        for m in reversed(self.messages[1:]):
+            role = m.get("role")
+            if role == "user" and m.get("content"):
+                recent.append({"role": "user", "content": m["content"]})
+            elif role == "assistant" and (m.get("content") or "").strip():
+                recent.append({"role": "assistant",
+                               "content": m["content"]})
+            if len(recent) >= 6:
+                break
+        recent.reverse()
+        return [{"role": "system", "content": sys}] + recent
+
+    def scene_director_pass(self, emit) -> None:
+        """After a turn: does the new moment need an image? Best-effort —
+        any failure simply means no image. Never touches chat context."""
+        if not self.cfg.get("scene_director"):
+            return
+        try:
+            data = self.llm_complete(self._director_messages())
+        except LLMError:
+            return
+        content = (data["choices"][0].get("message")
+                   or {}).get("content") or ""
+        s, e = content.find("{"), content.rfind("}")
+        if s < 0 or e <= s:
+            return
+        try:
+            d = json.loads(content[s:e + 1])
+        except json.JSONDecodeError:
+            return
+        if not d.get("generate"):
+            return
+        prompt = str(d.get("prompt") or "").strip()
+        if not prompt:
+            return
+
+        args = {"prompt": prompt,
+                "negative_prompt": str(d.get("negative") or "").strip()}
+        last = self._last_gen_args()
+        model = last.get("model")
+        if not (model and model != "(unknown)"):
+            model = None
+        for k in ("width", "height", "steps", "cfg_scale", "sampler_name",
+                  "clip_skip"):
+            if last.get(k) is not None:
+                args[k] = last[k]
+
+        emit({"type": "status", "text": "scene changed — generating…"})
+        if model:
+            try:
+                self.client.set_model(model)
+            except Exception:
+                model = None
+
+        from sd_client import save_images
+        out: dict = {"r": None, "err": None}
+
+        def work():
+            try:
+                out["r"] = self.client.txt2img(**args)
+            except Exception as e:                     # noqa: BLE001
+                out["err"] = e
+
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+        while th.is_alive():
+            th.join(PROGRESS_POLL)
+            if th.is_alive():
+                try:
+                    p = self.client.progress()
+                    emit({"type": "progress",
+                          "progress": p.get("progress") or 0,
+                          "eta": p.get("eta_relative")})
+                except Exception:
+                    pass
+        if out["err"] or not out["r"]:
+            return
+        result = out["r"]
+        saved = save_images(result, out_dir=OUT_DIR, name_prefix="ai")
+        if not saved:
+            return
+        try:
+            seed = json.loads(result.get("info", "{}")).get("seed")
+        except json.JSONDecodeError:
+            seed = None
+        gen = {k: args.get(k) for k in
+               ("prompt", "negative_prompt", "width", "height", "steps",
+                "cfg_scale", "sampler_name")}
+        gen["model"] = model or "(unknown)"
+        evt = {"type": "generation",
+               "files": ["/outputs/" + f.name for f in saved],
+               "count": len(saved),
+               "seed": seed,
+               "gen": gen,
+               "auto": True}
+        self.timeline.append(evt)
+        emit(evt)
+        # keep the model aware that a newer image now exists
+        self.messages.append({
+            "role": "system",
+            "content": "(scene director generated an image; its prompt "
+                       "was: " + prompt + ")"})
+
     def run_turn(self, user_text: str, emit) -> None:
         self.messages.append({"role": "user", "content": user_text})
         evt = {"type": "user", "text": user_text}
@@ -282,6 +411,8 @@ class Agent:
             evt = {"type": "reply", "text": reply}
             self.timeline.append(evt)
             emit(evt)
+
+        self.scene_director_pass(emit)            # best-effort auto-image
 
     def _run_tool(self, name: str, args: dict, emit) -> dict:
         """Run one tool call in a worker thread; stream SD progress while
@@ -1024,7 +1155,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"sd_url": cfg["sd_url"], "llm": cfg["llm_models"],
                         "key_masked": masked, "has_key": bool(key),
                         "system_prompt": override or DEFAULT_BASE_PROMPT,
-                        "system_prompt_custom": bool(override)})
+                        "system_prompt_custom": bool(override),
+                        "scene_director": bool(cfg.get("scene_director"))})
             return
         body = self._body()
         cfg = dict(agent.cfg)
@@ -1062,6 +1194,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             cfg["system_prompt"] = text        # empty = default
             sys_touched = True
+        if "scene_director" in body:
+            cfg["scene_director"] = bool(body["scene_director"])
         save_config(cfg)
         agent.apply_config(cfg)
         if sys_touched:

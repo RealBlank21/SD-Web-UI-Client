@@ -22,6 +22,7 @@ const els = {
   shCur: $("sh-cur"), shSd: $("sh-sd"), shLlm: $("sh-llm"), shKey: $("sh-key"),
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
+  shScene: $("sh-scene"),
   toast: $("toast"),
 };
 
@@ -550,6 +551,7 @@ async function openSettings() {
       if (!els.shLlm.value) els.shLlm.value = (cfg.llm || []).join(", ");
       els.shSys.value = cfg.system_prompt || "";
       els.shSysState.textContent = cfg.system_prompt_custom ? "· custom" : "· default";
+      els.shScene.checked = !!cfg.scene_director;
     } catch { /* optional */ }
   } catch (e) {
     if (e.message !== "locked") toast("Status failed: " + e.message, true);
@@ -988,6 +990,20 @@ $("sh-reset-sys").addEventListener("click", async () => {
   }
 });
 $("sh-load").addEventListener("click", loadModel);
+$("sh-scene").addEventListener("change", async () => {
+  const on = els.shScene.checked;
+  try {
+    await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene_director: on }),
+    });
+    toast(on ? "Scene director on" : "Scene director off");
+  } catch (e) {
+    if (e.message !== "locked") toast(e.message, true);
+    els.shScene.checked = !on;
+  }
+});
 $("sh-logout").addEventListener("click", async () => {
   try { await api("/api/logout", { method: "POST" }); } catch { /* ignore */ }
   showGate();

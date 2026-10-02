@@ -370,6 +370,16 @@ button:active { transform: scale(.97); }
 }
 .hint { font-size: 11.5px; color: var(--dim); margin-top: 4px; }
 
+/* checkbox row (settings) */
+.check { display: flex; align-items: center; gap: 9px; margin-top: 12px; }
+.check input {
+  width: 17px; height: 17px; accent-color: var(--accent); flex: none;
+}
+.check label {
+  margin: 0; font-size: 13px; line-height: 1.35; color: var(--text);
+  text-transform: none; letter-spacing: 0;
+}
+
 /* appearance segmented control */
 .seg { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px; }
 .seg button {

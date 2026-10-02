@@ -231,6 +231,33 @@ def effective_system_prompt(override: str | None = None) -> str:
     return build_system_prompt(base) if base else DEFAULT_SYSTEM_PROMPT
 
 
+# --------------------------------------------------------- scene director
+
+SCENE_DIRECTOR_PROMPT = """\
+You are the scene director of an AI art agent. An ongoing chat is illustrated
+with generated images. You are given the prompt of the LAST generated image
+and the latest chat messages. Decide whether the current story moment shows
+something visually NEW that the last image does not already show.
+
+Generate when: a new character or object appears, the location or camera view
+changes, a pose, outfit or state of dress changes, or a physical action is
+happening now (touching, grabbing, undressing, revealing, kissing, fighting,
+running...).
+Do NOT generate when: the moment is pure dialogue, reactions, thinking or
+questions with nothing visually new; or when the chat is ordinary Q&A /
+technical talk rather than a visual story.
+
+Reply with ONLY one JSON object and nothing else:
+{"generate": true, "prompt": "<full SD prompt>", "negative": "<negative prompt>"}
+or
+{"generate": false}
+
+When "prompt" is needed: start from the last image's prompt verbatim, insert
+tags for the new action or element at the FRONT of the subject tags, keep all
+other tags unchanged, and keep the style/quality tags. Write rich booru-tag
+style prompts with a sensible negative prompt."""
+
+
 # ------------------------------------------------------------------- tools
 
 def _seed_of(result: dict):
