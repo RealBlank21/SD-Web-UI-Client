@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=22">
+<link rel="stylesheet" href="/static/style.css?v=23">
 </head>
 <body>
 
@@ -200,14 +200,25 @@
     <button id="hs-back" class="iconbtn" aria-label="Back">
       <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
     </button>
-    <b>Chat history</b>
-    <button id="hs-new" class="iconbtn" title="New chat" aria-label="New chat">
-      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
-    </button>
+    <b id="hs-title">Chat history</b>
+    <div class="head-btns">
+      <button id="hs-select" class="iconbtn" title="Select chats" aria-label="Select chats">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="m8 12.5 3 3 5.5-6"/></svg>
+      </button>
+      <button id="hs-new" class="iconbtn" title="New chat" aria-label="New chat">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+      <button id="hs-all" class="iconbtn" title="Select all / none" aria-label="Select all" hidden>
+        <svg viewBox="0 0 24 24"><path d="m1.5 12.5 4.5 4.5L15 8"/><path d="m10 16.5 1.5 1.5L20.5 8"/></svg>
+      </button>
+      <button id="hs-del" class="iconbtn" title="Delete selected" aria-label="Delete selected" hidden>
+        <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg>
+      </button>
+    </div>
   </div>
   <div class="page-body">
     <div id="hs-list" class="hs-list"></div>
-    <div class="hint">Long-press a chat to delete it.</div>
+    <div class="hint">Tap ✓ (top right) to select several chats for deletion. Long-press a chat for quick actions.</div>
   </div>
 </div>
 
@@ -297,6 +308,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=22"></script>
+<script src="/static/app.js?v=23"></script>
 </body>
 </html>

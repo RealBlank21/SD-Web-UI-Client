@@ -15,6 +15,8 @@ const els = {
   pageChform: $("page-chform"), chTitle: $("ch-title"),
   cfBack: $("cf-back"), cfSave: $("cf-save"),
   hsBack: $("hs-back"), hsNew: $("hs-new"), hsList: $("hs-list"),
+  hsTitle: $("hs-title"), hsSelect: $("hs-select"),
+  hsAll: $("hs-all"), hsDel: $("hs-del"),
   msgs: $("msgs"), pill: $("pill"), pillText: $("pill-text"), pillBar: $("pill-bar"),
   input: $("input"), send: $("btn-send"),
   grid: $("grid"), gcount: $("gcount"), gempty: $("gempty"),
@@ -1046,6 +1048,7 @@ async function openHistory() {
     toast("History is per character", true);
     return;
   }
+  setHsSelect(false);
   try {
     const d = await api("/api/chats?char=" + encodeURIComponent(activeCharId));
     els.hsList.textContent = "";
@@ -1055,12 +1058,25 @@ async function openHistory() {
     for (const c of d.chats) {
       const row = el("button", "hist-row" +
         (c.id === d.active ? " active" : ""));
+      row.appendChild(el("span", "hs-check", "✓"));
       const tx = el("div", "char-text");
       tx.appendChild(el("b", null, c.title || "New chat"));
       tx.appendChild(el("span", "dim", fmtChatDate(c.updated) +
         " · " + c.messages + " messages"));
       row.appendChild(tx);
-      row.addEventListener("click", () => selectChat(c.id));
+      row.addEventListener("click", () => {
+        if (hsSelecting) {
+          const id = c.id;
+          if (hsSelected.has(id)) {
+            hsSelected.delete(id);
+            row.classList.remove("sel");
+          } else {
+            hsSelected.add(id);
+            row.classList.add("sel");
+          }
+          hsTitleSync();
+        } else selectChat(c.id);
+      });
       row.dataset.chatid = c.id;
       els.hsList.appendChild(row);
     }
@@ -1068,6 +1084,59 @@ async function openHistory() {
   } catch (e) {
     if (e.message !== "locked") toast("History failed: " + e.message, true);
   }
+}
+
+/* ---- batch select/delete (Chatterbox-style) ---- */
+
+let hsSelecting = false;
+const hsSelected = new Set();
+
+function hsTitleSync() {
+  const n = hsSelected.size;
+  els.hsTitle.textContent = hsSelecting
+    ? (n ? `${n} selected` : "Select chats")
+    : "Chat history";
+  els.hsDel.classList.toggle("armed", n > 0);
+}
+
+function setHsSelect(on) {
+  hsSelecting = on;
+  hsSelected.clear();
+  els.pageHist.classList.toggle("selecting", on);
+  els.hsSelect.hidden = on;
+  els.hsNew.hidden = on;
+  els.hsAll.hidden = !on;
+  els.hsDel.hidden = !on;
+  for (const row of els.hsList.querySelectorAll(".hist-row.sel")) {
+    row.classList.remove("sel");
+  }
+  hsTitleSync();
+}
+
+async function deleteChatsBatch(ids) {
+  let ok = 0, last = null;
+  for (const id of ids) {
+    try {
+      const d = await api("/api/chat/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ char: activeCharId, chat: id }),
+      });
+      ok++;
+      last = d;
+    } catch (e) {
+      if (e.message === "locked") break;
+    }
+  }
+  toast(ok === ids.length
+    ? `Deleted ${ok} chat${ok === 1 ? "" : "s"}`
+    : `Deleted ${ok} of ${ids.length}`);
+  if (last) {
+    els.msgs.textContent = "";
+    renderHistory(last.timeline || []);
+    refreshStatus();
+  }
+  await openHistory();
 }
 
 function selectChat(chatId) {
@@ -1102,12 +1171,34 @@ async function deleteChatById(chatId) {
 }
 
 els.btnHistory.addEventListener("click", openHistory);
-els.hsBack.addEventListener("click", () => { els.pageHist.hidden = true; });
+els.hsBack.addEventListener("click", () => {
+  if (hsSelecting) { setHsSelect(false); return; }
+  els.pageHist.hidden = true;
+});
+els.hsSelect.addEventListener("click", () => setHsSelect(true));
+els.hsAll.addEventListener("click", () => {
+  const rows = [...els.hsList.querySelectorAll(".hist-row")];
+  const all = rows.length && rows.every((r) => hsSelected.has(r.dataset.chatid));
+  for (const r of rows) {
+    if (all) { hsSelected.delete(r.dataset.chatid); r.classList.remove("sel"); }
+    else { hsSelected.add(r.dataset.chatid); r.classList.add("sel"); }
+  }
+  hsTitleSync();
+});
+els.hsDel.addEventListener("click", () => {
+  const ids = [...hsSelected];
+  if (!ids.length) { toast("Nothing selected", true); return; }
+  openCtx([
+    { label: `🗑 Delete ${ids.length} chat${ids.length === 1 ? "" : "s"}`,
+      danger: true, action: () => deleteChatsBatch(ids) },
+  ], null);
+});
 els.hsNew.addEventListener("click", async () => {
   els.pageHist.hidden = true;
   await newChat();
 });
 els.hsList.addEventListener("contextmenu", (e) => {
+  if (hsSelecting) return;
   const target = e.target.closest(".hist-row");
   if (!target) return;
   e.preventDefault();
@@ -1116,6 +1207,7 @@ els.hsList.addEventListener("contextmenu", (e) => {
 });
 let hsLpTimer = null, hsLpStart = null;
 els.hsList.addEventListener("touchstart", (e) => {
+  if (hsSelecting) return;
   const target = e.target.closest(".hist-row");
   if (!target) return;
   hsLpStart = target;

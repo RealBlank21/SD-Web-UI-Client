@@ -172,6 +172,18 @@ button:active { transform: scale(.97); }
 }
 .hs-list { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
 
+/* history batch select mode */
+.hs-check {
+  display: none; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 7px; flex: none;
+  border: 1.5px solid var(--line);
+  color: transparent; font-size: 13px; font-weight: 700;
+}
+#page-hist.selecting .hs-check { display: flex; }
+.hist-row.sel { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+.hist-row.sel .hs-check { background: var(--accent); border-color: var(--accent); color: #14101f; }
+#hs-del.armed { color: var(--err); }
+
 /* full-screen pages (android-activity style: form, history) */
 .page {
   position: fixed; inset: 0; z-index: 80;
