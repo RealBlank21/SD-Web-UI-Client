@@ -145,8 +145,7 @@ Rules:
   generate_image (switching takes 10-30 s, so only when actually needed).
   The 'model' value must be an EXACT checkpoint title as returned by
   list_sd_models — if unsure of the exact title, call list_sd_models first.
-- After a generation, briefly describe what you made in one or two sentences.
-  Do NOT mention file names, seeds or technical details in your reply — the
+- Do NOT mention file names, seeds or technical details in your reply — the
   app already shows the generated image to the user.
 - For edit_image, the 'image' argument must be a bare file name of a previously
   generated image (as shown in chat or the gallery), never a path.
