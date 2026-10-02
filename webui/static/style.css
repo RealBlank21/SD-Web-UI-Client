@@ -148,9 +148,24 @@ button:active { transform: scale(.97); }
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); overflow: hidden;
 }
-.gen-thumbs { display: flex; gap: 6px; padding: 8px; background: #0d111c; }
-.gen-thumbs img { width: 96px; height: 96px; object-fit: cover; border-radius: 9px; cursor: pointer; }
-.gen-thumbs img:active { transform: scale(.97); }
+.gen-viewer { position: relative; display: flex; padding: 8px; background: #0d111c; }
+.gen-viewer img { width: 96px; height: 96px; object-fit: cover; border-radius: 9px; cursor: pointer; }
+.gen-viewer img:active { transform: scale(.97); }
+.car-arrow {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
+  width: 30px; height: 36px; font-size: 19px; color: var(--text);
+  background: rgba(10, 12, 20, .62); border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  visibility: hidden;
+}
+.car-arrow:active { transform: translateY(-50%) scale(.93); }
+.car-prev { left: 12px; }
+.car-next { right: 12px; }
+.car-count {
+  position: absolute; right: 12px; bottom: 14px; z-index: 2;
+  font-size: 10.5px; color: var(--text);
+  background: rgba(10, 12, 20, .7); border-radius: 6px; padding: 1px 7px;
+}
 .gen-meta { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 10px 10px; }
 .chip {
   font-size: 11px; color: var(--dim);
@@ -370,15 +385,21 @@ body.compact .gen {
   align-self: stretch; width: 100%; max-width: 100%;
   background: transparent; border: 0; border-radius: 0;
 }
-body.compact .gen-thumbs {
-  padding: 2px 0; gap: 8px; background: transparent;
-  flex-wrap: wrap; width: 100%;
+body.compact .gen-viewer {
+  padding: 2px 0; background: transparent;
 }
-body.compact .gen-thumbs img {
+body.compact .gen-viewer img {
   width: auto; height: auto; max-width: 100%;
   border-radius: 12px;
   box-shadow: 0 1px 10px rgba(0, 0, 0, .45);
 }
+body.compact .car-arrow {
+  width: 42px; height: 60px; font-size: 30px;
+  background: rgba(255, 255, 255, .08);
+}
+body.compact .car-prev { left: 6px; }
+body.compact .car-next { right: 6px; }
+body.compact .car-count { right: 10px; bottom: 10px; }
 /* compact lightbox: viewer only — no generation details */
 body.compact #lb-name, body.compact .lb-meta,
 body.compact .lb-sect { display: none; }

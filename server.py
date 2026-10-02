@@ -397,6 +397,112 @@ def run_chat_turn(agent: Agent, user_text: str):
     return ("ok", q)
 
 
+# ------------------------------------------------- direct regeneration
+
+_REGEN_KEYS = ("prompt", "negative_prompt", "width", "height", "steps",
+               "cfg_scale", "sampler_name", "clip_skip")
+
+
+def _find_gen_args(agent: Agent, name: str) -> dict | None:
+    """The 'gen' snapshot of the timeline generation that produced `name`."""
+    for evt in agent.timeline:
+        if evt.get("type") != "generation":
+            continue
+        files = [Path(f).name for f in evt.get("files", [])]
+        if name in files:
+            g = evt.get("gen") or {}
+            if g.get("prompt"):
+                return g
+    return None
+
+
+def _args_from_png(path: Path) -> dict:
+    """Recover generation args from the image's PNG parameters chunk."""
+    info = parse_png_info(path)
+    args: dict = {"prompt": info.get("prompt", ""),
+                  "negative_prompt": info.get("negative", "")}
+    p = info.get("params", "")
+
+    def grab(key: str):
+        m = re.search(key + r":\s*([^,]+)", p)
+        return m.group(1).strip() if m else None
+
+    steps = grab("Steps")
+    if steps and steps.isdigit():
+        args["steps"] = int(steps)
+    try:
+        cfg = grab("CFG scale")
+        if cfg:
+            args["cfg_scale"] = float(cfg)
+    except ValueError:
+        pass
+    size = grab("Size")
+    if size:
+        m = re.match(r"(\d+)x(\d+)", size)
+        if m:
+            args["width"], args["height"] = int(m.group(1)), int(m.group(2))
+    sampler = grab("Sampler")
+    if sampler:
+        args["sampler_name"] = sampler
+    clip = grab("Clip skip")
+    if clip and clip.isdigit():
+        args["clip_skip"] = int(clip)
+    return args
+
+
+def run_regeneration(agent: Agent, name: str, instruction: str, emit) -> dict:
+    """Re-create an image directly — no LLM turn, no chat message.
+
+    Empty instruction: same prompt/settings, fresh seed (txt2img).
+    With instruction: img2img on the original, instruction appended to the
+    original prompt (denoise 0.65 keeps the composition close).
+    Returns a timeline-ready 'generation' event with 'src' lineage."""
+    from sd_client import save_images
+
+    src = OUT_DIR / name
+    g = _find_gen_args(agent, name)
+    if g:
+        args = {k: g[k] for k in _REGEN_KEYS if g.get(k) is not None}
+        model = g.get("model") or None
+    else:
+        args = _args_from_png(src)            # fall back to the PNG chunk
+        model = None
+    if not args.get("prompt"):
+        raise ValueError("no original prompt found for this image")
+
+    if instruction:
+        args["prompt"] = (args.get("prompt", "") + ", "
+                          + instruction).strip(" ,")
+        args["denoising_strength"] = 0.65
+        emit({"type": "status", "text": "applying change…"})
+        result = agent.client.img2img(init_image_path=src, **args)
+    else:
+        args.pop("seed", None)                # fresh variation: new seed
+        if model:
+            emit({"type": "status", "text": "loading checkpoint…"})
+            agent.client.set_model(model)
+        emit({"type": "status", "text": "generating…"})
+        result = agent.client.txt2img(**args)
+
+    saved = save_images(result, out_dir=OUT_DIR, name_prefix="ai")
+    if not saved:
+        raise ValueError("the generator returned no image")
+    try:
+        seed = json.loads(result.get("info", "{}")).get("seed")
+    except json.JSONDecodeError:
+        seed = None
+    gen = {k: args.get(k) for k in
+           ("prompt", "negative_prompt", "width", "height", "steps",
+            "cfg_scale", "sampler_name", "denoising_strength")}
+    gen["model"] = model or "(unknown)"
+    return {"type": "generation",
+            "files": ["/outputs/" + f.name for f in saved],
+            "count": len(saved),
+            "seed": seed,
+            "gen": gen,
+            "src": name}
+
+
 # ------------------------------------------------------------- gallery
 
 def _safe_name(name: str) -> str | None:
@@ -677,6 +783,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/chat":
             self.api_chat()
+        elif path == "/api/regenerate":
+            self.api_regenerate()
         elif path == "/api/clear":
             self.app.agent.clear()
             self._json({"ok": True})
@@ -702,11 +810,28 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True})
         elif path == "/api/delete_event":
             body = self._body()
+            tl = self.app.agent.timeline
+            if isinstance(body.get("indices"), list):
+                idxs = set()
+                for v in body["indices"][:200]:
+                    try:
+                        i = int(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= i < len(tl):
+                        idxs.add(i)
+                if not idxs:
+                    self._json({"error": "bad index"}, 400)
+                    return
+                self.app.agent.timeline = [e for i, e in enumerate(tl)
+                                           if i not in idxs]
+                self.app.agent._save_state()
+                self._json({"ok": True, "removed": len(idxs)})
+                return
             try:
                 idx = int(body.get("index", -1))
             except (TypeError, ValueError):
                 idx = -1
-            tl = self.app.agent.timeline
             if not (0 <= idx < len(tl)):
                 self._json({"error": "bad index"}, 400)
                 return
@@ -718,22 +843,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------------------- APIs
 
-    def api_chat(self):
-        body = self._body()
-        text = str(body.get("message", "")).strip()
-        if not text:
-            self._json({"error": "empty message"}, 400)
-            return
-        status, q = run_chat_turn(self.app.agent, text)
-        if status == "nokey":
-            self._json({"error": "no_api_key",
-                        "message": "Add your OpenRouter API key in Settings "
-                                   "before chatting."}, 400)
-            return
-        if status == "busy":
-            self._json({"error": "busy — a turn is already running"}, 409)
-            return
-
+    def _sse_stream(self, q: Queue):
+        """Write queue events as an SSE stream until a 'done' event."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -754,7 +865,83 @@ class Handler(BaseHTTPRequestHandler):
                 if evt.get("type") == "done":
                     break
         except (ConnectionAbortedError, BrokenPipeError, OSError):
-            pass                                      # client left; turn continues
+            pass                                  # client left; stream ends
+
+    def api_regenerate(self):
+        """Re-generate an image directly — no chat message, no LLM turn.
+        Streams SSE: progress events, then regen_done / regen_error."""
+        body = self._body()
+        name = _safe_name(str(body.get("name", "")))
+        instr = str(body.get("instruction", "")).strip()[:1000]
+        f = OUT_DIR / name if name else None
+        if not (f and f.is_file()):
+            self._json({"error": "image not found"}, 404)
+            return
+        agent = self.app.agent
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        q = Queue()
+
+        def worker():
+            out = {"evt": None, "error": None}
+
+            def work():
+                try:
+                    out["evt"] = run_regeneration(
+                        agent, name, instr, lambda e: q.put(e))
+                except Exception as e:            # noqa: BLE001 — report all
+                    out["error"] = f"{type(e).__name__}: {e}"
+
+            th = threading.Thread(target=work, daemon=True)
+            th.start()
+            try:
+                while th.is_alive():
+                    th.join(PROGRESS_POLL)
+                    if th.is_alive():
+                        try:
+                            p = agent.client.progress()
+                            q.put({"type": "progress",
+                                   "progress": p.get("progress") or 0,
+                                   "eta": p.get("eta_relative")})
+                        except Exception:
+                            pass
+                if out["error"]:
+                    q.put({"type": "regen_error",
+                           "error": scrub_paths(out["error"])})
+                else:
+                    evt = out["evt"]
+                    agent.timeline.append(evt)
+                    agent._save_state()
+                    q.put({"type": "regen_done",
+                           "file": Path(evt["files"][0]).name,
+                           "src": name,
+                           "seed": evt.get("seed"),
+                           "idx": len(agent.timeline) - 1})
+            finally:
+                agent.lock.release()
+                q.put({"type": "done"})
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._sse_stream(q)
+
+    def api_chat(self):
+        body = self._body()
+        text = str(body.get("message", "")).strip()
+        if not text:
+            self._json({"error": "empty message"}, 400)
+            return
+        status, q = run_chat_turn(self.app.agent, text)
+        if status == "nokey":
+            self._json({"error": "no_api_key",
+                        "message": "Add your OpenRouter API key in Settings "
+                                   "before chatting."}, 400)
+            return
+        if status == "busy":
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+
+        self._sse_stream(q)
 
     def api_status(self):
         agent = self.app.agent

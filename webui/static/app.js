@@ -121,45 +121,89 @@ function addBubble(kind, text) {
   return m;
 }
 
+const variantIndex = new Map();   // file name -> generation card record
+
 function addGeneration(evt, idx) {
-  const card = el("div", "gen");
-  if (idx != null) card.dataset.idx = idx;
-  if (evt.files && evt.files.length) card.dataset.file = evt.files[0].split("/").pop();
-  const thumbs = el("div", "gen-thumbs");
-  for (const f of evt.files || []) {
-    const img = document.createElement("img");
-    const name = f.split("/").pop();
-    img.dataset.name = name;
-    img.src = imgSrcFor(name);
-    img.loading = "lazy";
-    img.addEventListener("click", () => openLightbox(name));
-    thumbs.appendChild(img);
-  }
-  card.appendChild(thumbs);
-
-  const meta = el("div", "gen-meta");
-  const g = evt.gen || {};
-  const chips = [];
-  if (g.model) chips.push([g.model, ""]);
-  if (g.width && g.height) chips.push([`${g.width}×${g.height}`, ""]);
-  if (g.steps) chips.push([`${g.steps} steps`, ""]);
-  if (g.cfg_scale != null) chips.push([`cfg ${g.cfg_scale}`, ""]);
-  if (g.sampler_name) chips.push([g.sampler_name, ""]);
-  if (g.clip_skip) chips.push([`clip ${g.clip_skip}`, ""]);
-  if (g.denoising_strength != null) chips.push([`denoise ${g.denoising_strength}`, ""]);
-  if ((g.batch_size || 1) > 1) chips.push([`batch ${g.batch_size}`, ""]);
-  if (evt.seed != null) chips.push([`seed ${evt.seed}`, "seed"]);
-  if (g.elapsed) chips.push([`${Number(g.elapsed).toFixed(1)} s`, ""]);
-  for (const [t, cls] of chips) meta.appendChild(el("span", "chip " + cls, t));
-  card.appendChild(meta);
-
-  card.addEventListener("click", (ev) => {
-    if (ev.target.tagName !== "IMG" && evt.files && evt.files.length) {
-      openLightbox(evt.files[0].split("/").pop());
+  const src = evt.src ? evt.src.split("/").pop() : null;
+  let rec;
+  if (src && variantIndex.has(src)) {
+    // a regeneration of an existing image — extend that card's carousel
+    rec = variantIndex.get(src);
+    if (idx != null) rec.evtIdxs.push(idx);
+    for (const f of evt.files || []) {
+      const name = f.split("/").pop();
+      if (!rec.files.includes(name)) rec.files.push(name);
     }
-  });
-  els.msgs.appendChild(card);
-  scrollDown(true);
+  } else {
+    const card = el("div", "gen");
+    if (idx != null) card.dataset.idx = idx;
+    card.innerHTML =
+      '<div class="gen-viewer">' +
+      '<button class="car-arrow car-prev" aria-label="Previous variant">‹</button>' +
+      '<img loading="lazy" alt="">' +
+      '<button class="car-arrow car-next" aria-label="Next variant">›</button>' +
+      '<span class="car-count"></span>' +
+      '</div><div class="gen-meta"></div>';
+    rec = { card,
+            files: (evt.files || []).map((f) => f.split("/").pop()),
+            pos: 0, evtIdxs: idx != null ? [idx] : [] };
+    rec.card.querySelector(".car-prev").addEventListener("click", (e) => {
+      e.stopPropagation();
+      slideVariant(rec, -1);
+    });
+    rec.card.querySelector(".car-next").addEventListener("click", (e) => {
+      e.stopPropagation();
+      slideVariant(rec, 1);
+    });
+
+    const meta = card.querySelector(".gen-meta");
+    const g = evt.gen || {};
+    const chips = [];
+    if (g.model) chips.push([g.model, ""]);
+    if (g.width && g.height) chips.push([`${g.width}×${g.height}`, ""]);
+    if (g.steps) chips.push([`${g.steps} steps`, ""]);
+    if (g.cfg_scale != null) chips.push([`cfg ${g.cfg_scale}`, ""]);
+    if (g.sampler_name) chips.push([g.sampler_name, ""]);
+    if (g.clip_skip) chips.push([`clip ${g.clip_skip}`, ""]);
+    if (g.denoising_strength != null) chips.push([`denoise ${g.denoising_strength}`, ""]);
+    if ((g.batch_size || 1) > 1) chips.push([`batch ${g.batch_size}`, ""]);
+    if (evt.seed != null) chips.push([`seed ${evt.seed}`, "seed"]);
+    if (g.elapsed) chips.push([`${Number(g.elapsed).toFixed(1)} s`, ""]);
+    for (const [t, cls] of chips) meta.appendChild(el("span", "chip " + cls, t));
+
+    card.addEventListener("click", (ev) => {
+      if (ev.target.tagName !== "BUTTON" && rec.files.length) {
+        openLightbox(rec.files[rec.pos]);
+      }
+    });
+    els.msgs.appendChild(card);
+    scrollDown(true);
+  }
+  for (const f of rec.files) variantIndex.set(f, rec);
+  renderCarousel(rec);
+}
+
+function renderCarousel(rec) {
+  const name = rec.files[rec.pos];
+  if (!name) return;
+  const img = rec.card.querySelector(".gen-viewer img");
+  img.dataset.name = name;
+  img.src = imgSrcFor(name);
+  rec.card.dataset.file = name;
+  const many = rec.files.length > 1;
+  rec.card.querySelector(".car-prev").style.visibility =
+    many ? "visible" : "hidden";
+  rec.card.querySelector(".car-next").style.visibility =
+    many ? "visible" : "hidden";
+  rec.card.querySelector(".car-count").textContent =
+    many ? `${rec.pos + 1}/${rec.files.length}` : "";
+}
+
+function slideVariant(rec, d) {
+  const n = rec.pos + d;
+  if (n < 0 || n >= rec.files.length) return;
+  rec.pos = n;
+  renderCarousel(rec);
 }
 
 function addModels(evt) {
@@ -197,6 +241,7 @@ function lastTool() {
 
 function renderHistory(timeline) {
   els.msgs.textContent = "";
+  variantIndex.clear();
   timeline.forEach((evt, i) => {
     if (evt.type === "user") { const m = addBubble("user", evt.text); m.dataset.idx = i; }
     else if (evt.type === "reply") { const m = addBubble("ai", evt.text); m.dataset.idx = i; }
@@ -316,7 +361,8 @@ async function sendText(text) {
   }
 }
 
-function consumeSSE(resp) {
+function consumeSSE(resp, handler) {
+  const handle = handler || handleEvent;
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -330,7 +376,7 @@ function consumeSSE(resp) {
       if (!line.startsWith("data:")) continue;
       let evt;
       try { evt = JSON.parse(line.slice(5)); } catch { continue; }
-      handleEvent(evt);
+      handle(evt);
     }
     return next();
   });
@@ -593,7 +639,7 @@ function imgSrcFor(name) {
 }
 
 function refreshGenSrcs() {
-  for (const img of els.msgs.querySelectorAll(".gen-thumbs img")) {
+  for (const img of els.msgs.querySelectorAll(".gen-viewer img")) {
     if (img.dataset.name) img.src = imgSrcFor(img.dataset.name);
   }
 }
@@ -711,17 +757,33 @@ function ctxItemsFor(el) {
   return null;
 }
 
-async function deleteChatEvent(el) {
-  const idx = el.dataset.idx;
-  if (idx == null) { el.remove(); return; }
-  if (!confirm("Remove this from the chat?")) return;
+async function deleteChatEvent(node) {
+  const idx = node.dataset.idx;
+  if (idx == null) { node.remove(); return; }
+  let idxs = [+idx], variants = false;
+  if (node.classList.contains("gen")) {
+    const rec = variantIndex.get(node.dataset.file);
+    if (rec && rec.card === node && rec.evtIdxs.length > 1) {
+      variants = true;
+      idxs = rec.evtIdxs.slice();
+    }
+  }
+  if (!confirm(variants
+    ? "Remove this image and its regenerations from the chat?"
+    : "Remove this from the chat?")) return;
   try {
     await api("/api/delete_event", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ index: +idx }),
+      body: JSON.stringify({ indices: idxs }),
     });
-    el.remove();
+    if (variants) {
+      const rec = variantIndex.get(node.dataset.file);
+      if (rec && rec.card === node) {
+        for (const f of rec.files) variantIndex.delete(f);
+      }
+    }
+    node.remove();
   } catch (e) {
     if (e.message !== "locked") toast("Delete failed: " + e.message, true);
   }
@@ -774,13 +836,10 @@ function openRegen(name) {
 $("regen-cancel").addEventListener("click", () => { regenEl.hidden = true; });
 regenEl.addEventListener("click", (e) => { if (e.target === regenEl) regenEl.hidden = true; });
 $("regen-go").addEventListener("click", () => {
-  const instr = regenText.value.trim();
+  const name = regenName, instr = regenText.value.trim();
   regenEl.hidden = true;
-  if (!regenName) return;
-  const text = instr
-    ? `Regenerate ${regenName} — ${instr}`
-    : `Regenerate ${regenName}`;
-  sendText(text);
+  if (!name) return;
+  runRegen(name, instr);
 });
 regenText.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -788,6 +847,75 @@ regenText.addEventListener("keydown", (e) => {
     $("regen-go").click();
   }
 });
+
+/* ------------------------------------- direct regeneration (no chat message) */
+
+async function runRegen(name, instr) {
+  if (busy) { toast("Busy — wait for the current job", true); return; }
+  setBusy(true);
+  switchView("chat");
+  pill(instr ? "applying change…" : "regenerating…", false);
+  try {
+    const resp = await fetch("/api/regenerate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, instruction: instr }),
+    });
+    if (resp.status === 401) { showGate(); return; }
+    if (resp.status === 409) {
+      pillHide();
+      toast("The agent is still working — try again shortly", true);
+      return;
+    }
+    if (!resp.ok) {
+      const d = await resp.json().catch(() => ({}));
+      pillHide();
+      toast(d.error || "Regeneration failed", true);
+      return;
+    }
+    await consumeSSE(resp, (evt) => {
+      switch (evt.type) {
+        case "progress": {
+          const pct = Math.round((evt.progress || 0) * 100);
+          let t = `regenerating ${pct}%`;
+          if (evt.eta != null && evt.eta > 0) t += ` · ~${Math.ceil(evt.eta)}s`;
+          pillProgress(evt.progress || 0, t);
+          break;
+        }
+        case "regen_done": {
+          const rec = variantIndex.get(evt.src);
+          if (rec) {
+            if (!rec.files.includes(evt.file)) rec.files.push(evt.file);
+            if (evt.idx != null) rec.evtIdxs.push(evt.idx);
+            rec.pos = rec.files.length - 1;      // show the new variant
+            renderCarousel(rec);
+            rec.card.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+          evtCounter++;                          // timeline gained one event
+          if (!images.some((x) => x.name === evt.file)) {
+            images.unshift({ name: evt.file, seed: evt.seed });
+          }
+          toast("Image regenerated");
+          break;
+        }
+        case "regen_error":
+          pillHide();
+          toast(evt.error, true);
+          break;
+        case "done":
+          pillHide();
+          break;
+      }
+    });
+  } catch (e) {
+    if (e.message === "locked") return;
+    pillHide();
+    toast("Connection lost — " + e.message, true);
+  } finally {
+    setBusy(false);
+    refreshStatus();
+  }
+}
 
 /* ----------------------------------------------------------------- wires */
 

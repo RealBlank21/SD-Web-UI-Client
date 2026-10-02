@@ -149,11 +149,6 @@ Rules:
   app already shows the generated image to the user.
 - For edit_image, the 'image' argument must be a bare file name of a previously
   generated image (as shown in chat or the gallery), never a path.
-- Regenerate requests ("Regenerate <file> — <change>"): the user tapped
-  regenerate on an image. If <change> is empty, generate a fresh variation:
-  call generate_image with the same prompt and settings as that image but a
-  new seed. If a change is given, call edit_image on that file and work the
-  change into the prompt (denoising ~0.65 keeps the composition close).
 - If a tool returns an error, explain it in plain words and suggest a fix
   (e.g. out-of-memory -> smaller size, or a different checkpoint).
 - Ordinary conversation: just answer, no tools.
