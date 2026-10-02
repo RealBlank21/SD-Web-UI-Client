@@ -21,6 +21,7 @@ const els = {
   composer: $("composer"),
   lb: $("lightbox"), lbImg: $("lb-img"), lbName: $("lb-name"),
   lbPrev: $("lb-prev"), lbNext: $("lb-next"), lbClose: $("lb-close"),
+  lbInfo: $("lb-info"), lbSheet: $("lb-sheet"),
   lbMeta: $("lb-meta"), lbPrompt: $("lb-prompt"), lbNeg: $("lb-neg"),
   lbParams: $("lb-params"),
   lbPromptWrap: $("lb-prompt-wrap"), lbNegWrap: $("lb-neg-wrap"),
@@ -161,7 +162,7 @@ function addGeneration(evt, idx) {
       '<img loading="lazy" alt="">' +
       '<button class="car-arrow car-next" aria-label="Next variant">›</button>' +
       '<span class="car-count"></span>' +
-      '</div><div class="gen-meta"></div>';
+      '</div>';
     rec = { card,
             files: (evt.files || []).map((f) => f.split("/").pop()),
             pos: 0, evtIdxs: idx != null ? [idx] : [] };
@@ -173,21 +174,6 @@ function addGeneration(evt, idx) {
       e.stopPropagation();
       slideVariant(rec, 1);
     });
-
-    const meta = card.querySelector(".gen-meta");
-    const g = evt.gen || {};
-    const chips = [];
-    if (g.model) chips.push([g.model, ""]);
-    if (g.width && g.height) chips.push([`${g.width}×${g.height}`, ""]);
-    if (g.steps) chips.push([`${g.steps} steps`, ""]);
-    if (g.cfg_scale != null) chips.push([`cfg ${g.cfg_scale}`, ""]);
-    if (g.sampler_name) chips.push([g.sampler_name, ""]);
-    if (g.clip_skip) chips.push([`clip ${g.clip_skip}`, ""]);
-    if (g.denoising_strength != null) chips.push([`denoise ${g.denoising_strength}`, ""]);
-    if ((g.batch_size || 1) > 1) chips.push([`batch ${g.batch_size}`, ""]);
-    if (evt.seed != null) chips.push([`seed ${evt.seed}`, "seed"]);
-    if (g.elapsed) chips.push([`${Number(g.elapsed).toFixed(1)} s`, ""]);
-    for (const [t, cls] of chips) meta.appendChild(el("span", "chip " + cls, t));
 
     card.addEventListener("click", (ev) => {
       if (ev.target.tagName !== "BUTTON" && rec.files.length) {
@@ -497,6 +483,7 @@ let lbIndex = -1;
 function openLightbox(name) {
   lbIndex = images.findIndex((x) => x.name === name);
   if (lbIndex < 0) { lbIndex = 0; images.unshift({ name, seed: null }); }
+  toggleLbInfo(false);
   showLightbox();
   els.lb.hidden = false;
 }
@@ -534,6 +521,13 @@ function showLightbox() {
 function lbMove(d) {
   const ni = lbIndex + d;
   if (ni >= 0 && ni < images.length) { lbIndex = ni; showLightbox(); }
+}
+
+// the (i) button slides the info popup over the image
+function toggleLbInfo(open) {
+  const show = open === undefined ? !els.lbSheet.classList.contains("open") : !!open;
+  els.lbSheet.classList.toggle("open", show);
+  els.lbInfo.classList.toggle("on", show);
 }
 
 /* -------------------------------------------------------------- settings */
@@ -934,35 +928,12 @@ function switchView(v) {
   if (v === "gallery") loadGallery();
 }
 
-/* ------------------------------------------------------------- appearance */
+/* ----------------------------------------------------------------- images */
 
-// compact shows native-resolution images; verbose uses small thumbnails
+// native-resolution images everywhere; generation details live in the
+// lightbox info popup
 function imgSrcFor(name) {
-  const compact = document.body.classList.contains("compact");
-  return (compact ? "/outputs/" : "/thumb/") + name;
-}
-
-function refreshGenSrcs() {
-  for (const img of els.msgs.querySelectorAll(".gen-viewer img")) {
-    if (img.dataset.name) img.src = imgSrcFor(img.dataset.name);
-  }
-}
-
-function applyAppearance() {
-  const mode = localStorage.getItem("appearance") || "verbose";
-  document.body.classList.toggle("compact", mode === "compact");
-  for (const b of document.querySelectorAll("#sh-appearance button")) {
-    b.classList.toggle("on", b.dataset.mode === mode);
-  }
-  refreshGenSrcs();
-}
-
-for (const b of document.querySelectorAll("#sh-appearance button")) {
-  b.addEventListener("click", () => {
-    localStorage.setItem("appearance", b.dataset.mode);
-    applyAppearance();
-    toast(b.dataset.mode === "compact" ? "Compact mode" : "Verbose mode");
-  });
+  return "/outputs/" + name;
 }
 
 /* accent color — custom UI theme (from the old Chatterbox appearance wheel) */
@@ -1474,17 +1445,13 @@ $("sh-logout").addEventListener("click", async () => {
 });
 
 els.lbClose.addEventListener("click", closeLightbox);
+els.lbInfo.addEventListener("click", () => toggleLbInfo());
 els.lbPrev.addEventListener("click", () => lbMove(-1));
 els.lbNext.addEventListener("click", () => lbMove(1));
-$("lb-edit").addEventListener("click", () => {
-  const im = images[lbIndex];
-  if (!im) return;
-  closeLightbox();
-  switchView("chat");
-  els.input.value = `Edit ${im.name} — `;
-  autosize();
-  els.input.focus();
-  els.send.classList.add("ready");
+// tapping the picture dismisses the info popup (swipe still navigates)
+els.lbStage.addEventListener("click", (e) => {
+  if (e.target.closest(".lb-nav")) return;
+  if (els.lbSheet.classList.contains("open")) toggleLbInfo(false);
 });
 $("lb-download").addEventListener("click", () => {
   const im = images[lbIndex];
@@ -1515,7 +1482,10 @@ els.lbStage.addEventListener("touchend", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (!els.lb.hidden) {
-    if (e.key === "Escape") closeLightbox();
+    if (e.key === "Escape") {
+      if (els.lbSheet.classList.contains("open")) toggleLbInfo(false);
+      else closeLightbox();
+    }
     if (e.key === "ArrowLeft") lbMove(-1);
     if (e.key === "ArrowRight") lbMove(1);
   } else if (e.key === "Escape" && !els.settings.hidden) {
@@ -1539,7 +1509,6 @@ async function init() {
   if (inited) return;
   inited = true;
   switchView("chars");                    // the app opens on the character list
-  applyAppearance();
   autosize();
   refreshStatus();
   try {

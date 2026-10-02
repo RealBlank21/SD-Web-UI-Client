@@ -225,7 +225,7 @@ button:active { transform: scale(.97); }
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 
-.msg { max-width: 88%; padding: 10px 13px; border-radius: var(--radius); white-space: pre-wrap; word-wrap: break-word; font-size: 14.5px; }
+.msg { max-width: 100%; padding: 10px 13px; border-radius: var(--radius); white-space: pre-wrap; word-wrap: break-word; font-size: 14.5px; }
 .msg.user {
   align-self: flex-end;
   background: linear-gradient(135deg, #5b45a8, #7a4aa8);
@@ -244,43 +244,42 @@ button:active { transform: scale(.97); }
   color: #ffc9cf; font-size: 13.5px;
 }
 
-/* generation card inside the chat */
+/* generation card inside the chat — picture-first; details live in the
+   lightbox info popup, so no meta chips here */
 .gen {
-  align-self: flex-start; max-width: 96%;
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: var(--radius); overflow: hidden;
+  align-self: stretch; width: 100%; max-width: 100%;
 }
-.gen-viewer { position: relative; display: flex; padding: 8px; background: #0d111c; }
-.gen-viewer img { width: 96px; height: 96px; object-fit: cover; border-radius: 9px; cursor: pointer; }
+.gen-viewer { position: relative; display: flex; padding: 2px 0; }
+.gen-viewer img {
+  width: auto; height: auto; max-width: 100%;
+  border-radius: 12px; cursor: pointer;
+  box-shadow: 0 1px 10px rgba(0, 0, 0, .45);
+}
 .gen-viewer img:active { transform: scale(.97); }
 .car-arrow {
   position: absolute; top: 50%; transform: translateY(-50%); z-index: 2;
-  width: 30px; height: 36px; font-size: 19px; color: var(--text);
-  background: rgba(10, 12, 20, .62); border-radius: 8px;
+  width: 42px; height: 60px; font-size: 30px; color: var(--text);
+  background: rgba(255, 255, 255, .08); border-radius: 10px;
   display: flex; align-items: center; justify-content: center;
   visibility: hidden;
 }
 .car-arrow:active { transform: translateY(-50%) scale(.93); }
-.car-prev { left: 12px; }
-.car-next { right: 12px; }
+.car-prev { left: 6px; }
+.car-next { right: 6px; }
 .car-count {
-  position: absolute; right: 12px; bottom: 14px; z-index: 2;
+  position: absolute; right: 10px; bottom: 10px; z-index: 2;
   font-size: 10.5px; color: var(--text);
   background: rgba(10, 12, 20, .7); border-radius: 6px; padding: 1px 7px;
 }
-.gen-meta { display: flex; flex-wrap: wrap; gap: 5px; padding: 4px 10px 10px; }
+
+/* tool/model rows are internal bookkeeping — hidden; details live in the lightbox */
+.tool-start, .models { display: none; }
+
 .chip {
   font-size: 11px; color: var(--dim);
   background: var(--panel2); border-radius: 7px; padding: 2px 8px;
 }
 .chip.seed { color: #e8c46a; }
-
-.models { align-self: stretch; max-width: 100%; font-size: 12.5px; color: var(--dim); padding: 2px 4px; }
-.models b { color: var(--text); }
-
-.tool-start { align-self: flex-start; font-size: 12px; color: var(--dim); padding: 0 4px; display: flex; align-items: center; gap: 7px; }
-.tool-start .tname { font-family: ui-monospace, Consolas, monospace; color: var(--accent); }
-.tool-start.done .tname { color: var(--dim); }
 
 /* status pill (spinner + progress) */
 .pill {
@@ -382,6 +381,8 @@ button:active { transform: scale(.97); }
   font-size: 12px; color: var(--dim);
 }
 .lb-top span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-btns { display: flex; gap: 2px; flex: none; }
+#lb-info.on { color: var(--accent); }
 
 .lb-stage {
   flex: 1; min-height: 0; position: relative;
@@ -396,12 +397,18 @@ button:active { transform: scale(.97); }
 }
 #lb-prev { left: 6px; } #lb-next { right: 6px; }
 
+/* info popup — hidden until the (i) button opens it */
 .lb-sheet {
-  max-height: 44vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 3;
+  max-height: 46vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
   background: var(--panel); border-top: 1px solid var(--line);
   border-radius: 16px 16px 0 0;
-  padding: 12px 16px calc(env(safe-area-inset-bottom) + 14px);
+  padding: 14px 16px calc(env(safe-area-inset-bottom) + 14px);
+  transform: translateY(104%);
+  transition: transform .22s ease;
+  box-shadow: 0 -8px 30px rgba(0, 0, 0, .45);
 }
+.lb-sheet.open { transform: translateY(0); }
 .lb-sect { margin-bottom: 10px; }
 .lb-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin-bottom: 3px; display: flex; justify-content: space-between; align-items: center; }
 .lb-sect p { font-size: 13px; word-break: break-word; white-space: pre-wrap; }
@@ -490,39 +497,7 @@ button:active { transform: scale(.97); }
 #ch-form .row button { margin-top: 0; }
 #ch-delete { margin-top: 10px; }
 
-/* appearance segmented control */
-.seg { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px; }
-.seg button {
-  flex: 1; padding: 8px 4px; border-radius: 8px; font-size: 13px; color: var(--dim);
-}
-.seg button.on { background: var(--panel2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
-
-/* compact mode: native-resolution picture, scaled to the chat column */
-body.compact .gen-meta { display: none; }
-body.compact .tool-start, body.compact .models { display: none; }
-body.compact .msg { max-width: 100%; }
-body.compact .gen {
-  align-self: stretch; width: 100%; max-width: 100%;
-  background: transparent; border: 0; border-radius: 0;
-}
-body.compact .gen-viewer {
-  padding: 2px 0; background: transparent;
-}
-body.compact .gen-viewer img {
-  width: auto; height: auto; max-width: 100%;
-  border-radius: 12px;
-  box-shadow: 0 1px 10px rgba(0, 0, 0, .45);
-}
-body.compact .car-arrow {
-  width: 42px; height: 60px; font-size: 30px;
-  background: rgba(255, 255, 255, .08);
-}
-body.compact .car-prev { left: 6px; }
-body.compact .car-next { right: 6px; }
-body.compact .car-count { right: 10px; bottom: 10px; }
-/* compact lightbox: viewer only — no generation details */
-body.compact #lb-name, body.compact .lb-meta,
-body.compact .lb-sect { display: none; }
+/* compact mode is gone: the chat is always picture-first (styles merged above) */
 
 /* ----------------------------------------------------------------- toast */
 
