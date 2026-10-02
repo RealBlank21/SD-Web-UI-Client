@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=23">
+<link rel="stylesheet" href="/static/style.css?v=24">
 </head>
 <body>
 
@@ -222,18 +222,28 @@
   </div>
 </div>
 
-<div id="settings" hidden>
-  <div class="sh-card">
-    <div class="sh-head"><b>Settings</b>
-      <button id="sh-close" class="iconbtn" aria-label="Close">
-        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
-      </button>
-    </div>
-    <div class="sh-body">
+<div id="page-settings" class="page" hidden>
+  <div class="view-head">
+    <button id="ps-back" class="iconbtn" aria-label="Back">
+      <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <b>Settings</b>
+    <span class="head-pad" aria-hidden="true"></span>
+  </div>
+  <nav class="subtabs" id="ps-tabs">
+    <button class="on" data-tab="persona">Persona</button>
+    <button data-tab="llm">LLM</button>
+    <button data-tab="image">Image</button>
+    <button data-tab="visuals">Visuals</button>
+  </nav>
+  <div class="ps-body">
+    <section class="sh-body" data-pane="persona">
       <label>Your name <span class="dim">— how the AI knows you</span></label>
       <input id="sh-username" placeholder="e.g. Alex" autocomplete="off" autocapitalize="off" maxlength="60">
       <button id="sh-save-username">Save name</button>
+    </section>
 
+    <section class="sh-body" data-pane="llm" hidden>
       <label>OpenRouter API key <span class="dim" id="sh-keymask"></span></label>
       <input id="sh-key" type="password" class="mono" placeholder="sk-or-…"
              autocomplete="off" spellcheck="false" autocapitalize="off">
@@ -250,6 +260,17 @@
       </div>
       <div class="hint" id="sh-scenehint">Roleplay aid: when the model didn't make an image itself, a quick model check generates one if the scene changed. Adds one extra LLM call per image-less message.</div>
 
+      <label>System message <span class="dim" id="sh-sysstate"></span></label>
+      <textarea id="sh-sysprompt" class="mono" rows="8" spellcheck="false"
+                autocapitalize="off" autocomplete="off"></textarea>
+      <div class="row">
+        <button id="sh-save-sys">Save message</button>
+        <button id="sh-reset-sys">Reset to default</button>
+      </div>
+      <div class="hint">Core instructions for the AI model. The model guide (model_guide.txt) is appended after this automatically. Applies from the next message on.</div>
+    </section>
+
+    <section class="sh-body" data-pane="image" hidden>
       <label>SD WebUI server URL <span class="dim" id="sh-sdok"></span></label>
       <input id="sh-sd" class="mono" spellcheck="false" autocomplete="off" autocapitalize="off"
              placeholder="http://100.93.220.68:7860">
@@ -261,7 +282,9 @@
         <button id="sh-load">Load</button>
       </div>
       <div class="hint" id="sh-modelhint">Loading a checkpoint takes 10-30 s.</div>
+    </section>
 
+    <section class="sh-body" data-pane="visuals" hidden>
       <label>Accent <span class="dim">— UI color</span></label>
       <div class="row row-accent">
         <button class="swatch" data-accent="#b18cff" style="--sw:#b18cff" aria-label="Violet"></button>
@@ -270,20 +293,10 @@
         <button class="swatch" data-accent="#8ab4ff" style="--sw:#8ab4ff" aria-label="Sky"></button>
         <input type="color" id="accent-pick" value="#b18cff" aria-label="Custom accent color">
       </div>
-
-      <label>System message <span class="dim" id="sh-sysstate"></span></label>
-      <textarea id="sh-sysprompt" class="mono" rows="8" spellcheck="false"
-                autocapitalize="off" autocomplete="off"></textarea>
-      <div class="row">
-        <button id="sh-save-sys">Save message</button>
-        <button id="sh-reset-sys">Reset to default</button>
-      </div>
-      <div class="hint">Core instructions for the AI model. The model guide (model_guide.txt) is appended after this automatically. Applies from the next message on.</div>
-
-      <div class="sh-sep"></div>
-      <button id="sh-logout" class="danger-btn">Lock app</button>
-      <div class="hint">Served by <span class="mono">server.py</span> on your home server.</div>
-    </div>
+    </section>
+  </div>
+  <div class="ps-foot">
+    <button id="sh-logout" class="danger-btn">Lock app</button>
   </div>
 </div>
 
@@ -308,6 +321,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=23"></script>
+<script src="/static/app.js?v=24"></script>
 </body>
 </html>

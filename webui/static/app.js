@@ -28,7 +28,7 @@ const els = {
   lbParams: $("lb-params"),
   lbPromptWrap: $("lb-prompt-wrap"), lbNegWrap: $("lb-neg-wrap"),
   lbParamsWrap: $("lb-params-wrap"), lbStage: $("lb-stage"),
-  settings: $("settings"), shModels: $("sh-models"), shLoad: $("sh-load"),
+  pageSettings: $("page-settings"), shModels: $("sh-models"), shLoad: $("sh-load"),
   shCur: $("sh-cur"), shSd: $("sh-sd"), shLlm: $("sh-llm"), shKey: $("sh-key"),
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
   shUsername: $("sh-username"),
@@ -532,10 +532,21 @@ function toggleLbInfo(open) {
   els.lbInfo.classList.toggle("on", show);
 }
 
-/* -------------------------------------------------------------- settings */
+/* settings — full page with Chatterbox-style sub-tabs */
+
+function setPsTab(name) {
+  for (const b of document.querySelectorAll("#ps-tabs button")) {
+    b.classList.toggle("on", b.dataset.tab === name);
+  }
+  for (const s of document.querySelectorAll("#page-settings section[data-pane]")) {
+    s.hidden = s.dataset.pane !== name;
+  }
+  document.querySelector(".ps-body").scrollTop = 0;
+}
 
 async function openSettings() {
-  els.settings.hidden = false;
+  els.pageSettings.hidden = false;
+  setPsTab("persona");
   try {
     // refresh=1 → server asks SD to rescan its models dir, fresh list
     const s = await api("/api/status?refresh=1");
@@ -1480,10 +1491,10 @@ els.input.addEventListener("keydown", (e) => {
   }
 });
 
-$("sh-close").addEventListener("click", () => { els.settings.hidden = true; });
-els.settings.addEventListener("click", (e) => {
-  if (e.target === els.settings) els.settings.hidden = true;
-});
+$("ps-back").addEventListener("click", () => { els.pageSettings.hidden = true; });
+for (const b of document.querySelectorAll("#ps-tabs button")) {
+  b.addEventListener("click", () => setPsTab(b.dataset.tab));
+}
 $("sh-save-key").addEventListener("click", () => {
   const v = els.shKey.value.trim();
   if (v) saveSettings({ openrouter_key: v }, $("sh-save-key"), "API key saved")
@@ -1598,8 +1609,8 @@ document.addEventListener("keydown", (e) => {
     }
     if (e.key === "ArrowLeft") lbMove(-1);
     if (e.key === "ArrowRight") lbMove(1);
-  } else if (e.key === "Escape" && !els.settings.hidden) {
-    els.settings.hidden = true;
+  } else if (e.key === "Escape" && !els.pageSettings.hidden) {
+    els.pageSettings.hidden = true;
   } else if (e.key === "Escape" && !els.pageChform.hidden) {
     els.pageChform.hidden = true;
   } else if (e.key === "Escape" && !els.pageHist.hidden) {
