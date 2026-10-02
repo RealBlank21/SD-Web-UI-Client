@@ -84,6 +84,98 @@ function el(tag, cls, text) {
 
 function esc(s) { return String(s ?? ""); }
 
+/* markdown → safe HTML (AI bubbles). Escape everything first, then apply a
+   compact renderer: headings, lists, blockquotes, hr, fenced + inline code,
+   bold, italic, strike, http(s) links. Single newlines become <br> —
+   roleplay replies rely on line breaks. */
+
+function escHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;",
+      '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function mdInline(t) {
+  // t is HTML-escaped, code spans already lifted out as placeholders
+  t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  t = t.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  t = t.replace(/(^|[^*\w])\*([^*]+)\*/g, "$1<em>$2</em>");
+  t = t.replace(/(^|[^_\w])_([^_]+)_/g, "$1<em>$2</em>");
+  t = t.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  return t;
+}
+
+function mdToHtml(src) {
+  const blocks = [];
+  let t = escHtml(src);
+  t = t.replace(/```[^\n]*\n?([\s\S]*?)(?:```|$)/g, (_, code) => {
+    blocks.push("<pre><code>" + code.replace(/\n+$/, "") + "</code></pre>");
+    return "\u0000B" + (blocks.length - 1) + "\u0000";
+  });
+  t = t.replace(/`([^`\n]+)`/g, (_, c) => {
+    blocks.push("<code>" + c + "</code>");
+    return "\u0000C" + (blocks.length - 1) + "\u0000";
+  });
+
+  const out = [];
+  let para = [];
+  let quote = [];
+  let list = null;                      // "ul" | "ol"
+  const flushPara = () => {
+    if (para.length) {
+      out.push("<p>" + para.map(mdInline).join("<br>") + "</p>");
+      para = [];
+    }
+  };
+  const flushQuote = () => {
+    if (quote.length) {
+      out.push("<blockquote><p>" + quote.map(mdInline).join("<br>") +
+        "</p></blockquote>");
+      quote = [];
+    }
+  };
+  const closeList = () => { if (list) { out.push("</" + list + ">"); list = null; } };
+
+  for (const line of t.split("\n")) {
+    const bm = line.match(/^\u0000B(\d+)\u0000\s*$/);
+    if (bm) {
+      flushPara(); flushQuote(); closeList();
+      out.push(blocks[+bm[1]]);
+      continue;
+    }
+    if (/^\s*$/.test(line)) { flushPara(); flushQuote(); closeList(); continue; }
+    const h = line.match(/^#{1,4}\s+(.+)$/);
+    if (h) {
+      flushPara(); flushQuote(); closeList();
+      out.push("<h4>" + mdInline(h[1]) + "</h4>");
+      continue;
+    }
+    if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(line)) {
+      flushPara(); flushQuote(); closeList();
+      out.push("<hr>");
+      continue;
+    }
+    const q = line.match(/^\s*&gt;\s?(.*)$/);
+    if (q) { flushPara(); closeList(); quote.push(q[1]); continue; }
+    const ul = line.match(/^\s*[-*•]\s+(.+)$/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (ul || ol) {
+      flushPara(); flushQuote();
+      const want = ul ? "ul" : "ol";
+      if (list !== want) { closeList(); out.push("<" + want + ">"); list = want; }
+      out.push("<li>" + mdInline((ul || ol)[1]) + "</li>");
+      continue;
+    }
+    closeList();
+    para.push(line);
+  }
+  flushPara(); flushQuote(); closeList();
+  return out.join("").replace(/\u0000([BC])(\d+)\u0000/g,
+    (_, k, i) => blocks[+i]);
+}
+
 function scrollDown(smooth) {
   requestAnimationFrame(() => {
     els.chatScroll.scrollTo({ top: els.chatScroll.scrollHeight, behavior: smooth ? "smooth" : "auto" });
@@ -144,7 +236,15 @@ els.gatePw.addEventListener("keydown", (e) => {
 /* -------------------------------------------------------------- timeline */
 
 function addBubble(kind, text) {
-  const m = el("div", "msg " + kind, esc(text));
+  const m = el("div", "msg " + kind);
+  m.dataset.raw = text;
+  if (kind === "ai" && text) {
+    // markdown-rendered; raw text kept for the copy menu
+    m.classList.add("md");
+    m.innerHTML = mdToHtml(text);
+  } else {
+    m.textContent = text;
+  }
   els.msgs.appendChild(m);
   return m;
 }
@@ -1320,7 +1420,8 @@ function ctxItemsFor(el) {
   if (el.classList.contains("msg")) {
     const items = [];
     if (!el.classList.contains("error")) {
-      items.push({ label: "⧉ Copy", action: () => copyText(el.textContent) });
+      items.push({ label: "⧉ Copy",
+        action: () => copyText(el.dataset.raw || el.textContent) });
     }
     items.push({ label: "🗑 Delete", danger: true, action: () => deleteChatEvent(el) });
     return { items, previewSrc: null };
