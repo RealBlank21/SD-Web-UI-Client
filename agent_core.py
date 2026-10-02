@@ -231,6 +231,30 @@ def effective_system_prompt(override: str | None = None) -> str:
     return build_system_prompt(base) if base else DEFAULT_SYSTEM_PROMPT
 
 
+def ensure_tags(prompt: str, tags: str) -> str:
+    """Prepend identity tags missing from an SD prompt (no duplicates).
+    Matching ignores backslash-escapes and parentheses so guide-style
+    tags like 'arlecchino \\(genshin impact\\)' still count as present."""
+    prompt = (prompt or "").strip()
+    tags = (tags or "").strip()
+    if not tags:
+        return prompt
+    have = [t.strip() for t in prompt.split(",") if t.strip()]
+
+    def norm(t: str) -> str:
+        return re.sub(r"[\\()]", "", t.lower()).strip()
+
+    have_norm = {norm(t) for t in have}
+    missing = []
+    for t in tags.split(","):
+        t = t.strip()
+        if t and norm(t) not in have_norm:
+            missing.append(t)
+    if not missing:
+        return prompt
+    return ", ".join(missing + have)
+
+
 # --------------------------------------------------------- scene director
 
 SCENE_DIRECTOR_PROMPT = """\

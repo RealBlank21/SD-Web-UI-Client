@@ -23,6 +23,16 @@ const els = {
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
   shScene: $("sh-scene"),
+  charname: $("charname"),
+  charsheet: $("charsheet"), chTitle: $("ch-title"),
+  chListBody: $("ch-listbody"), chForm: $("ch-form"), chList: $("ch-list"),
+  chNew: $("ch-new"), chClose: $("ch-close"),
+  chName: $("ch-name"), chTagline: $("ch-tagline"),
+  chAvatarImg: $("ch-avatar-img"), chAvatarBtn: $("ch-avatar-btn"),
+  chAvatarFile: $("ch-avatar-file"),
+  chAppearance: $("ch-appearance"), chPersona: $("ch-persona"),
+  chGreeting: $("ch-greeting"), chModel: $("ch-model"), chSize: $("ch-size"),
+  chSave: $("ch-save"), chCancel: $("ch-cancel"), chDelete: $("ch-delete"),
   toast: $("toast"),
 };
 
@@ -31,6 +41,8 @@ let busy = false;
 let statusTimer = null;   // progress polling while generating
 let toastTimer = null;
 let authed = false;
+let chars = [];           // character cards
+let activeCharId = "";
 
 /* ------------------------------------------------------------------ util */
 
@@ -602,6 +614,246 @@ async function loadModel() {
   }
 }
 
+/* ------------------------------------------------------------- characters */
+
+let statusModels = [];        // checkpoint titles cache for the char form
+let editCharId = null;        // null = creating new
+let pendingAvatar = "";       // dataURL while editing
+
+async function openChars() {
+  els.settings.hidden = true;
+  els.charsheet.hidden = false;
+  showCharList();
+  try {
+    const [d, s] = await Promise.all([
+      api("/api/characters"),
+      api("/api/status"),
+    ]);
+    chars = d.characters || [];
+    activeCharId = d.active || "";
+    statusModels = s.models || [];
+    renderCharList();
+    fillModelSelect();
+  } catch (e) {
+    if (e.message !== "locked") toast("Characters failed: " + e.message, true);
+  }
+}
+
+function closeChars() {
+  els.charsheet.hidden = true;
+}
+
+function showCharList() {
+  els.chTitle.textContent = "Characters";
+  els.chListBody.hidden = false;
+  els.chForm.hidden = true;
+  renderCharList();
+}
+
+function renderCharList() {
+  const list = els.chList;
+  list.textContent = "";
+  const plain = el("button", "char-row" + (activeCharId ? "" : " active"));
+  plain.appendChild(el("span", "char-avatar ch-noavatar", "✦"));
+  const t = el("div", "char-text");
+  t.appendChild(el("b", null, "No character"));
+  t.appendChild(el("span", "dim", "plain assistant chat"));
+  plain.appendChild(t);
+  plain.addEventListener("click", () => selectChar(""));
+  list.appendChild(plain);
+
+  for (const c of chars) {
+    const row = el("button",
+      "char-row" + (c.id === activeCharId ? " active" : ""));
+    if (c.avatar) {
+      const img = document.createElement("img");
+      img.className = "char-avatar";
+      img.src = c.avatar;
+      img.alt = "";
+      row.appendChild(img);
+    } else {
+      row.appendChild(el("span", "char-avatar ch-noavatar",
+        (c.name || "?").slice(0, 1).toUpperCase()));
+    }
+    const tx = el("div", "char-text");
+    tx.appendChild(el("b", null, c.name || c.id));
+    if (c.tagline) tx.appendChild(el("span", "dim", c.tagline));
+    if (c.id === activeCharId) tx.appendChild(el("span", "char-now", "now"));
+    row.appendChild(tx);
+    const edit = el("span", "char-edit", "✎");
+    edit.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openCharForm(c);
+    });
+    row.appendChild(edit);
+    row.addEventListener("click", () => selectChar(c.id));
+    list.appendChild(row);
+  }
+}
+
+function fillModelSelect() {
+  const sel = els.chModel;
+  sel.textContent = "";
+  sel.appendChild(el("option", null, "(current checkpoint)"));
+  for (const m of statusModels) {
+    const o = el("option", null, m);
+    o.value = m;
+    sel.appendChild(o);
+  }
+}
+
+function selectChar(id) {
+  if (id === activeCharId) { closeChars(); return; }
+  api("/api/character/select", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  }).then((d) => {
+    activeCharId = id;
+    closeChars();
+    els.msgs.textContent = "";
+    renderHistory(d.timeline || []);
+    refreshStatus();
+  }).catch((e) => {
+    if (e.message !== "locked") toast("Switch failed: " + e.message, true);
+  });
+}
+
+function openCharForm(card) {
+  editCharId = card ? card.id : null;
+  pendingAvatar = "";
+  els.chTitle.textContent = card ? "Edit character" : "New character";
+  els.chName.value = card ? card.name : "";
+  els.chTagline.value = card ? (card.tagline || "") : "";
+  els.chAppearance.value = card ? (card.appearance || "") : "";
+  els.chPersona.value = card ? (card.persona || "") : "";
+  els.chGreeting.value = card ? (card.greeting || "") : "";
+  els.chSize.value = card && card.size && card.size.length === 2
+    ? card.size[0] + "x" + card.size[1] : "";
+  fillModelSelect();
+  els.chModel.value = card ? (card.checkpoint || "") : "";
+  if (els.chModel.value === "" && card && card.checkpoint) {
+    // not in list — keep it as an option
+    const o = el("option", null, card.checkpoint);
+    o.value = card.checkpoint;
+    els.chModel.appendChild(o);
+    els.chModel.value = card.checkpoint;
+  }
+  if (card && card.avatar) {
+    els.chAvatarImg.src = card.avatar;
+    els.chAvatarImg.hidden = false;
+  } else {
+    els.chAvatarImg.hidden = true;
+  }
+  els.chDelete.hidden = !card;
+  els.chListBody.hidden = true;
+  els.chForm.hidden = false;
+  setTimeout(() => els.chName.focus(), 60);
+}
+
+async function saveCharForm() {
+  const name = els.chName.value.trim();
+  if (!name) { toast("Name required", true); return; }
+  const size = els.chSize.value;
+  const payload = {
+    id: editCharId || "",
+    name,
+    tagline: els.chTagline.value.trim(),
+    appearance: els.chAppearance.value.trim(),
+    persona: els.chPersona.value.trim(),
+    greeting: els.chGreeting.value.trim(),
+    checkpoint: els.chModel.value,
+    size: size ? size.split("x").map(Number) : [],
+  };
+  if (pendingAvatar) payload.avatar = pendingAvatar;
+  const btn = els.chSave;
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const d = await api("/api/characters", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    toast(editCharId ? "Character saved" : "Character created");
+    if (!editCharId && !activeCharId) {
+      // first character may have adopted the current chat
+      activeCharId = d.id;
+    }
+    pendingAvatar = "";
+    showCharList();
+    const cd = await api("/api/characters");
+    chars = cd.characters || [];
+    activeCharId = cd.active || activeCharId;
+    renderCharList();
+    refreshStatus();
+  } catch (e) {
+    if (e.message !== "locked") toast("Save failed: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function deleteChar() {
+  if (!editCharId) return;
+  if (!confirm("Delete this character and their chat? Images stay in the gallery.")) return;
+  try {
+    await api("/api/character/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: editCharId }),
+    });
+    toast("Character deleted");
+    const h = await api("/api/history");
+    els.msgs.textContent = "";
+    renderHistory(h.timeline || []);
+    activeCharId = "";
+    showCharList();
+    refreshStatus();
+  } catch (e) {
+    if (e.message !== "locked") toast("Delete failed: " + e.message, true);
+  }
+}
+
+function pickAvatar(file) {
+  if (!file || !file.type.startsWith("image/")) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const S = 256;
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = S;
+      const ctx = canvas.getContext("2d");
+      const side = Math.min(img.width, img.height);
+      ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2,
+        side, side, 0, 0, S, S);
+      pendingAvatar = canvas.toDataURL("image/jpeg", 0.85);
+      els.chAvatarImg.src = pendingAvatar;
+      els.chAvatarImg.hidden = false;
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+els.chClose.addEventListener("click", closeChars);
+els.charsheet.addEventListener("click", (e) => {
+  if (e.target === els.charsheet) closeChars();
+});
+$("btn-chars").addEventListener("click", openChars);
+els.chNew.addEventListener("click", () => openCharForm(null));
+els.chCancel.addEventListener("click", showCharList);
+els.chSave.addEventListener("click", saveCharForm);
+els.chDelete.addEventListener("click", deleteChar);
+els.chAvatarBtn.addEventListener("click", () => els.chAvatarFile.click());
+els.chAvatarFile.addEventListener("change", () => {
+  if (els.chAvatarFile.files[0]) pickAvatar(els.chAvatarFile.files[0]);
+  els.chAvatarFile.value = "";
+});
+
 /* ---------------------------------------------------------------- status */
 
 async function refreshStatus() {
@@ -612,6 +864,8 @@ async function refreshStatus() {
     els.modelname.textContent = s.sd_ok
       ? (s.current_model || "no checkpoint")
       : "server unreachable";
+    activeCharId = s.character ? s.character.id : "";
+    els.charname.textContent = s.character ? "· " + s.character.name : "";
     return s;
   } catch (e) {
     if (e.message === "locked") return;
@@ -1056,6 +1310,8 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "ArrowRight") lbMove(1);
   } else if (e.key === "Escape" && !els.settings.hidden) {
     els.settings.hidden = true;
+  } else if (e.key === "Escape" && !els.charsheet.hidden) {
+    closeChars();
   } else if (e.key === "Escape" && !ctxEl.hidden) {
     closeCtx();
   } else if (e.key === "Escape" && !regenEl.hidden) {

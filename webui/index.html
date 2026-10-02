@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=16">
+<link rel="stylesheet" href="/static/style.css?v=17">
 </head>
 <body>
 
@@ -35,12 +35,15 @@
     <span class="spark">✦</span>
     <div class="htext">
       <b>SD Agent</b>
-      <span class="hsub"><span id="dot" class="dot off"></span><span id="modelname">connecting…</span></span>
+      <span class="hsub"><span id="dot" class="dot off"></span><span id="modelname">connecting…</span><span id="charname"></span></span>
     </div>
   </div>
   <div class="hbtns">
     <button id="btn-new" class="iconbtn" title="New chat" aria-label="New chat">
       <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button id="btn-chars" class="iconbtn" title="Characters" aria-label="Characters">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg>
     </button>
     <button id="btn-settings" class="iconbtn" title="Settings" aria-label="Settings">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -118,6 +121,56 @@
       <button id="lb-edit">Edit in chat</button>
       <button id="lb-download">Download</button>
       <button id="lb-delete" class="danger">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div id="charsheet" hidden>
+  <div class="sh-card">
+    <div class="sh-head"><b id="ch-title">Characters</b>
+      <button id="ch-close" class="iconbtn" aria-label="Close">
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="sh-body" id="ch-listbody">
+      <div id="ch-list"></div>
+      <button id="ch-new" class="primary">New character</button>
+      <div class="hint">A character keeps their own chat, persona and look.</div>
+    </div>
+    <div class="sh-body" id="ch-form" hidden>
+      <label>Name</label>
+      <input id="ch-name" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="e.g. Arlecchino">
+      <label>Tagline</label>
+      <input id="ch-tagline" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="short description (optional)">
+      <label>Avatar</label>
+      <div class="row row-avatar">
+        <img id="ch-avatar-img" class="ch-avatar" alt="" hidden>
+        <button id="ch-avatar-btn">Choose image…</button>
+        <input type="file" id="ch-avatar-file" accept="image/*" hidden>
+      </div>
+      <label>Look — booru tags used in image prompts</label>
+      <textarea id="ch-appearance" class="mono" rows="4" spellcheck="false" autocapitalize="off"
+                placeholder="1girl, long white hair with black streaks, red x-shaped pupils, tall, pale skin…"></textarea>
+      <label>Personality</label>
+      <textarea id="ch-persona" rows="5" placeholder="How they act, speak, and behave in roleplay"></textarea>
+      <label>Greeting — their first message (optional)</label>
+      <textarea id="ch-greeting" rows="3" placeholder="*she looks up as you enter…*"></textarea>
+      <label>Checkpoint</label>
+      <select id="ch-model"></select>
+      <label>Default image size</label>
+      <select id="ch-size">
+        <option value="">Default (1024×1024)</option>
+        <option value="832x1216">832×1216 — portrait</option>
+        <option value="1216x832">1216×832 — landscape</option>
+        <option value="768x1344">768×1344 — tall</option>
+        <option value="1344x768">1344×768 — wide</option>
+      </select>
+      <div class="row">
+        <button id="ch-save" class="primary">Save character</button>
+        <button id="ch-cancel">Cancel</button>
+      </div>
+      <button id="ch-delete" class="danger-btn" hidden>Delete character</button>
+      <div class="hint">Persona and look apply from the next message. The look tags are added to every image of this character automatically.</div>
     </div>
   </div>
 </div>
@@ -202,6 +255,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=16"></script>
+<script src="/static/app.js?v=17"></script>
 </body>
 </html>

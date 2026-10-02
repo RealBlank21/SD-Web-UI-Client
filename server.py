@@ -51,6 +51,7 @@ from agent_core import (                      # vendored agent brain
     _clean_assistant_msg,
     _is_auth_error,
     effective_system_prompt,
+    ensure_tags,
     execute_tool,
 )
 
@@ -132,6 +133,38 @@ def load_session_secret() -> bytes:
     return secret
 
 
+# -------------------------------------------------------------- characters
+
+CHARS_FILE = DATA_DIR / "characters.json"
+CHATS_DIR = DATA_DIR / "chats"
+AVATAR_DIR = DATA_DIR / "avatars"
+CHAR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+DEFAULT_CHAT_FILE = CHATS_DIR / "default.json"
+
+
+def load_characters() -> list:
+    if not CHARS_FILE.exists():
+        return []
+    try:
+        d = json.loads(CHARS_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def save_characters(chars: list) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CHARS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(chars, indent=2, ensure_ascii=False),
+                   encoding="utf-8")
+    tmp.replace(CHARS_FILE)
+
+
+def slugify(name: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return s[:40] or "char"
+
+
 # ------------------------------------------------------------------ agent
 
 class Agent:
@@ -140,18 +173,36 @@ class Agent:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.client = SDClient(base_url=cfg["sd_url"])
+        self.char = None                 # active character card or None
+        self._home = DEFAULT_CHAT_FILE   # where the active chat persists
         self.messages = [self._sys_msg()]
         self.timeline = []
         self.lock = threading.Lock()     # one turn at a time
         self.status_cb = None            # set while a turn streams
+        self._load_state()
+        self._rehydrate_char()
 
     # ------------------------------------------------------------ config
 
     def _sys_msg(self) -> dict:
-        """Opening system message (custom override or built-in default)."""
-        return {"role": "system",
-                "content": effective_system_prompt(
-                    self.cfg.get("system_prompt"))}
+        """Opening system message: global override (or default) + the active
+        character's persona/appearance block."""
+        base = effective_system_prompt(self.cfg.get("system_prompt"))
+        c = self.char
+        if c:
+            parts = [f"\n\nYou are roleplaying as {c.get('name', '?')}."
+                     f"\nPersonality: {c.get('persona', '').strip()}"]
+            if c.get("greeting"):
+                parts.append("Your greeting (the chat's first message) was: "
+                             + c["greeting"].strip())
+            parts.append("Your appearance — reflect these tags in every "
+                         "image prompt that shows you:\n"
+                         + c.get("appearance", "").strip())
+            base += "\n".join(parts)
+        return {"role": "system", "content": base}
+
+    def char_tags(self) -> str:
+        return (self.char or {}).get("appearance", "") or ""
 
     def apply_config(self, cfg: dict):
         """Hot-apply new settings (LLM chain / key / SD URL / system msg)."""
@@ -214,25 +265,105 @@ class Agent:
         self.timeline = []
         self._save_state()
 
-    def _save_state(self):
+    # --------------------------------------------------------- characters
+
+    def _char_file(self, cid: str) -> Path:
+        return CHATS_DIR / f"{cid}.json"
+
+    def _rehydrate_char(self):
+        """Restore the active character from the persisted chat mirror."""
+        cid = getattr(self, "_state_char_id", "")
+        self._state_char_id = ""
+        if not cid:
+            return
+        card = next((c for c in load_characters()
+                     if c.get("id") == cid), None)
+        if card:
+            self.char = card
+            self._home = self._char_file(cid)
+            # the system message was built without the card — rebuild it
+            if self.messages and self.messages[0].get("role") == "system":
+                self.messages[0] = self._sys_msg()
+        else:
+            # mirror references a character that no longer exists — unbind
+            self._home = DEFAULT_CHAT_FILE
+
+    def set_character(self, card: dict | None) -> None:
+        """Switch the active chat to a character (or the unbound default).
+        Caller must hold the agent lock."""
+        self._save_state()                       # flush current chat home
+        self.char = card
+        self._home = self._char_file(card["id"]) if card \
+            else DEFAULT_CHAT_FILE
+        d = {}
+        if self._home.exists():
+            try:
+                d = json.loads(self._home.read_text(encoding="utf-8"))
+            except Exception:
+                d = {}
+        msgs = d.get("messages")
+        if isinstance(msgs, list):
+            self.messages = [self._sys_msg()] + msgs
+            self.timeline = d.get("timeline") or []
+        else:
+            self.messages = [self._sys_msg()]
+            self.timeline = []
+            g = (card or {}).get("greeting", "").strip()
+            if g:
+                self.messages.append({"role": "assistant", "content": g})
+                self.timeline.append({"type": "reply", "text": g})
+        self._save_state()
+
+    def bind_active_chat(self, card: dict) -> None:
+        """Attach the current (unbound, non-empty) chat to a new character."""
+        self.char = card
+        self._home = self._char_file(card["id"])
+        self._save_state()
+
+    def delete_character(self, cid: str) -> None:
+        """Remove a character's chat file. Caller must hold the agent lock
+        when the character is active."""
         try:
-            STATE_FILE.write_text(json.dumps({
+            self._char_file(cid).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    # -------------------------------------------------------- persistence
+
+    def _save_state(self):
+        """Persist the active chat to its home file + the restart mirror."""
+        try:
+            payload = {
+                "character_id": self.char["id"] if self.char else "",
                 "messages": self.messages[1:],
                 "timeline": self.timeline,
-            }, ensure_ascii=False), encoding="utf-8")
+            }
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            if self._home != STATE_FILE:
+                CHATS_DIR.mkdir(parents=True, exist_ok=True)
+                self._home.write_text(
+                    json.dumps(payload, ensure_ascii=False),
+                    encoding="utf-8")
+            STATE_FILE.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
 
     def _load_state(self):
+        """Startup: restore the active chat from the restart mirror."""
         if not STATE_FILE.exists():
+            self._home = DEFAULT_CHAT_FILE
             return
         try:
             d = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            self._state_char_id = d.get("character_id", "")
+            self._home = self._char_file(self._state_char_id) \
+                if self._state_char_id else DEFAULT_CHAT_FILE
             if isinstance(d.get("messages"), list):
                 self.messages = [self._sys_msg()] + d["messages"]
             self.timeline = d.get("timeline") or []
         except Exception:
-            pass
+            self._home = DEFAULT_CHAT_FILE
 
     # ----------------------------------------------------- scene director
 
@@ -297,13 +428,21 @@ class Agent:
         args = {"prompt": prompt,
                 "negative_prompt": str(d.get("negative") or "").strip()}
         last = self._last_gen_args()
-        model = last.get("model")
-        if not (model and model != "(unknown)"):
-            model = None
+        model = None
+        cp = (self.char or {}).get("checkpoint", "").strip()
+        if cp:
+            model = cp                      # character's preferred checkpoint
+        elif last.get("model") and last["model"] != "(unknown)":
+            model = last["model"]
         for k in ("width", "height", "steps", "cfg_scale", "sampler_name",
                   "clip_skip"):
             if last.get(k) is not None:
                 args[k] = last[k]
+        size = (self.char or {}).get("size") or []
+        if len(size) == 2:
+            args.setdefault("width", size[0])
+            args.setdefault("height", size[1])
+        args["prompt"] = ensure_tags(args["prompt"], self.char_tags())
 
         emit({"type": "status", "text": "scene changed — generating…"})
         if model:
@@ -425,6 +564,18 @@ class Agent:
         """Run one tool call in a worker thread; stream SD progress while
         generation tools run."""
         is_gen = name in GEN_TOOLS
+        if is_gen and self.char:
+            # identity tags are authoritative — add them if the model forgot
+            args["prompt"] = ensure_tags(args.get("prompt", ""),
+                                         self.char_tags())
+            # preferred checkpoint applies when the model didn't pick one
+            cp = (self.char.get("checkpoint") or "").strip()
+            if cp and not args.get("model"):
+                args["model"] = cp
+            size = self.char.get("size") or []
+            if name == "generate_image" and len(size) == 2:
+                args.setdefault("width", size[0])
+                args.setdefault("height", size[1])
         emit({"type": "tool_start", "name": name})
         out = {"result": None, "error": None}
 
@@ -886,6 +1037,10 @@ class Handler(BaseHTTPRequestHandler):
                         "busy": self.app.agent.lock.locked()})
         elif path == "/api/settings":
             self.api_settings()
+        elif path == "/api/characters":
+            self.api_characters_list()
+        elif path.startswith("/api/avatar/"):
+            self.api_avatar(path[len("/api/avatar/"):])
         elif path == "/api/image_info":
             self.api_image_info()
         else:
@@ -928,8 +1083,22 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/regenerate":
             self.api_regenerate()
         elif path == "/api/clear":
-            self.app.agent.clear()
+            agent = self.app.agent
+            if not agent.lock.acquire(blocking=False):
+                self._json({"error": "busy — a turn is already running"},
+                           409)
+                return
+            try:
+                agent.clear()
+            finally:
+                agent.lock.release()
             self._json({"ok": True})
+        elif path == "/api/characters":
+            self.api_characters_save()
+        elif path == "/api/character/select":
+            self.api_character_select()
+        elif path == "/api/character/delete":
+            self.api_character_delete()
         elif path == "/api/settings":
             self.api_settings()
         elif path == "/api/model":
@@ -1115,6 +1284,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.app.models_cache["ts"] = now
             except Exception:
                 pass
+        char = agent.char
         self._json({
             "sd_url": agent.client.base_url,
             "sd_ok": sd_ok,
@@ -1124,7 +1294,155 @@ class Handler(BaseHTTPRequestHandler):
             "has_key": agent.has_key(),
             "gallery_count": len(gallery_images()),
             "busy": agent.lock.locked(),
+            "character": ({"id": char["id"],
+                           "name": char.get("name", "")}
+                          if char else None),
         })
+
+    # ------------------------------------------------------- characters
+
+    @staticmethod
+    def _avatar_path(cid: str) -> Path | None:
+        if not CHAR_ID_RE.match(cid or ""):
+            return None
+        try:
+            for f in AVATAR_DIR.glob(cid + ".*"):
+                return f
+        except OSError:
+            pass
+        return None
+
+    def api_characters_list(self):
+        cards = load_characters()
+        out = []
+        for c in cards:
+            c = dict(c)
+            av = self._avatar_path(c["id"])
+            if av:
+                try:
+                    c["avatar"] = ("/api/avatar/" + c["id"]
+                                   + "?v=" + str(int(av.stat().st_mtime)))
+                except OSError:
+                    pass
+            out.append(c)
+        active = self.app.agent.char
+        self._json({"characters": out,
+                    "active": active["id"] if active else ""})
+
+    def api_avatar(self, cid_raw: str):
+        cid = _safe_name(cid_raw.strip().lower()) or ""
+        f = self._avatar_path(cid)
+        if f and f.is_file():
+            self._file(f, cache="private, max-age=86400")
+        else:
+            self.send_error(404)
+
+    def api_characters_save(self):
+        """Create (no id) or update (with id) a character card."""
+        body = self._body()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            self._json({"error": "name required"}, 400)
+            return
+        cards = load_characters()
+        cid = str(body.get("id", "")).strip()
+        existing = next((c for c in cards if c.get("id") == cid), None) \
+            if cid else None
+        if not existing:
+            cid = slugify(name)
+            while any(c.get("id") == cid for c in cards):
+                cid = cid[:35] + "-" + secrets.token_hex(2)
+        card = dict(existing) if existing else {
+            "id": cid, "created": int(time.time())}
+        card["name"] = name
+        card["tagline"] = str(body.get("tagline", "")).strip()[:200]
+        card["appearance"] = str(body.get("appearance", "")).strip()[:4000]
+        card["persona"] = str(body.get("persona", "")).strip()[:8000]
+        card["greeting"] = str(body.get("greeting", "")).strip()[:2000]
+        card["checkpoint"] = str(body.get("checkpoint", "")).strip()[:200]
+        size = body.get("size")
+        if isinstance(size, (list, tuple)) and len(size) == 2:
+            try:
+                card["size"] = [int(size[0]), int(size[1])]
+            except (TypeError, ValueError):
+                card["size"] = []
+        else:
+            card["size"] = []
+        avatar = str(body.get("avatar", "") or "")
+        m = re.match(r"data:image/(png|jpe?g|webp);base64,(.+)", avatar,
+                     re.S)
+        if m and len(avatar) < 3_500_000:
+            AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+            ext = "jpg" if m.group(1).startswith("jp") else m.group(1)
+            try:
+                (AVATAR_DIR / f"{cid}.{ext}").write_bytes(
+                    base64.b64decode(m.group(2)))
+            except Exception:
+                pass
+        if existing:
+            cards = [card if c.get("id") == cid else c for c in cards]
+        else:
+            cards.append(card)
+        save_characters(cards)
+
+        agent = self.app.agent
+        if agent.char and agent.char["id"] == cid:
+            agent.char = card                       # refresh live card
+            if agent.messages and \
+                    agent.messages[0].get("role") == "system":
+                agent.messages[0] = agent._sys_msg()
+        # migration: the first created character adopts the unbound chat
+        if not existing and agent.char is None and agent.timeline \
+                and agent._home == DEFAULT_CHAT_FILE:
+            agent.bind_active_chat(card)
+        self._json({"ok": True, "id": cid})
+
+    def api_character_select(self):
+        body = self._body()
+        cid = str(body.get("id", "")).strip()
+        agent = self.app.agent
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            if cid:
+                card = next((c for c in load_characters()
+                             if c.get("id") == cid), None)
+                if not card:
+                    self._json({"error": "character not found"}, 404)
+                    return
+                agent.set_character(card)
+            else:
+                agent.set_character(None)
+            self._json({"ok": True, "timeline": agent.timeline})
+        finally:
+            agent.lock.release()
+
+    def api_character_delete(self):
+        body = self._body()
+        cid = str(body.get("id", "")).strip()
+        cards = load_characters()
+        if not any(c.get("id") == cid for c in cards):
+            self._json({"error": "character not found"}, 404)
+            return
+        agent = self.app.agent
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            if agent.char and agent.char["id"] == cid:
+                agent.set_character(None)
+            agent.delete_character(cid)
+            save_characters([c for c in cards if c.get("id") != cid])
+            av = self._avatar_path(cid)
+            if av:
+                try:
+                    av.unlink()
+                except OSError:
+                    pass
+            self._json({"ok": True})
+        finally:
+            agent.lock.release()
 
     def api_image_info(self):
         qs = parse_qs(urlparse(self.path).query)
@@ -1248,8 +1566,7 @@ class App:
         self.password = password
         self.session_secret = load_session_secret()
         self.models_cache = {"ts": 0.0, "models": []}
-        self.agent = Agent(load_config())
-        self.agent._load_state()
+        self.agent = Agent(load_config())       # loads chat + character too
 
 
 # ------------------------------------------------------------------- main
