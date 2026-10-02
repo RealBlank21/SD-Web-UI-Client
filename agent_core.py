@@ -253,9 +253,13 @@ or
 {"generate": false}
 
 When "prompt" is needed: start from the last image's prompt verbatim, insert
-tags for the new action or element at the FRONT of the subject tags, keep all
-other tags unchanged, and keep the style/quality tags. Write rich booru-tag
-style prompts with a sensible negative prompt."""
+tags for the new action or element at the FRONT of the subject tags, and keep
+the style/quality tags. REMOVE or REPLACE any old tag that contradicts the new
+moment - never keep both versions. Character count first: when a person
+enters or leaves, replace the count tags (solo, 1girl, 1boy, duo, 3girls...)
+to match (e.g. solo -> duo) and add the new character's appearance tags. Same
+for location, pose, outfit, state of dress and time-of-day tags. Write rich
+booru-tag style prompts with a sensible negative prompt."""
 
 
 # ------------------------------------------------------------------- tools
