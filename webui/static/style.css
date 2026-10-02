@@ -195,6 +195,9 @@ button:active { transform: scale(.97); }
   padding: 6px 16px calc(24px + env(safe-area-inset-bottom));
   display: flex; flex-direction: column; gap: 6px;
 }
+/* scroll, don't shrink: flex-shrink would collapse textareas to ~0 (their
+   UA overflow:auto gives them a 0 automatic minimum size) */
+.page-body > * { flex: none; }
 .page-body label {
   font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
   color: var(--dim); margin-top: 14px;
