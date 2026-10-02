@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=17">
+<link rel="stylesheet" href="/static/style.css?v=18">
 </head>
 <body>
 
@@ -30,37 +30,48 @@
 
 <div id="app" hidden>
 
-<header id="top">
-  <div class="htitle">
-    <span class="spark">✦</span>
-    <div class="htext">
-      <b>SD Agent</b>
-      <span class="hsub"><span id="dot" class="dot off"></span><span id="modelname">connecting…</span><span id="charname"></span></span>
-    </div>
-  </div>
-  <div class="hbtns">
-    <button id="btn-new" class="iconbtn" title="New chat" aria-label="New chat">
-      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
-    </button>
-    <button id="btn-chars" class="iconbtn" title="Characters" aria-label="Characters">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg>
-    </button>
-    <button id="btn-settings" class="iconbtn" title="Settings" aria-label="Settings">
+<main id="view-chars" class="view">
+  <div class="view-head">
+    <b>Characters</b>
+    <button id="btn-appsettings" class="iconbtn" title="Settings" aria-label="Settings">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     </button>
   </div>
-</header>
+  <div class="searchbar">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    <input id="char-search" placeholder="Search characters…" autocomplete="off" autocapitalize="off">
+  </div>
+  <div id="charlist" class="charlist"></div>
+  <div id="charempty" class="empty" hidden>
+    <div class="empty-spark">✦</div>
+    No characters yet.<br>Tap + to create one.
+  </div>
+  <button id="btn-addchar" class="fab" aria-label="New character">
+    <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+</main>
 
-<main id="view-chat" class="view">
-  <div id="msgs"></div>
-  <div id="pill" class="pill" hidden>
-    <span class="pulse"></span><span id="pill-text">…</span>
-    <div class="pill-track"><div id="pill-bar"></div></div>
+<main id="view-chat" class="view" hidden>
+  <div class="chat-head">
+    <button id="btn-back" class="iconbtn" title="Characters" aria-label="Back to characters">
+      <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <b id="chat-charname">Free chat</b>
+    <button id="btn-newchat" class="iconbtn" title="New chat" aria-label="New chat">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </div>
+  <div id="chat-scroll">
+    <div id="msgs"></div>
+    <div id="pill" class="pill" hidden>
+      <span class="pulse"></span><span id="pill-text">…</span>
+      <div class="pill-track"><div id="pill-bar"></div></div>
+    </div>
   </div>
 </main>
 
 <main id="view-gallery" class="view" hidden>
-  <div class="ghead">
+  <div class="view-head">
     <span id="gcount">—</span>
     <button id="btn-refresh" class="iconbtn" title="Refresh" aria-label="Refresh">
       <svg viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -81,7 +92,11 @@
 </div>
 
 <nav id="tabbar">
-  <button class="tab active" data-view="chat">
+  <button class="tab active" data-view="chars">
+    <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M16.5 14.6c3 .3 5.5 2.2 5.5 5.4"/></svg>
+    <span>Chars</span>
+  </button>
+  <button class="tab" data-view="chat">
     <svg viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
     <span>Chat</span>
   </button>
@@ -127,17 +142,12 @@
 
 <div id="charsheet" hidden>
   <div class="sh-card">
-    <div class="sh-head"><b id="ch-title">Characters</b>
+    <div class="sh-head"><b id="ch-title">New character</b>
       <button id="ch-close" class="iconbtn" aria-label="Close">
         <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
     </div>
-    <div class="sh-body" id="ch-listbody">
-      <div id="ch-list"></div>
-      <button id="ch-new" class="primary">New character</button>
-      <div class="hint">A character keeps their own chat, persona and look.</div>
-    </div>
-    <div class="sh-body" id="ch-form" hidden>
+    <div class="sh-body" id="ch-form">
       <label>Name</label>
       <input id="ch-name" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="e.g. Arlecchino">
       <label>Tagline</label>
@@ -165,6 +175,13 @@
         <option value="768x1344">768×1344 — tall</option>
         <option value="1344x768">1344×768 — wide</option>
       </select>
+      <label>Sampling <span class="dim">— optional, per character</span></label>
+      <div class="row">
+        <input id="ch-temp" class="mono" type="number" step="0.05" min="0.1" max="2"
+               placeholder="temp 0.7" inputmode="decimal">
+        <input id="ch-maxtok" class="mono" type="number" step="1" min="16" max="8192"
+               placeholder="max tokens" inputmode="numeric">
+      </div>
       <div class="row">
         <button id="ch-save" class="primary">Save character</button>
         <button id="ch-cancel">Cancel</button>
@@ -183,6 +200,10 @@
       </button>
     </div>
     <div class="sh-body">
+      <label>Your name <span class="dim">— how the AI knows you</span></label>
+      <input id="sh-username" placeholder="e.g. Alex" autocomplete="off" autocapitalize="off" maxlength="60">
+      <button id="sh-save-username">Save name</button>
+
       <label>OpenRouter API key <span class="dim" id="sh-keymask"></span></label>
       <input id="sh-key" type="password" class="mono" placeholder="sk-or-…"
              autocomplete="off" spellcheck="false" autocapitalize="off">
@@ -217,6 +238,15 @@
         <button data-mode="compact">Compact</button>
       </div>
       <div class="hint" id="appearance-hint">Verbose shows model, settings and seed under each image. Compact shows just the picture, large.</div>
+
+      <label>Accent <span class="dim">— UI color</span></label>
+      <div class="row row-accent">
+        <button class="swatch" data-accent="#b18cff" style="--sw:#b18cff" aria-label="Violet"></button>
+        <button class="swatch" data-accent="#ff8ccf" style="--sw:#ff8ccf" aria-label="Pink"></button>
+        <button class="swatch" data-accent="#7ee2a8" style="--sw:#7ee2a8" aria-label="Mint"></button>
+        <button class="swatch" data-accent="#8ab4ff" style="--sw:#8ab4ff" aria-label="Sky"></button>
+        <input type="color" id="accent-pick" value="#b18cff" aria-label="Custom accent color">
+      </div>
 
       <label>System message <span class="dim" id="sh-sysstate"></span></label>
       <textarea id="sh-sysprompt" class="mono" rows="8" spellcheck="false"
@@ -255,6 +285,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=17"></script>
+<script src="/static/app.js?v=18"></script>
 </body>
 </html>

@@ -6,10 +6,13 @@ const $ = (id) => document.getElementById(id);
 const els = {
   gate: $("gate"), gatePw: $("gate-pw"), gateBtn: $("gate-btn"),
   gateErr: $("gate-err"), app: $("app"),
-  viewChat: $("view-chat"), viewGallery: $("view-gallery"),
+  viewChars: $("view-chars"), viewChat: $("view-chat"),
+  viewGallery: $("view-gallery"),
+  charSearch: $("char-search"), charlist: $("charlist"),
+  charempty: $("charempty"),
+  chatScroll: $("chat-scroll"), chatCharname: $("chat-charname"),
   msgs: $("msgs"), pill: $("pill"), pillText: $("pill-text"), pillBar: $("pill-bar"),
   input: $("input"), send: $("btn-send"),
-  dot: $("dot"), modelname: $("modelname"),
   grid: $("grid"), gcount: $("gcount"), gempty: $("gempty"),
   composer: $("composer"),
   lb: $("lightbox"), lbImg: $("lb-img"), lbName: $("lb-name"),
@@ -21,17 +24,17 @@ const els = {
   settings: $("settings"), shModels: $("sh-models"), shLoad: $("sh-load"),
   shCur: $("sh-cur"), shSd: $("sh-sd"), shLlm: $("sh-llm"), shKey: $("sh-key"),
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
+  shUsername: $("sh-username"),
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
   shScene: $("sh-scene"),
-  charname: $("charname"),
   charsheet: $("charsheet"), chTitle: $("ch-title"),
-  chListBody: $("ch-listbody"), chForm: $("ch-form"), chList: $("ch-list"),
-  chNew: $("ch-new"), chClose: $("ch-close"),
+  chForm: $("ch-form"), chClose: $("ch-close"),
   chName: $("ch-name"), chTagline: $("ch-tagline"),
   chAvatarImg: $("ch-avatar-img"), chAvatarBtn: $("ch-avatar-btn"),
   chAvatarFile: $("ch-avatar-file"),
   chAppearance: $("ch-appearance"), chPersona: $("ch-persona"),
   chGreeting: $("ch-greeting"), chModel: $("ch-model"), chSize: $("ch-size"),
+  chTemp: $("ch-temp"), chMaxtok: $("ch-maxtok"),
   chSave: $("ch-save"), chCancel: $("ch-cancel"), chDelete: $("ch-delete"),
   toast: $("toast"),
 };
@@ -71,7 +74,7 @@ function esc(s) { return String(s ?? ""); }
 
 function scrollDown(smooth) {
   requestAnimationFrame(() => {
-    els.viewChat.scrollTo({ top: els.viewChat.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    els.chatScroll.scrollTo({ top: els.chatScroll.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   });
 }
 
@@ -564,6 +567,7 @@ async function openSettings() {
       els.shSys.value = cfg.system_prompt || "";
       els.shSysState.textContent = cfg.system_prompt_custom ? "· custom" : "· default";
       els.shScene.checked = !!cfg.scene_director;
+      els.shUsername.value = cfg.username || "";
     } catch { /* optional */ }
   } catch (e) {
     if (e.message !== "locked") toast("Status failed: " + e.message, true);
@@ -603,7 +607,6 @@ async function loadModel() {
       body: JSON.stringify({ model: title }),
     });
     els.shCur.textContent = `· now: ${d.current_model || title}`;
-    els.modelname.textContent = d.current_model || title;
     toast("Checkpoint loaded");
   } catch (e) {
     if (e.message !== "locked") toast("Load failed: " + e.message, true);
@@ -620,10 +623,7 @@ let statusModels = [];        // checkpoint titles cache for the char form
 let editCharId = null;        // null = creating new
 let pendingAvatar = "";       // dataURL while editing
 
-async function openChars() {
-  els.settings.hidden = true;
-  els.charsheet.hidden = false;
-  showCharList();
+async function refreshChars() {
   try {
     const [d, s] = await Promise.all([
       api("/api/characters"),
@@ -632,44 +632,50 @@ async function openChars() {
     chars = d.characters || [];
     activeCharId = d.active || "";
     statusModels = s.models || [];
-    renderCharList();
-    fillModelSelect();
   } catch (e) {
     if (e.message !== "locked") toast("Characters failed: " + e.message, true);
   }
-}
-
-function closeChars() {
-  els.charsheet.hidden = true;
-}
-
-function showCharList() {
-  els.chTitle.textContent = "Characters";
-  els.chListBody.hidden = false;
-  els.chForm.hidden = true;
   renderCharList();
 }
 
-function renderCharList() {
-  const list = els.chList;
-  list.textContent = "";
-  const plain = el("button", "char-row" + (activeCharId ? "" : " active"));
-  plain.appendChild(el("span", "char-avatar ch-noavatar", "✦"));
-  const t = el("div", "char-text");
-  t.appendChild(el("b", null, "No character"));
-  t.appendChild(el("span", "dim", "plain assistant chat"));
-  plain.appendChild(t);
-  plain.addEventListener("click", () => selectChar(""));
-  list.appendChild(plain);
-
+function charRows(filter) {
+  const q = (filter || "").trim().toLowerCase();
+  const rows = [];
+  if (!q || "no character".includes(q) || "free chat".includes(q)) {
+    rows.push({ plain: true });
+  }
   for (const c of chars) {
-    const row = el("button",
-      "char-row" + (c.id === activeCharId ? " active" : ""));
+    if (q && !(c.name || "").toLowerCase().includes(q) &&
+        !(c.tagline || "").toLowerCase().includes(q)) continue;
+    rows.push(c);
+  }
+  return rows;
+}
+
+function renderCharList() {
+  const rows = charRows(els.charSearch.value);
+  els.charlist.textContent = "";
+  els.charempty.hidden = rows.some((r) => !r.plain);
+  for (const c of rows) {
+    const row = el("button", "char-row" + (c.plain
+      ? (activeCharId ? "" : " active")
+      : (c.id === activeCharId ? " active" : "")));
+    if (c.plain) {
+      row.appendChild(el("span", "char-avatar ch-noavatar", "✦"));
+      const tx = el("div", "char-text");
+      tx.appendChild(el("b", null, "No character"));
+      tx.appendChild(el("span", "dim", "plain assistant chat"));
+      row.appendChild(tx);
+      row.addEventListener("click", () => selectChar(""));
+      els.charlist.appendChild(row);
+      continue;
+    }
     if (c.avatar) {
       const img = document.createElement("img");
       img.className = "char-avatar";
       img.src = c.avatar;
       img.alt = "";
+      img.loading = "lazy";
       row.appendChild(img);
     } else {
       row.appendChild(el("span", "char-avatar ch-noavatar",
@@ -680,14 +686,9 @@ function renderCharList() {
     if (c.tagline) tx.appendChild(el("span", "dim", c.tagline));
     if (c.id === activeCharId) tx.appendChild(el("span", "char-now", "now"));
     row.appendChild(tx);
-    const edit = el("span", "char-edit", "✎");
-    edit.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      openCharForm(c);
-    });
-    row.appendChild(edit);
     row.addEventListener("click", () => selectChar(c.id));
-    list.appendChild(row);
+    row.dataset.charid = c.id;
+    els.charlist.appendChild(row);
   }
 }
 
@@ -703,16 +704,16 @@ function fillModelSelect() {
 }
 
 function selectChar(id) {
-  if (id === activeCharId) { closeChars(); return; }
+  if (id === activeCharId) { switchView("chat"); return; }
   api("/api/character/select", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id }),
   }).then((d) => {
     activeCharId = id;
-    closeChars();
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
+    switchView("chat");
     refreshStatus();
   }).catch((e) => {
     if (e.message !== "locked") toast("Switch failed: " + e.message, true);
@@ -730,6 +731,8 @@ function openCharForm(card) {
   els.chGreeting.value = card ? (card.greeting || "") : "";
   els.chSize.value = card && card.size && card.size.length === 2
     ? card.size[0] + "x" + card.size[1] : "";
+  els.chTemp.value = card && card.temp != null ? card.temp : "";
+  els.chMaxtok.value = card && card.max_tokens != null ? card.max_tokens : "";
   fillModelSelect();
   els.chModel.value = card ? (card.checkpoint || "") : "";
   if (els.chModel.value === "" && card && card.checkpoint) {
@@ -746,8 +749,7 @@ function openCharForm(card) {
     els.chAvatarImg.hidden = true;
   }
   els.chDelete.hidden = !card;
-  els.chListBody.hidden = true;
-  els.chForm.hidden = false;
+  els.charsheet.hidden = false;
   setTimeout(() => els.chName.focus(), 60);
 }
 
@@ -755,6 +757,8 @@ async function saveCharForm() {
   const name = els.chName.value.trim();
   if (!name) { toast("Name required", true); return; }
   const size = els.chSize.value;
+  const temp = parseFloat(els.chTemp.value);
+  const mtok = parseInt(els.chMaxtok.value, 10);
   const payload = {
     id: editCharId || "",
     name,
@@ -765,6 +769,8 @@ async function saveCharForm() {
     checkpoint: els.chModel.value,
     size: size ? size.split("x").map(Number) : [],
   };
+  if (!isNaN(temp)) payload.temp = Math.min(2, Math.max(0.1, temp));
+  if (!isNaN(mtok)) payload.max_tokens = Math.min(8192, Math.max(16, mtok));
   if (pendingAvatar) payload.avatar = pendingAvatar;
   const btn = els.chSave;
   const orig = btn.textContent;
@@ -782,11 +788,8 @@ async function saveCharForm() {
       activeCharId = d.id;
     }
     pendingAvatar = "";
-    showCharList();
-    const cd = await api("/api/characters");
-    chars = cd.characters || [];
-    activeCharId = cd.active || activeCharId;
-    renderCharList();
+    els.charsheet.hidden = true;
+    await refreshChars();
     refreshStatus();
   } catch (e) {
     if (e.message !== "locked") toast("Save failed: " + e.message, true);
@@ -796,21 +799,23 @@ async function saveCharForm() {
   }
 }
 
-async function deleteChar() {
-  if (!editCharId) return;
-  if (!confirm("Delete this character and their chat? Images stay in the gallery.")) return;
+async function deleteCharById(id, name) {
+  if (!id) return;
+  if (!confirm("Delete " + (name || "this character") +
+      " and their chat? Images stay in the gallery.")) return;
   try {
     await api("/api/character/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: editCharId }),
+      body: JSON.stringify({ id }),
     });
     toast("Character deleted");
-    const h = await api("/api/history");
-    els.msgs.textContent = "";
-    renderHistory(h.timeline || []);
-    activeCharId = "";
-    showCharList();
+    if (activeCharId === id) {
+      const h = await api("/api/history");
+      els.msgs.textContent = "";
+      renderHistory(h.timeline || []);
+    }
+    await refreshChars();
     refreshStatus();
   } catch (e) {
     if (e.message !== "locked") toast("Delete failed: " + e.message, true);
@@ -839,38 +844,76 @@ function pickAvatar(file) {
   reader.readAsDataURL(file);
 }
 
-els.chClose.addEventListener("click", closeChars);
+function charCtx(row) {
+  const id = row.dataset.charid;
+  const c = chars.find((x) => x.id === id);
+  if (!c) return;
+  openCtx([
+    { label: "✎ Edit", action: () => openCharForm(c) },
+    { label: "🗑 Delete", danger: true,
+      action: () => deleteCharById(id, c.name) },
+  ], c.avatar || null);
+}
+
+els.chClose.addEventListener("click", () => { els.charsheet.hidden = true; });
 els.charsheet.addEventListener("click", (e) => {
-  if (e.target === els.charsheet) closeChars();
+  if (e.target === els.charsheet) els.charsheet.hidden = true;
 });
-$("btn-chars").addEventListener("click", openChars);
-els.chNew.addEventListener("click", () => openCharForm(null));
-els.chCancel.addEventListener("click", showCharList);
+$("btn-addchar").addEventListener("click", () => openCharForm(null));
+$("btn-appsettings").addEventListener("click", openSettings);
+$("btn-back").addEventListener("click", () => switchView("chars"));
+$("btn-newchat").addEventListener("click", newChat);
+els.chCancel.addEventListener("click", () => { els.charsheet.hidden = true; });
 els.chSave.addEventListener("click", saveCharForm);
-els.chDelete.addEventListener("click", deleteChar);
+els.chDelete.addEventListener("click", () =>
+  deleteCharById(editCharId, els.chName.value.trim()));
 els.chAvatarBtn.addEventListener("click", () => els.chAvatarFile.click());
 els.chAvatarFile.addEventListener("change", () => {
   if (els.chAvatarFile.files[0]) pickAvatar(els.chAvatarFile.files[0]);
   els.chAvatarFile.value = "";
 });
+els.charSearch.addEventListener("input", renderCharList);
+
+/* long-press / right-click on character cards */
+els.charlist.addEventListener("contextmenu", (e) => {
+  const target = e.target.closest(".char-row");
+  if (!target || !target.dataset.charid) return;
+  e.preventDefault();
+  charCtx(target);
+});
+let chLpTimer = null, chLpStart = null;
+els.charlist.addEventListener("touchstart", (e) => {
+  const target = e.target.closest(".char-row");
+  if (!target || !target.dataset.charid) return;
+  chLpStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, target };
+  chLpTimer = setTimeout(() => {
+    chLpTimer = null;
+    if (navigator.vibrate) navigator.vibrate(25);
+    charCtx(chLpStart.target);
+    chLpStart = null;
+  }, 550);
+}, { passive: true });
+els.charlist.addEventListener("touchmove", (e) => {
+  if (!chLpTimer || !chLpStart) return;
+  const dx = e.touches[0].clientX - chLpStart.x;
+  const dy = e.touches[0].clientY - chLpStart.y;
+  if (dx * dx + dy * dy > 144) { clearTimeout(chLpTimer); chLpTimer = null; }
+}, { passive: true });
+els.charlist.addEventListener("touchend", () => {
+  if (chLpTimer) { clearTimeout(chLpTimer); chLpTimer = null; }
+}, { passive: true });
 
 /* ---------------------------------------------------------------- status */
 
 async function refreshStatus() {
   try {
     const s = await api("/api/status");
-    els.dot.classList.toggle("on", !!s.sd_ok);
-    els.dot.classList.toggle("off", !s.sd_ok);
-    els.modelname.textContent = s.sd_ok
-      ? (s.current_model || "no checkpoint")
-      : "server unreachable";
     activeCharId = s.character ? s.character.id : "";
-    els.charname.textContent = s.character ? "· " + s.character.name : "";
+    els.chatCharname.textContent = s.character ? s.character.name : "Free chat";
     return s;
   } catch (e) {
     if (e.message === "locked") return;
-    els.dot.className = "dot off";
-    els.modelname.textContent = "offline";
+    return null;
   }
 }
 
@@ -880,9 +923,11 @@ function switchView(v) {
   for (const t of document.querySelectorAll(".tab")) {
     t.classList.toggle("active", t.dataset.view === v);
   }
+  els.viewChars.hidden = v !== "chars";
   els.viewChat.hidden = v !== "chat";
   els.viewGallery.hidden = v !== "gallery";
   els.composer.hidden = v !== "chat";
+  if (v === "chars") refreshChars();
   if (v === "gallery") loadGallery();
 }
 
@@ -917,6 +962,52 @@ for (const b of document.querySelectorAll("#sh-appearance button")) {
   });
 }
 
+/* accent color — custom UI theme (from the old Chatterbox appearance wheel) */
+
+function hexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > .5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+  }
+  return [h * 60, s * 100, l * 100];
+}
+
+function applyAccent(hex) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+  const [h, s, l] = hexToHsl(hex);
+  // partner color: hue +40°, softer saturation — keeps gradients tasteful
+  const h2 = (h + 40) % 360;
+  const s2 = Math.min(85, Math.max(45, s * 0.9 + 15));
+  const l2 = Math.min(80, l + 8);
+  const root = document.documentElement.style;
+  root.setProperty("--accent", hex);
+  root.setProperty("--accent2", `hsl(${h2.toFixed(0)}, ${s2.toFixed(0)}%, ${l2.toFixed(0)}%)`);
+  localStorage.setItem("accent", hex);
+  document.getElementById("accent-pick").value = hex;
+  for (const sw of document.querySelectorAll(".swatch")) {
+    sw.classList.toggle("on", sw.dataset.accent.toLowerCase() === hex.toLowerCase());
+  }
+}
+
+(function initAccent() {
+  const saved = localStorage.getItem("accent");
+  if (saved) applyAccent(saved);
+  for (const sw of document.querySelectorAll(".swatch")) {
+    sw.addEventListener("click", () => applyAccent(sw.dataset.accent));
+  }
+  document.getElementById("accent-pick").addEventListener("input", (e) => {
+    applyAccent(e.target.value);
+  });
+})();
+
 /* ------------------------------------------------------------------ misc */
 
 function autosize() {
@@ -930,9 +1021,9 @@ function autosize() {
 
 async function newChat() {
   try {
-    await api("/api/clear", { method: "POST" });
+    const d = await api("/api/clear", { method: "POST" });
     els.msgs.textContent = "";
-    renderHistory([]);
+    renderHistory(d.timeline || []);
     toast("New chat");
   } catch (e) {
     if (e.message !== "locked") toast("Failed: " + e.message, true);
@@ -1191,8 +1282,6 @@ for (const t of document.querySelectorAll(".tab")) {
   t.addEventListener("click", () => switchView(t.dataset.view));
 }
 $("btn-refresh").addEventListener("click", loadGallery);
-$("btn-new").addEventListener("click", newChat);
-$("btn-settings").addEventListener("click", openSettings);
 $("sh-close").addEventListener("click", () => { els.settings.hidden = true; });
 els.settings.addEventListener("click", (e) => {
   if (e.target === els.settings) els.settings.hidden = true;
@@ -1244,6 +1333,10 @@ $("sh-reset-sys").addEventListener("click", async () => {
   }
 });
 $("sh-load").addEventListener("click", loadModel);
+$("sh-save-username").addEventListener("click", () => {
+  saveSettings({ username: els.shUsername.value.trim() },
+    $("sh-save-username"), "Name saved");
+});
 $("sh-scene").addEventListener("change", async () => {
   const on = els.shScene.checked;
   try {
@@ -1326,7 +1419,7 @@ let inited = false;
 async function init() {
   if (inited) return;
   inited = true;
-  switchView("chat");                     // ensure chat + composer are shown
+  switchView("chars");                    // the app opens on the character list
   applyAppearance();
   autosize();
   refreshStatus();

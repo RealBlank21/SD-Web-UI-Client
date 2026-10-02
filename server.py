@@ -98,6 +98,7 @@ DEFAULT_CONFIG = {
     "sd_url": "http://100.93.220.68:7860",
     "system_prompt": "",   # custom system message; "" = built-in default
     "scene_director": True,  # auto-generate an image on new visual moments
+    "username": "",          # how the AI knows the user
 }
 
 
@@ -185,9 +186,12 @@ class Agent:
     # ------------------------------------------------------------ config
 
     def _sys_msg(self) -> dict:
-        """Opening system message: global override (or default) + the active
-        character's persona/appearance block."""
+        """Opening system message: global override (or default) + username
+        + the active character's persona/appearance block."""
         base = effective_system_prompt(self.cfg.get("system_prompt"))
+        user = (self.cfg.get("username") or "").strip()
+        if user:
+            base += f"\n\nThe user's name is {user[:60]}."
         c = self.char
         if c:
             parts = [f"\n\nYou are roleplaying as {c.get('name', '?')}."
@@ -231,7 +235,8 @@ class Agent:
 
     # -------------------------------------------------------------- LLM
 
-    def llm_complete(self, messages: list) -> dict:
+    def llm_complete(self, messages: list, temperature: float | None = None,
+                     max_tokens: int | None = None) -> dict:
         """LLMRouter logic inline: try models in order, retry rate limits,
         stick with whichever model last worked."""
         models = self.llm_models
@@ -242,7 +247,9 @@ class Agent:
                 try:
                     self.emit_status(f"thinking · {model.split('/')[-1]}")
                     return chat_completion(self.cfg["openrouter_key"],
-                                           model, messages)
+                                           model, messages,
+                                           temperature=temperature,
+                                           max_tokens=max_tokens)
                 except LLMError as e:
                     last_err = e
                     if _is_auth_error(e):          # bad key: don't retry
@@ -263,6 +270,11 @@ class Agent:
     def clear(self):
         self.messages = [self._sys_msg()]
         self.timeline = []
+        g = (self.char or {}).get("greeting", "").strip()
+        if g:
+            # a new chat with a character starts with her greeting
+            self.messages.append({"role": "assistant", "content": g})
+            self.timeline.append({"type": "reply", "text": g})
         self._save_state()
 
     # --------------------------------------------------------- characters
@@ -509,9 +521,22 @@ class Agent:
         reply = None
         gens_before = sum(1 for e in self.timeline
                           if e.get("type") == "generation")
+        char_temp = None
+        char_mt = None
+        if self.char:
+            try:
+                char_temp = float(self.char["temp"])  # type: ignore[arg-type]
+            except (KeyError, TypeError, ValueError):
+                char_temp = None
+            try:
+                char_mt = int(self.char["max_tokens"])  # type: ignore[arg-type]
+            except (KeyError, TypeError, ValueError):
+                char_mt = None
         try:
             for _ in range(MAX_TOOL_ROUNDS):
-                data = self.llm_complete(self.messages)
+                data = self.llm_complete(self.messages,
+                                         temperature=char_temp,
+                                         max_tokens=char_mt)
                 msg = data["choices"][0]["message"]
                 self.messages.append(_clean_assistant_msg(msg))
 
@@ -630,7 +655,9 @@ class Agent:
         return result
 
 
-def chat_completion(api_key: str, llm: str, messages: list) -> dict:
+def chat_completion(api_key: str, llm: str, messages: list,
+                    temperature: float | None = None,
+                    max_tokens: int | None = None) -> dict:
     """One OpenRouter chat completion with tool definitions."""
     from agent_core import TOOLS
     headers = {
@@ -638,8 +665,11 @@ def chat_completion(api_key: str, llm: str, messages: list) -> dict:
         "Content-Type": "application/json",
         "X-Title": "SD Agent Web",
     }
-    body = {"model": llm, "messages": messages, "tools": TOOLS,
-            "temperature": 0.7}
+    body: dict = {"model": llm, "messages": messages, "tools": TOOLS,
+                  "temperature": temperature if temperature is not None
+                  else 0.7}
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
     try:
         resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
                              headers=headers, json=body, timeout=LLM_TIMEOUT)
@@ -1092,7 +1122,7 @@ class Handler(BaseHTTPRequestHandler):
                 agent.clear()
             finally:
                 agent.lock.release()
-            self._json({"ok": True})
+            self._json({"ok": True, "timeline": agent.timeline})
         elif path == "/api/characters":
             self.api_characters_save()
         elif path == "/api/character/select":
@@ -1368,6 +1398,22 @@ class Handler(BaseHTTPRequestHandler):
                 card["size"] = []
         else:
             card["size"] = []
+        try:
+            card["temp"] = round(float(body.get("temp")), 3) \
+                if body.get("temp") is not None else None
+        except (TypeError, ValueError):
+            card["temp"] = None
+        if isinstance(card["temp"], float) and \
+                not (0.1 <= card["temp"] <= 2.0):
+            card["temp"] = None
+        try:
+            card["max_tokens"] = int(body.get("max_tokens")) \
+                if body.get("max_tokens") is not None else None
+        except (TypeError, ValueError):
+            card["max_tokens"] = None
+        if isinstance(card["max_tokens"], int) and \
+                not (16 <= card["max_tokens"] <= 8192):
+            card["max_tokens"] = None
         avatar = str(body.get("avatar", "") or "")
         m = re.match(r"data:image/(png|jpe?g|webp);base64,(.+)", avatar,
                      re.S)
@@ -1481,7 +1527,8 @@ class Handler(BaseHTTPRequestHandler):
                         "key_masked": masked, "has_key": bool(key),
                         "system_prompt": override or DEFAULT_BASE_PROMPT,
                         "system_prompt_custom": bool(override),
-                        "scene_director": bool(cfg.get("scene_director"))})
+                        "scene_director": bool(cfg.get("scene_director")),
+                        "username": cfg.get("username", "")})
             return
         body = self._body()
         cfg = dict(agent.cfg)
@@ -1521,6 +1568,8 @@ class Handler(BaseHTTPRequestHandler):
             sys_touched = True
         if "scene_director" in body:
             cfg["scene_director"] = bool(body["scene_director"])
+        if "username" in body:
+            cfg["username"] = str(body["username"]).strip()[:60]
         save_config(cfg)
         agent.apply_config(cfg)
         if sys_touched:
