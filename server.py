@@ -247,7 +247,10 @@ class Agent:
 
                 tool_calls = msg.get("tool_calls") or []
                 if not tool_calls:
-                    reply = scrub_paths(msg.get("content") or "(no reply)")
+                    # an empty final message is normal now that the model
+                    # isn't asked to describe the result — just show the card
+                    reply = scrub_paths(msg.get("content") or "").strip() \
+                        or None
                     break
 
                 for tc in tool_calls:
@@ -275,9 +278,10 @@ class Agent:
             emit(evt)
             return
 
-        evt = {"type": "reply", "text": reply}
-        self.timeline.append(evt)
-        emit(evt)
+        if reply:                                 # empty final reply: no bubble
+            evt = {"type": "reply", "text": reply}
+            self.timeline.append(evt)
+            emit(evt)
 
     def _run_tool(self, name: str, args: dict, emit) -> dict:
         """Run one tool call in a worker thread; stream SD progress while
