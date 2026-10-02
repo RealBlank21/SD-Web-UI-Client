@@ -379,6 +379,9 @@ body.compact .gen-thumbs img {
   border-radius: 12px;
   box-shadow: 0 1px 10px rgba(0, 0, 0, .45);
 }
+/* compact lightbox: viewer only — no generation details */
+body.compact #lb-name, body.compact .lb-meta,
+body.compact .lb-sect { display: none; }
 
 /* ----------------------------------------------------------------- toast */
 

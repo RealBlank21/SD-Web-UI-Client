@@ -1,8 +1,8 @@
 /* SD Agent service worker — app-shell caching for offline launch.
    Network-first for API/dynamic content; cache-first for static assets. */
 
-const CACHE = "sdagent-v8";
-const V = "?v=12";                   // keep in sync with index.html
+const CACHE = "sdagent-v9";
+const V = "?v=13";                   // keep in sync with index.html
 const SHELL = [
   "/", "/index.html", "/static/style.css" + V, "/static/app.js" + V,
   "/manifest.webmanifest", "/static/icon-192.png", "/static/icon-512.png",
