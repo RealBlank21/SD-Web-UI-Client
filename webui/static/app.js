@@ -11,8 +11,10 @@ const els = {
   charSearch: $("char-search"), charlist: $("charlist"),
   charempty: $("charempty"),
   chatScroll: $("chat-scroll"), chatCharname: $("chat-charname"),
-  btnHistory: $("btn-history"), histsheet: $("histsheet"),
-  hsList: $("hs-list"), hsNew: $("hs-new"), hsClose: $("hs-close"),
+  btnHistory: $("btn-history"), pageHist: $("page-hist"),
+  pageChform: $("page-chform"), chTitle: $("ch-title"),
+  cfBack: $("cf-back"), cfSave: $("cf-save"),
+  hsBack: $("hs-back"), hsNew: $("hs-new"), hsList: $("hs-list"),
   msgs: $("msgs"), pill: $("pill"), pillText: $("pill-text"), pillBar: $("pill-bar"),
   input: $("input"), send: $("btn-send"),
   grid: $("grid"), gcount: $("gcount"), gempty: $("gempty"),
@@ -29,15 +31,13 @@ const els = {
   shUsername: $("sh-username"),
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
   shScene: $("sh-scene"),
-  charsheet: $("charsheet"), chTitle: $("ch-title"),
-  chForm: $("ch-form"), chClose: $("ch-close"),
   chName: $("ch-name"), chTagline: $("ch-tagline"),
   chAvatarImg: $("ch-avatar-img"), chAvatarBtn: $("ch-avatar-btn"),
   chAvatarFile: $("ch-avatar-file"),
   chAppearance: $("ch-appearance"), chPersona: $("ch-persona"),
   chGreeting: $("ch-greeting"), chModel: $("ch-model"), chSize: $("ch-size"),
   chTemp: $("ch-temp"), chMaxtok: $("ch-maxtok"),
-  chSave: $("ch-save"), chCancel: $("ch-cancel"), chDelete: $("ch-delete"),
+  chDelete: $("ch-delete"),
   toast: $("toast"),
 };
 
@@ -755,7 +755,7 @@ function openCharForm(card) {
     els.chAvatarImg.hidden = true;
   }
   els.chDelete.hidden = !card;
-  els.charsheet.hidden = false;
+  els.pageChform.hidden = false;
   setTimeout(() => els.chName.focus(), 60);
 }
 
@@ -778,7 +778,7 @@ async function saveCharForm() {
   if (!isNaN(temp)) payload.temp = Math.min(2, Math.max(0.1, temp));
   if (!isNaN(mtok)) payload.max_tokens = Math.min(8192, Math.max(16, mtok));
   if (pendingAvatar) payload.avatar = pendingAvatar;
-  const btn = els.chSave;
+  const btn = els.cfSave;
   const orig = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Saving…";
@@ -794,7 +794,7 @@ async function saveCharForm() {
       activeCharId = d.id;
     }
     pendingAvatar = "";
-    els.charsheet.hidden = true;
+    els.pageChform.hidden = true;
     await refreshChars();
     refreshStatus();
   } catch (e) {
@@ -861,16 +861,12 @@ function charCtx(row) {
   ], c.avatar || null);
 }
 
-els.chClose.addEventListener("click", () => { els.charsheet.hidden = true; });
-els.charsheet.addEventListener("click", (e) => {
-  if (e.target === els.charsheet) els.charsheet.hidden = true;
-});
+els.cfBack.addEventListener("click", () => { els.pageChform.hidden = true; });
 $("btn-addchar").addEventListener("click", () => openCharForm(null));
 $("btn-appsettings").addEventListener("click", openSettings);
 $("btn-back").addEventListener("click", () => switchView("chars"));
 $("btn-newchat").addEventListener("click", newChat);
-els.chCancel.addEventListener("click", () => { els.charsheet.hidden = true; });
-els.chSave.addEventListener("click", saveCharForm);
+els.cfSave.addEventListener("click", saveCharForm);
 els.chDelete.addEventListener("click", () =>
   deleteCharById(editCharId, els.chName.value.trim()));
 els.chAvatarBtn.addEventListener("click", () => els.chAvatarFile.click());
@@ -1075,7 +1071,7 @@ async function openHistory() {
       row.dataset.chatid = c.id;
       els.hsList.appendChild(row);
     }
-    els.histsheet.hidden = false;
+    els.pageHist.hidden = false;
   } catch (e) {
     if (e.message !== "locked") toast("History failed: " + e.message, true);
   }
@@ -1089,7 +1085,7 @@ function selectChat(chatId) {
   }).then((d) => {
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
-    els.histsheet.hidden = true;
+    els.pageHist.hidden = true;
     switchView("chat");
   }).catch((e) => {
     if (e.message !== "locked") toast("Open failed: " + e.message, true);
@@ -1113,12 +1109,9 @@ async function deleteChatById(chatId) {
 }
 
 els.btnHistory.addEventListener("click", openHistory);
-els.hsClose.addEventListener("click", () => { els.histsheet.hidden = true; });
-els.histsheet.addEventListener("click", (e) => {
-  if (e.target === els.histsheet) els.histsheet.hidden = true;
-});
+els.hsBack.addEventListener("click", () => { els.pageHist.hidden = true; });
 els.hsNew.addEventListener("click", async () => {
-  els.histsheet.hidden = true;
+  els.pageHist.hidden = true;
   await newChat();
 });
 els.hsList.addEventListener("contextmenu", (e) => {
@@ -1527,10 +1520,10 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "ArrowRight") lbMove(1);
   } else if (e.key === "Escape" && !els.settings.hidden) {
     els.settings.hidden = true;
-  } else if (e.key === "Escape" && !els.charsheet.hidden) {
-    closeChars();
-  } else if (e.key === "Escape" && !els.histsheet.hidden) {
-    els.histsheet.hidden = true;
+  } else if (e.key === "Escape" && !els.pageChform.hidden) {
+    els.pageChform.hidden = true;
+  } else if (e.key === "Escape" && !els.pageHist.hidden) {
+    els.pageHist.hidden = true;
   } else if (e.key === "Escape" && !ctxEl.hidden) {
     closeCtx();
   } else if (e.key === "Escape" && !regenEl.hidden) {

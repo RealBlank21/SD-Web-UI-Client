@@ -151,6 +151,39 @@ button:active { transform: scale(.97); }
 }
 .hs-list { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
 
+/* full-screen pages (android-activity style: form, history) */
+.page {
+  position: fixed; inset: 0; z-index: 80;
+  background: var(--bg);
+  display: flex; flex-direction: column;
+}
+.page-body {
+  flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 6px 16px calc(24px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 6px;
+}
+.page-body label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--dim); margin-top: 14px;
+}
+.page-body input, .page-body select, .page-body textarea {
+  width: 100%; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; font-size: 14px; outline: none;
+}
+.page-body input:focus, .page-body select:focus, .page-body textarea:focus {
+  border-color: #4a3f78;
+}
+.page-body textarea { font-size: 13px; line-height: 1.5; resize: vertical; }
+.page-body .hint { margin-top: 6px; }
+.textbtn {
+  padding: 8px 14px; border-radius: 10px; font-size: 14px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #14101f; flex: none;
+}
+.textbtn:active { transform: scale(.96); }
+.textbtn:disabled { opacity: .5; }
+
 .swatch {
   width: 38px; height: 38px; border-radius: 12px; flex: none;
   background: var(--sw); border: 2px solid transparent;
