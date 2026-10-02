@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=21">
+<link rel="stylesheet" href="/static/style.css?v=22">
 </head>
 <body>
 
@@ -33,9 +33,18 @@
 <main id="view-chars" class="view">
   <div class="view-head">
     <b>Characters</b>
-    <button id="btn-appsettings" class="iconbtn" title="Settings" aria-label="Settings">
-      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-    </button>
+    <div class="head-btns">
+      <button id="btn-gridtoggle" class="iconbtn" title="List / grid" aria-label="Toggle list or grid">
+        <svg class="ic-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        <svg class="ic-list" viewBox="0 0 24 24" hidden><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="4" cy="6" r="1.2"/><circle cx="4" cy="12" r="1.2"/><circle cx="4" cy="18" r="1.2"/></svg>
+      </button>
+      <button id="btn-gallery" class="iconbtn" title="Gallery" aria-label="Gallery">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
+      </button>
+      <button id="btn-overflow" class="iconbtn" title="More" aria-label="More options">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>
+      </button>
+    </div>
   </div>
   <div class="searchbar">
     <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
@@ -73,19 +82,25 @@
   </div>
 </main>
 
-<main id="view-gallery" class="view" hidden>
+<div id="page-gallery" class="page" hidden>
   <div class="view-head">
-    <span id="gcount">—</span>
-    <button id="btn-refresh" class="iconbtn" title="Refresh" aria-label="Refresh">
+    <button id="pg-back" class="iconbtn" aria-label="Back">
+      <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <b>Gallery</b>
+    <button id="pg-refresh" class="iconbtn" title="Refresh" aria-label="Refresh">
       <svg viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
     </button>
   </div>
-  <div id="grid" class="grid"></div>
-  <div id="gempty" class="empty" hidden>
-    <div class="empty-spark">✦</div>
-    No images yet.<br>Ask the agent to draw something.
+  <div class="page-body gallery-body">
+    <span id="gcount" class="dim gcount">—</span>
+    <div id="grid" class="grid"></div>
+    <div id="gempty" class="empty" hidden>
+      <div class="empty-spark">✦</div>
+      No images yet.<br>Ask the agent to draw something.
+    </div>
   </div>
-</main>
+</div>
 
 <div id="composer" hidden>
   <textarea id="input" rows="1" placeholder="Describe an image… or just chat" enterkeyhint="send"></textarea>
@@ -93,21 +108,6 @@
     <svg viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
   </button>
 </div>
-
-<nav id="tabbar">
-  <button class="tab active" data-view="chars">
-    <svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M16.5 14.6c3 .3 5.5 2.2 5.5 5.4"/></svg>
-    <span>Chars</span>
-  </button>
-  <button class="tab" data-view="chat">
-    <svg viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
-    <span>Chat</span>
-  </button>
-  <button class="tab" data-view="gallery">
-    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
-    <span>Gallery</span>
-  </button>
-</nav>
 
 <div id="lightbox" hidden>
   <div class="lb-top">
@@ -297,6 +297,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=21"></script>
+<script src="/static/app.js?v=22"></script>
 </body>
 </html>

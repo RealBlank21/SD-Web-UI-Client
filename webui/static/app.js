@@ -7,7 +7,7 @@ const els = {
   gate: $("gate"), gatePw: $("gate-pw"), gateBtn: $("gate-btn"),
   gateErr: $("gate-err"), app: $("app"),
   viewChars: $("view-chars"), viewChat: $("view-chat"),
-  viewGallery: $("view-gallery"),
+  pageGallery: $("page-gallery"),
   charSearch: $("char-search"), charlist: $("charlist"),
   charempty: $("charempty"),
   chatScroll: $("chat-scroll"), chatCharname: $("chat-charname"),
@@ -648,8 +648,17 @@ function charRows(filter) {
   return rows;
 }
 
+/* list/grid toggle (Chatterbox) — persists in localStorage */
+let charGrid = localStorage.getItem("charview") === "grid";
+
+function updateGridBtn() {
+  document.querySelector("#btn-gridtoggle .ic-grid").hidden = charGrid;
+  document.querySelector("#btn-gridtoggle .ic-list").hidden = !charGrid;
+}
+
 function renderCharList() {
   const rows = charRows(els.charSearch.value);
+  els.charlist.classList.toggle("asgrid", charGrid);
   els.charlist.textContent = "";
   els.charempty.hidden = rows.some((r) => !r.plain);
   for (const c of rows) {
@@ -857,7 +866,19 @@ function charCtx(row) {
 
 els.cfBack.addEventListener("click", () => { els.pageChform.hidden = true; });
 $("btn-addchar").addEventListener("click", () => openCharForm(null));
-$("btn-appsettings").addEventListener("click", openSettings);
+$("btn-overflow").addEventListener("click", () => {
+  openCtx([{ label: "⚙ Settings", action: openSettings }], null);
+});
+$("btn-gallery").addEventListener("click", openGallery);
+$("pg-back").addEventListener("click", () => { els.pageGallery.hidden = true; });
+$("pg-refresh").addEventListener("click", loadGallery);
+$("btn-gridtoggle").addEventListener("click", () => {
+  charGrid = !charGrid;
+  localStorage.setItem("charview", charGrid ? "grid" : "rows");
+  updateGridBtn();
+  renderCharList();
+});
+updateGridBtn();
 $("btn-back").addEventListener("click", () => switchView("chars"));
 $("btn-newchat").addEventListener("click", newChat);
 els.cfSave.addEventListener("click", saveCharForm);
@@ -917,15 +938,16 @@ async function refreshStatus() {
 /* ----------------------------------------------------------------- views */
 
 function switchView(v) {
-  for (const t of document.querySelectorAll(".tab")) {
-    t.classList.toggle("active", t.dataset.view === v);
-  }
   els.viewChars.hidden = v !== "chars";
   els.viewChat.hidden = v !== "chat";
-  els.viewGallery.hidden = v !== "gallery";
   els.composer.hidden = v !== "chat";
   if (v === "chars") refreshChars();
-  if (v === "gallery") loadGallery();
+}
+
+/* gallery — full-screen page opened from the Characters toolbar */
+function openGallery() {
+  els.pageGallery.hidden = false;
+  loadGallery();
 }
 
 /* ----------------------------------------------------------------- images */
@@ -1366,10 +1388,6 @@ els.input.addEventListener("keydown", (e) => {
   }
 });
 
-for (const t of document.querySelectorAll(".tab")) {
-  t.addEventListener("click", () => switchView(t.dataset.view));
-}
-$("btn-refresh").addEventListener("click", loadGallery);
 $("sh-close").addEventListener("click", () => { els.settings.hidden = true; });
 els.settings.addEventListener("click", (e) => {
   if (e.target === els.settings) els.settings.hidden = true;
@@ -1494,6 +1512,8 @@ document.addEventListener("keydown", (e) => {
     els.pageChform.hidden = true;
   } else if (e.key === "Escape" && !els.pageHist.hidden) {
     els.pageHist.hidden = true;
+  } else if (e.key === "Escape" && !els.pageGallery.hidden) {
+    els.pageGallery.hidden = true;
   } else if (e.key === "Escape" && !ctxEl.hidden) {
     closeCtx();
   } else if (e.key === "Escape" && !regenEl.hidden) {
