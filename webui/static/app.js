@@ -29,6 +29,9 @@ const els = {
   lbPromptWrap: $("lb-prompt-wrap"), lbNegWrap: $("lb-neg-wrap"),
   lbParamsWrap: $("lb-params-wrap"), lbStage: $("lb-stage"),
   pageSettings: $("page-settings"), shModels: $("sh-models"), shLoad: $("sh-load"),
+  psList: $("ps-list"), psCount: $("ps-count"),
+  pagePersona: $("page-persona"), ppTitle: $("pp-title"),
+  ppName: $("pp-name"), ppDesc: $("pp-desc"), ppDelete: $("pp-delete"),
   shCur: $("sh-cur"), shSd: $("sh-sd"), shLlm: $("sh-llm"), shKey: $("sh-key"),
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
   shUsername: $("sh-username"),
@@ -547,6 +550,7 @@ function setPsTab(name) {
 async function openSettings() {
   els.pageSettings.hidden = false;
   setPsTab("persona");
+  loadPersonas();
   try {
     // refresh=1 → server asks SD to rescan its models dir, fresh list
     const s = await api("/api/status?refresh=1");
@@ -1565,6 +1569,156 @@ $("sh-logout").addEventListener("click", async () => {
   showGate();
 });
 
+/* ------------------------------------------------------------- personas */
+
+let personas = [];            // user persona entities
+let activePersonaId = "";
+let editPersonaId = null;     // null = creating new
+
+async function loadPersonas() {
+  try {
+    const d = await api("/api/personas");
+    personas = d.personas || [];
+    activePersonaId = d.active || "";
+    renderPersonaList();
+  } catch (e) {
+    if (e.message !== "locked") toast("Personas failed: " + e.message, true);
+  }
+}
+
+function renderPersonaList() {
+  els.psList.textContent = "";
+  els.psCount.textContent = personas.length
+    ? `· ${personas.length}` : "· none yet";
+  if (!personas.length) {
+    els.psList.appendChild(el("div", "hint",
+      "No personas yet — add one to give the AI a fuller picture of you."));
+  }
+  for (const p of personas) {
+    const row = el("button", "persona-row" +
+      (p.id === activePersonaId ? " active" : ""));
+    row.dataset.personaid = p.id;
+    row.appendChild(el("span", "dot"));
+    const tx = el("div", "char-text");
+    tx.appendChild(el("b", null, p.name || p.id));
+    if (p.description) {
+      tx.appendChild(el("span", "dim", p.description));
+    }
+    row.appendChild(tx);
+    row.addEventListener("click", () => selectPersona(p.id));
+    els.psList.appendChild(row);
+  }
+}
+
+async function selectPersona(id) {
+  try {
+    await api("/api/persona/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    activePersonaId = id;
+    renderPersonaList();
+    toast(id ? "Persona selected" : "Persona cleared");
+  } catch (e) {
+    if (e.message !== "locked") toast("Select failed: " + e.message, true);
+  }
+}
+
+function openPersonaForm(p) {
+  editPersonaId = p ? p.id : null;
+  els.ppTitle.textContent = p ? "Edit persona" : "New persona";
+  els.ppName.value = p ? (p.name || "") : "";
+  els.ppDesc.value = p ? (p.description || "") : "";
+  els.ppDelete.hidden = !p;
+  els.pagePersona.hidden = false;
+  setTimeout(() => els.ppName.focus(), 60);
+}
+
+async function savePersonaForm() {
+  const name = els.ppName.value.trim();
+  if (!name) { toast("Name required", true); return; }
+  try {
+    const d = await api("/api/personas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: editPersonaId || "",
+                             name,
+                             description: els.ppDesc.value.trim() }),
+    });
+    personas = d.personas || [];
+    if (activePersonaId === (d.id)) {
+      // server already rebuilt the prompt; just reflect possible renames
+      activePersonaId = d.id;
+    }
+    renderPersonaList();
+    els.pagePersona.hidden = true;
+    toast("Persona saved");
+  } catch (e) {
+    if (e.message !== "locked") toast("Save failed: " + e.message, true);
+  }
+}
+
+async function deletePersonaById(pid) {
+  try {
+    const d = await api("/api/persona/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: pid }),
+    });
+    personas = d.personas || [];
+    activePersonaId = d.active || "";
+    renderPersonaList();
+    els.pagePersona.hidden = true;
+    toast("Persona deleted");
+  } catch (e) {
+    if (e.message !== "locked") toast("Delete failed: " + e.message, true);
+  }
+}
+
+function personaCtx(row) {
+  const p = personas.find((x) => x.id === row.dataset.personaid);
+  if (!p) return;
+  openCtx([
+    { label: "✎ Edit", action: () => openPersonaForm(p) },
+    { label: "🗑 Delete", danger: true,
+      action: () => deletePersonaById(p.id) },
+  ], null);
+}
+
+$("ps-add").addEventListener("click", () => openPersonaForm(null));
+$("pp-back").addEventListener("click", () => { els.pagePersona.hidden = true; });
+$("pp-save").addEventListener("click", savePersonaForm);
+$("pp-delete").addEventListener("click", () =>
+  deletePersonaById(editPersonaId));
+els.psList.addEventListener("contextmenu", (e) => {
+  const target = e.target.closest(".persona-row");
+  if (!target) return;
+  e.preventDefault();
+  personaCtx(target);
+});
+let psLpTimer = null, psLpStart = null;
+els.psList.addEventListener("touchstart", (e) => {
+  const target = e.target.closest(".persona-row");
+  if (!target) return;
+  psLpStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, target };
+  psLpTimer = setTimeout(() => {
+    psLpTimer = null;
+    if (navigator.vibrate) navigator.vibrate(25);
+    personaCtx(psLpStart.target);
+    psLpStart = null;
+  }, 550);
+}, { passive: true });
+els.psList.addEventListener("touchmove", (e) => {
+  if (!psLpTimer || !psLpStart) return;
+  const dx = e.touches[0].clientX - psLpStart.x;
+  const dy = e.touches[0].clientY - psLpStart.y;
+  if (dx * dx + dy * dy > 144) { clearTimeout(psLpTimer); psLpTimer = null; }
+}, { passive: true });
+els.psList.addEventListener("touchend", () => {
+  if (psLpTimer) { clearTimeout(psLpTimer); psLpTimer = null; psLpStart = null; }
+}, { passive: true });
+
 els.lbClose.addEventListener("click", closeLightbox);
 els.lbInfo.addEventListener("click", () => toggleLbInfo());
 els.lbPrev.addEventListener("click", () => lbMove(-1));
@@ -1611,6 +1765,8 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "ArrowRight") lbMove(1);
   } else if (e.key === "Escape" && !els.pageSettings.hidden) {
     els.pageSettings.hidden = true;
+  } else if (e.key === "Escape" && !els.pagePersona.hidden) {
+    els.pagePersona.hidden = true;
   } else if (e.key === "Escape" && !els.pageChform.hidden) {
     els.pageChform.hidden = true;
   } else if (e.key === "Escape" && !els.pageHist.hidden) {

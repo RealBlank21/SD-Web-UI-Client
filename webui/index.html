@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=24">
+<link rel="stylesheet" href="/static/style.css?v=25">
 </head>
 <body>
 
@@ -238,9 +238,14 @@
   </nav>
   <div class="ps-body">
     <section class="sh-body" data-pane="persona">
-      <label>Your name <span class="dim">— how the AI knows you</span></label>
+      <label>Your name <span class="dim">— fallback when no persona is selected</span></label>
       <input id="sh-username" placeholder="e.g. Alex" autocomplete="off" autocapitalize="off" maxlength="60">
       <button id="sh-save-username">Save name</button>
+
+      <label>Personas <span class="dim" id="ps-count"></span></label>
+      <div id="ps-list" class="persona-list"></div>
+      <button id="ps-add">+ New persona</button>
+      <div class="hint">A persona tells the AI who you are — name, background, how you speak. The selected one is sent with every chat. Long-press a persona to edit or delete it.</div>
     </section>
 
     <section class="sh-body" data-pane="llm" hidden>
@@ -300,6 +305,25 @@
   </div>
 </div>
 
+<div id="page-persona" class="page" hidden>
+  <div class="view-head">
+    <button id="pp-back" class="iconbtn" aria-label="Back">
+      <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <b id="pp-title">New persona</b>
+    <button id="pp-save" class="textbtn">Save</button>
+  </div>
+  <div class="page-body">
+    <label>Name</label>
+    <input id="pp-name" spellcheck="false" autocomplete="off" autocapitalize="off"
+           placeholder="e.g. Alex" maxlength="80">
+    <label>Description <span class="dim">— who you are in the roleplay</span></label>
+    <textarea id="pp-desc" rows="9" placeholder="Appearance, background, occupation, how you speak and act…&#10;&#10;e.g. A tall bounty hunter in a worn duster coat. Speaks quietly and rarely asks questions twice."></textarea>
+    <button id="pp-delete" class="danger-btn" hidden>Delete persona</button>
+    <div class="hint">The selected persona is sent to the AI with every chat. Leave unselected to use just your plain name.</div>
+  </div>
+</div>
+
 <div id="ctx" hidden>
   <div class="ctx-card" id="ctx-card"></div>
 </div>
@@ -321,6 +345,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=24"></script>
+<script src="/static/app.js?v=25"></script>
 </body>
 </html>

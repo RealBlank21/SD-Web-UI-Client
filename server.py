@@ -100,6 +100,7 @@ DEFAULT_CONFIG = {
     "system_prompt": "",   # custom system message; "" = built-in default
     "scene_director": True,  # auto-generate an image on new visual moments
     "username": "",          # how the AI knows the user
+    "persona_id": "",        # active user persona (data/personas.json)
 }
 
 
@@ -182,6 +183,27 @@ def slugify(name: str) -> str:
     return s[:40] or "char"
 
 
+# ------------------------------------------------------------------ personas
+
+PERSONAS_FILE = DATA_DIR / "personas.json"
+
+
+def load_personas() -> list:
+    if not PERSONAS_FILE.exists():
+        return []
+    try:
+        d = json.loads(PERSONAS_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def save_personas(lst: list) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PERSONAS_FILE.write_text(json.dumps(lst, ensure_ascii=False),
+                             encoding="utf-8")
+
+
 def migrate_flat_chats() -> None:
     """Phase A → B: move single-file chats/<char>.json into per-chat files."""
     try:
@@ -234,12 +256,25 @@ class Agent:
     # ------------------------------------------------------------ config
 
     def _sys_msg(self) -> dict:
-        """Opening system message: global override (or default) + username
-        + the active character's persona/appearance block."""
+        """Opening system message: global override (or default) + user
+        persona (or plain username) + the active character's block."""
         base = effective_system_prompt(self.cfg.get("system_prompt"))
-        user = (self.cfg.get("username") or "").strip()
-        if user:
-            base += f"\n\nThe user's name is {user[:60]}."
+        pid = (self.cfg.get("persona_id") or "").strip()
+        persona = next((p for p in load_personas() if p.get("id") == pid),
+                       None) if pid else None
+        if persona:
+            nm = str(persona.get("name") or "").strip()[:80]
+            ds = str(persona.get("description") or "").strip()[:4000]
+            block = "\n\nUser Persona:"
+            if nm:
+                block += f"\nName: {nm}"
+            if ds:
+                block += f"\nDescription: {ds}"
+            base += block
+        else:
+            user = (self.cfg.get("username") or "").strip()
+            if user:
+                base += f"\n\nThe user's name is {user[:60]}."
         c = self.char
         if c:
             parts = [f"\n\nYou are roleplaying as {c.get('name', '?')}."
@@ -1246,6 +1281,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_characters_list()
         elif path == "/api/chats":
             self.api_chats_list()
+        elif path == "/api/personas":
+            self.api_personas_list()
         elif path.startswith("/api/avatar/"):
             self.api_avatar(path[len("/api/avatar/"):])
         elif path == "/api/image_info":
@@ -1310,6 +1347,12 @@ class Handler(BaseHTTPRequestHandler):
             self.api_character_select()
         elif path == "/api/character/delete":
             self.api_character_delete()
+        elif path == "/api/personas":
+            self.api_personas_save()
+        elif path == "/api/persona/select":
+            self.api_persona_select()
+        elif path == "/api/persona/delete":
+            self.api_persona_delete()
         elif path == "/api/settings":
             self.api_settings()
         elif path == "/api/model":
@@ -1814,6 +1857,71 @@ class Handler(BaseHTTPRequestHandler):
                         "system_prompt_custom": bool(cfg["system_prompt"])})
         else:
             self._json({"ok": True})
+
+    def api_personas_list(self):
+        self._json({"personas": load_personas(),
+                    "active": self.app.agent.cfg.get("persona_id", "")})
+
+    def api_personas_save(self):
+        """Create (no id) or update (with id) a user persona."""
+        body = self._body()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            self._json({"error": "name required"}, 400)
+            return
+        lst = load_personas()
+        pid = str(body.get("id", "")).strip()
+        existing = next((p for p in lst if p.get("id") == pid), None) \
+            if pid else None
+        if not existing:
+            pid = slugify(name)
+            while any(p.get("id") == pid for p in lst):
+                pid = pid[:35] + "-" + secrets.token_hex(2)
+        p = dict(existing) if existing else {"id": pid}
+        p["name"] = name[:80]
+        p["description"] = str(body.get("description", "")).strip()[:4000]
+        if existing:
+            lst = [p if x.get("id") == pid else x for x in lst]
+        else:
+            lst.append(p)
+        save_personas(lst)
+        agent = self.app.agent
+        if agent.cfg.get("persona_id") == pid:
+            # live persona edit — rebuild the running system message
+            agent.apply_config(dict(agent.cfg))
+        self._json({"ok": True, "id": pid, "personas": lst,
+                    "active": agent.cfg.get("persona_id", "")})
+
+    def api_persona_select(self):
+        body = self._body()
+        pid = str(body.get("id", "")).strip()
+        if pid and not any(p.get("id") == pid for p in load_personas()):
+            self._json({"error": "persona not found"}, 404)
+            return
+        agent = self.app.agent
+        cfg = dict(agent.cfg)
+        cfg["persona_id"] = pid
+        save_config(cfg)
+        agent.apply_config(cfg)
+        self._json({"ok": True, "active": pid})
+
+    def api_persona_delete(self):
+        body = self._body()
+        pid = str(body.get("id", "")).strip()
+        lst = load_personas()
+        if not any(p.get("id") == pid for p in lst):
+            self._json({"error": "persona not found"}, 404)
+            return
+        lst = [p for p in lst if p.get("id") != pid]
+        save_personas(lst)
+        agent = self.app.agent
+        if agent.cfg.get("persona_id") == pid:
+            cfg = dict(agent.cfg)
+            cfg["persona_id"] = ""
+            save_config(cfg)
+            agent.apply_config(cfg)
+        self._json({"ok": True, "personas": lst,
+                    "active": agent.cfg.get("persona_id", "")})
 
     def api_model(self):
         body = self._body()
