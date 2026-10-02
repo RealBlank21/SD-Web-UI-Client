@@ -244,6 +244,7 @@ class Agent:
         self.client = SDClient(base_url=cfg["sd_url"])
         self.char = None                 # active character card or None
         self.chat_id = ""                # active chat id (bound chats)
+        self.scenario_id = ""            # scenario bound to the active chat
         self._title = ""                 # active chat's title
         self._home = DEFAULT_CHAT_FILE   # where the active chat persists
         self.messages = [self._sys_msg()]
@@ -286,6 +287,14 @@ class Agent:
                          "image prompt that shows you:\n"
                          + c.get("appearance", "").strip())
             base += "\n".join(parts)
+        sc = None
+        if self.scenario_id and c:
+            sc = next((s for s in (c.get("scenarios") or [])
+                       if s.get("id") == self.scenario_id), None)
+        if sc:
+            base += ("\n\nScenario Context:\nScenario: "
+                     + (sc.get("name") or "").strip()[:80]
+                     + "\n" + (sc.get("description") or "").strip()[:4000])
         return {"role": "system", "content": base}
 
     def char_tags(self) -> str:
@@ -385,19 +394,30 @@ class Agent:
 
     def _apply_chat_payload(self, d: dict):
         self._title = str(d.get("title", ""))
+        self.scenario_id = str(d.get("scenario_id") or "")
         msgs = d.get("messages")
         self.messages = [self._sys_msg()] + \
             (msgs if isinstance(msgs, list) else [])
         self.timeline = d.get("timeline") or []
 
-    def _fresh_chat(self):
+    def _fresh_chat(self, scenario_id: str = ""):
+        self.scenario_id = scenario_id
         self.messages = [self._sys_msg()]
         self.timeline = []
         self._title = ""
         self._seed_greeting()
 
     def _seed_greeting(self):
-        g = (self.char or {}).get("greeting", "").strip()
+        """First AI message of a fresh chat: the bound scenario's first
+        message if there is one, else the character's greeting."""
+        g = ""
+        if self.scenario_id and self.char:
+            sc = next((s for s in (self.char.get("scenarios") or [])
+                       if s.get("id") == self.scenario_id), None)
+            if sc:
+                g = (sc.get("first_message") or "").strip()
+        if not g:
+            g = (self.char or {}).get("greeting", "").strip()
         if g:
             self.messages.append({"role": "assistant", "content": g})
             self.timeline.append({"type": "reply", "text": g})
@@ -442,10 +462,11 @@ class Agent:
         except OSError:
             pass
 
-    def new_chat(self) -> None:
+    def new_chat(self, scenario_id: str = "") -> None:
         """Start a fresh chat for the active character — the old one stays
         archived. The unbound free chat simply resets in place."""
         if not self.char:
+            self.scenario_id = ""
             self.messages = [self._sys_msg()]
             self.timeline = []
             self._title = ""
@@ -454,7 +475,7 @@ class Agent:
         self._save_state()
         self.chat_id = new_chat_id()
         self._home = self._chat_file(self.char["id"], self.chat_id)
-        self._fresh_chat()
+        self._fresh_chat(scenario_id)
         self._save_state()
 
     def select_chat(self, cid: str, chat_id: str) -> None:
@@ -529,6 +550,7 @@ class Agent:
             mirror = {
                 "character_id": self.char["id"] if self.char else "",
                 "chat_id": self.chat_id if self.char else "",
+                "scenario_id": self.scenario_id,
                 "messages": self.messages[1:],
                 "timeline": self.timeline,
             }
@@ -545,6 +567,7 @@ class Agent:
                         "character_id": cid,
                         "title": self._title,
                         "updated": now,
+                        "scenario_id": self.scenario_id,
                         "messages": mirror["messages"],
                         "timeline": self.timeline,
                     }
@@ -575,6 +598,7 @@ class Agent:
             self._state_char_id = d.get("character_id", "")
             self.chat_id = d.get("chat_id", "")
             self._title = d.get("title", "")
+            self.scenario_id = str(d.get("scenario_id") or "")
             if isinstance(d.get("messages"), list):
                 self.messages = [self._sys_msg()] + d["messages"]
             self.timeline = d.get("timeline") or []
@@ -1353,6 +1377,12 @@ class Handler(BaseHTTPRequestHandler):
             self.api_persona_select()
         elif path == "/api/persona/delete":
             self.api_persona_delete()
+        elif path == "/api/scenario":
+            self.api_scenario_save()
+        elif path == "/api/scenario/delete":
+            self.api_scenario_delete()
+        elif path == "/api/chat/scenario":
+            self.api_chat_scenario()
         elif path == "/api/settings":
             self.api_settings()
         elif path == "/api/model":
@@ -1922,6 +1952,94 @@ class Handler(BaseHTTPRequestHandler):
             agent.apply_config(cfg)
         self._json({"ok": True, "personas": lst,
                     "active": agent.cfg.get("persona_id", "")})
+
+    def api_scenario_save(self):
+        """Create (no id) or update (with id) a scenario on a character."""
+        body = self._body()
+        cid = str(body.get("char_id", "")).strip()
+        cards = load_characters()
+        card = next((c for c in cards if c.get("id") == cid), None)
+        if not card:
+            self._json({"error": "character not found"}, 404)
+            return
+        name = str(body.get("name", "")).strip()
+        if not name:
+            self._json({"error": "name required"}, 400)
+            return
+        scenarios = list(card.get("scenarios") or [])
+        sid = str(body.get("id", "")).strip()
+        existing = next((s for s in scenarios if s.get("id") == sid), None) \
+            if sid else None
+        if not existing:
+            sid = slugify(name)[:30] or "scenario"
+            while any(s.get("id") == sid for s in scenarios):
+                sid = sid[:28] + "-" + secrets.token_hex(2)
+        s = dict(existing) if existing else {"id": sid}
+        s["name"] = name[:80]
+        s["description"] = str(body.get("description", "")).strip()[:4000]
+        s["first_message"] = str(body.get("first_message", "")).strip()[:4000]
+        if existing:
+            scenarios = [s if x.get("id") == sid else x for x in scenarios]
+        else:
+            scenarios.append(s)
+        card["scenarios"] = scenarios
+        cards = [card if c.get("id") == cid else c for c in cards]
+        save_characters(cards)
+        agent = self.app.agent
+        if agent.char and agent.char["id"] == cid:
+            agent.char = card
+            if agent.messages and \
+                    agent.messages[0].get("role") == "system":
+                agent.messages[0] = agent._sys_msg()
+        self._json({"ok": True, "id": sid, "scenarios": scenarios})
+
+    def api_scenario_delete(self):
+        body = self._body()
+        cid = str(body.get("char_id", "")).strip()
+        sid = str(body.get("id", "")).strip()
+        cards = load_characters()
+        card = next((c for c in cards if c.get("id") == cid), None)
+        if not card:
+            self._json({"error": "character not found"}, 404)
+            return
+        scenarios = list(card.get("scenarios") or [])
+        if not any(s.get("id") == sid for s in scenarios):
+            self._json({"error": "scenario not found"}, 404)
+            return
+        card["scenarios"] = [s for s in scenarios if s.get("id") != sid]
+        cards = [card if c.get("id") == cid else c for c in cards]
+        save_characters(cards)
+        agent = self.app.agent
+        if agent.char and agent.char["id"] == cid:
+            agent.char = card
+            if agent.scenario_id == sid:
+                agent.scenario_id = ""
+                if agent.messages and \
+                        agent.messages[0].get("role") == "system":
+                    agent.messages[0] = agent._sys_msg()
+        self._json({"ok": True, "scenarios": card["scenarios"]})
+
+    def api_chat_scenario(self):
+        """Start a new chat for the active character bound to a scenario.
+        The scenario's first message (if any) seeds the chat."""
+        body = self._body()
+        sid = str(body.get("scenario_id", "")).strip()
+        agent = self.app.agent
+        if not agent.char:
+            self._json({"error": "select a character first"}, 400)
+            return
+        if sid and not next((s for s in (agent.char.get("scenarios") or [])
+                             if s.get("id") == sid), None):
+            self._json({"error": "scenario not found"}, 404)
+            return
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            agent.new_chat(scenario_id=sid)
+        finally:
+            agent.lock.release()
+        self._json({"ok": True, "timeline": agent.timeline})
 
     def api_model(self):
         body = self._body()

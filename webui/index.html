@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=25">
+<link rel="stylesheet" href="/static/style.css?v=26">
 </head>
 <body>
 
@@ -190,6 +190,9 @@
       <input id="ch-maxtok" class="mono" type="number" step="1" min="16" max="8192"
              placeholder="max tokens" inputmode="numeric">
     </div>
+    <label>Scenarios <span class="dim" id="sc-count"></span></label>
+    <div id="sc-list" class="hs-list"></div>
+    <button id="sc-add">+ Add scenario</button>
     <button id="ch-delete" class="danger-btn" hidden>Delete character</button>
     <div class="hint">Persona and look apply from the next message. The look tags are added to every image of this character automatically.</div>
   </div>
@@ -305,6 +308,27 @@
   </div>
 </div>
 
+<div id="page-scenario" class="page" hidden>
+  <div class="view-head">
+    <button id="scs-back" class="iconbtn" aria-label="Back">
+      <svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
+    </button>
+    <b id="scs-title">New scenario</b>
+    <button id="scs-save" class="textbtn">Save</button>
+  </div>
+  <div class="page-body">
+    <label>Name</label>
+    <input id="scs-name" spellcheck="false" autocomplete="off" autocapitalize="off"
+           placeholder="e.g. Rainy rooftop meeting" maxlength="80">
+    <label>Setting <span class="dim">— the scene the roleplay starts in</span></label>
+    <textarea id="scs-desc" rows="6" placeholder="Where you are, what just happened, the mood…&#10;&#10;e.g. A rooftop in heavy rain. She just saved your life and is furious about it."></textarea>
+    <label>First message <span class="dim">— optional; seeds the chat instead of the greeting</span></label>
+    <textarea id="scs-first" rows="5" placeholder="*she leans on the railing, not looking at you* You're late."></textarea>
+    <button id="scs-delete" class="danger-btn" hidden>Delete scenario</button>
+    <div class="hint">Start a scenario chat from the character's long-press menu. The setting is sent with every message of that chat; archived chats keep their scenario.</div>
+  </div>
+</div>
+
 <div id="page-persona" class="page" hidden>
   <div class="view-head">
     <button id="pp-back" class="iconbtn" aria-label="Back">
@@ -345,6 +369,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=25"></script>
+<script src="/static/app.js?v=26"></script>
 </body>
 </html>

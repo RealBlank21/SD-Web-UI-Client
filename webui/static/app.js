@@ -32,6 +32,10 @@ const els = {
   psList: $("ps-list"), psCount: $("ps-count"),
   pagePersona: $("page-persona"), ppTitle: $("pp-title"),
   ppName: $("pp-name"), ppDesc: $("pp-desc"), ppDelete: $("pp-delete"),
+  scList: $("sc-list"), scCount: $("sc-count"),
+  pageScenario: $("page-scenario"), scsTitle: $("scs-title"),
+  scsName: $("scs-name"), scsDesc: $("scs-desc"), scsFirst: $("scs-first"),
+  scsDelete: $("scs-delete"),
   shCur: $("sh-cur"), shSd: $("sh-sd"), shLlm: $("sh-llm"), shKey: $("sh-key"),
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
   shUsername: $("sh-username"),
@@ -749,6 +753,7 @@ function selectChar(id) {
 function openCharForm(card) {
   editCharId = card ? card.id : null;
   pendingAvatar = "";
+  scenarioCharId = card ? card.id : null;
   els.chTitle.textContent = card ? "Edit character" : "New character";
   els.chName.value = card ? card.name : "";
   els.chTagline.value = card ? (card.tagline || "") : "";
@@ -775,6 +780,7 @@ function openCharForm(card) {
     els.chAvatarImg.hidden = true;
   }
   els.chDelete.hidden = !card;
+  renderScenarioList();
   els.pageChform.hidden = false;
   setTimeout(() => els.chName.focus(), 60);
 }
@@ -876,6 +882,7 @@ function charCtx(row) {
   if (!c) return;
   openCtx([
     { label: "✎ Edit", action: () => openCharForm(c) },
+    { label: "🎬 Start scenario", action: () => startScenarioMenu(c) },
     { label: "🗑 Delete", danger: true,
       action: () => deleteCharById(id, c.name) },
   ], c.avatar || null);
@@ -1719,6 +1726,152 @@ els.psList.addEventListener("touchend", () => {
   if (psLpTimer) { clearTimeout(psLpTimer); psLpTimer = null; psLpStart = null; }
 }, { passive: true });
 
+/* ------------------------------------------------------------ scenarios */
+
+let scenarioCharId = null;    // character the scenario form edits
+let editScenarioId = null;    // null = creating new
+
+function currentScenarioCard() {
+  return chars.find((c) => c.id === scenarioCharId) || null;
+}
+
+function renderScenarioList() {
+  els.scList.textContent = "";
+  const card = currentScenarioCard();
+  const scenarios = (card && card.scenarios) || [];
+  els.scCount.textContent = scenarios.length
+    ? `· ${scenarios.length}` : "· none";
+  if (!scenarios.length) {
+    els.scList.appendChild(el("div", "hint",
+      "No scenarios yet — chat presets with their own setting and first message."));
+  }
+  for (const s of scenarios) {
+    const row = el("button", "sc-row");
+    row.dataset.scenarioid = s.id;
+    const tx = el("div", "char-text");
+    tx.appendChild(el("b", null, s.name || s.id));
+    if (s.description) tx.appendChild(el("span", "dim", s.description));
+    row.appendChild(tx);
+    row.addEventListener("click", () => openScenarioForm(s));
+    els.scList.appendChild(row);
+  }
+}
+
+function openScenarioForm(s) {
+  editScenarioId = s ? s.id : null;
+  els.scsTitle.textContent = s ? "Edit scenario" : "New scenario";
+  els.scsName.value = s ? (s.name || "") : "";
+  els.scsDesc.value = s ? (s.description || "") : "";
+  els.scsFirst.value = s ? (s.first_message || "") : "";
+  els.scsDelete.hidden = !s;
+  els.pageScenario.hidden = false;
+  setTimeout(() => els.scsName.focus(), 60);
+}
+
+async function saveScenarioForm() {
+  const name = els.scsName.value.trim();
+  if (!name) { toast("Name required", true); return; }
+  try {
+    const d = await api("/api/scenario", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        char_id: scenarioCharId,
+        id: editScenarioId || "",
+        name,
+        description: els.scsDesc.value.trim(),
+        first_message: els.scsFirst.value.trim(),
+      }),
+    });
+    const card = currentScenarioCard();
+    if (card) card.scenarios = d.scenarios || [];
+    renderScenarioList();
+    els.pageScenario.hidden = true;
+    toast("Scenario saved");
+  } catch (e) {
+    if (e.message !== "locked") toast("Save failed: " + e.message, true);
+  }
+}
+
+async function deleteScenarioById(sid) {
+  try {
+    const d = await api("/api/scenario/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ char_id: scenarioCharId, id: sid }),
+    });
+    const card = currentScenarioCard();
+    if (card) card.scenarios = d.scenarios || [];
+    renderScenarioList();
+    els.pageScenario.hidden = true;
+    toast("Scenario deleted");
+  } catch (e) {
+    if (e.message !== "locked") toast("Delete failed: " + e.message, true);
+  }
+}
+
+async function startScenarioChat(cid, sid) {
+  try {
+    if (cid !== activeCharId) {
+      await api("/api/character/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: cid }),
+      });
+    }
+    const d = await api("/api/chat/scenario", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scenario_id: sid }),
+    });
+    activeCharId = cid;
+    els.msgs.textContent = "";
+    renderHistory(d.timeline || []);
+    switchView("chat");
+    refreshStatus();
+    toast(sid ? "Scenario chat started" : "New chat");
+  } catch (e) {
+    if (e.message !== "locked") toast("Start failed: " + e.message, true);
+  }
+}
+
+function startScenarioMenu(c) {
+  const list = c.scenarios || [];
+  if (!list.length) {
+    toast("No scenarios — add one in the character editor", true);
+    return;
+  }
+  openCtx(list.map((s) => ({
+    label: "🎬 " + (s.name || s.id),
+    action: () => startScenarioChat(c.id, s.id),
+  })), null);
+}
+
+$("sc-add").addEventListener("click", () => {
+  if (!scenarioCharId) { toast("Save the character first", true); return; }
+  openScenarioForm(null);
+});
+$("scs-back").addEventListener("click", () => {
+  els.pageScenario.hidden = true;
+});
+$("scs-save").addEventListener("click", saveScenarioForm);
+$("scs-delete").addEventListener("click", () =>
+  deleteScenarioById(editScenarioId));
+els.scList.addEventListener("contextmenu", (e) => {
+  const target = e.target.closest(".sc-row");
+  if (!target) return;
+  e.preventDefault();
+  const card = currentScenarioCard();
+  const s = ((card && card.scenarios) || [])
+    .find((x) => x.id === target.dataset.scenarioid);
+  if (!s) return;
+  openCtx([
+    { label: "✎ Edit", action: () => openScenarioForm(s) },
+    { label: "🗑 Delete", danger: true,
+      action: () => deleteScenarioById(s.id) },
+  ], null);
+});
+
 els.lbClose.addEventListener("click", closeLightbox);
 els.lbInfo.addEventListener("click", () => toggleLbInfo());
 els.lbPrev.addEventListener("click", () => lbMove(-1));
@@ -1767,6 +1920,8 @@ document.addEventListener("keydown", (e) => {
     els.pageSettings.hidden = true;
   } else if (e.key === "Escape" && !els.pagePersona.hidden) {
     els.pagePersona.hidden = true;
+  } else if (e.key === "Escape" && !els.pageScenario.hidden) {
+    els.pageScenario.hidden = true;
   } else if (e.key === "Escape" && !els.pageChform.hidden) {
     els.pageChform.hidden = true;
   } else if (e.key === "Escape" && !els.pageHist.hidden) {
