@@ -90,6 +90,13 @@ button:active { transform: scale(.97); }
   color: var(--text); font-size: 15px;
 }
 .searchbar input::placeholder { color: var(--dim); }
+/* the gallery searchbar sits inside .page-body, whose generic `.page-body input`
+   rule (same specificity, defined later) re-adds a border/radius/padding — that
+   drew a second framed box inside the pill. Bare field: the pill IS the box. */
+.page-body .searchbar input {
+  background: none; border: 0; border-radius: 0; outline: none;
+  padding: 0; font-size: 15px;
+}
 
 .charlist { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 2px 6px 90px; }
 .char-row {
