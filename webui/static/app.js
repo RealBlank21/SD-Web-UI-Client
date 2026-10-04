@@ -40,7 +40,6 @@ const els = {
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
   shUsername: $("sh-username"),
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
-  shScene: $("sh-scene"),
   chName: $("ch-name"),
   chAvatarImg: $("ch-avatar-img"), chAvatarBtn: $("ch-avatar-btn"),
   chAvatarFile: $("ch-avatar-file"), chAvatarAi: $("ch-avatar-ai"),
@@ -707,7 +706,6 @@ async function openSettings() {
       if (!els.shLlm.value) els.shLlm.value = (cfg.llm || []).join(", ");
       els.shSys.value = cfg.system_prompt || "";
       els.shSysState.textContent = cfg.system_prompt_custom ? "· custom" : "· default";
-      els.shScene.checked = !!cfg.scene_director;
       els.shUsername.value = cfg.username || "";
     } catch { /* optional */ }
   } catch (e) {
@@ -1860,20 +1858,6 @@ $("sh-load").addEventListener("click", loadModel);
 $("sh-save-username").addEventListener("click", () => {
   saveSettings({ username: els.shUsername.value.trim() },
     $("sh-save-username"), "Name saved");
-});
-$("sh-scene").addEventListener("change", async () => {
-  const on = els.shScene.checked;
-  try {
-    await api("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scene_director: on }),
-    });
-    toast(on ? "Scene director on" : "Scene director off");
-  } catch (e) {
-    if (e.message !== "locked") toast(e.message, true);
-    els.shScene.checked = !on;
-  }
 });
 $("sh-logout").addEventListener("click", async () => {
   try { await api("/api/logout", { method: "POST" }); } catch { /* ignore */ }
