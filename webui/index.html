@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=38">
+<link rel="stylesheet" href="/static/style.css?v=39">
 </head>
 <body>
 
@@ -113,6 +113,14 @@
     </div>
   </div>
   <div class="page-body gallery-body">
+    <div class="searchbar gsearch">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="g-search" placeholder="Search prompts… (comma = all)" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
+      <button id="g-search-clear" class="iconbtn" aria-label="Clear search" hidden>
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
     <nav id="pg-crumbs" class="crumbs"></nav>
     <div class="gbar">
       <span id="gcount" class="dim gcount">—</span>
@@ -443,6 +451,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=38"></script>
+<script src="/static/app.js?v=39"></script>
 </body>
 </html>

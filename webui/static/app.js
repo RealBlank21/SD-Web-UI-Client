@@ -25,6 +25,7 @@ const els = {
   pgTitle: $("pg-title"), pgNewFolder: $("pg-newfolder"),
   pgSelect: $("pg-select"), pgAll: $("pg-all"), pgMove: $("pg-move"),
   pgDel: $("pg-del"), pgTag: $("pg-tag"),
+  gSearch: $("g-search"), gSearchClear: $("g-search-clear"),
   foldSheet: $("foldsheet"), foldTitle: $("fold-title"), foldSub: $("fold-sub"),
   foldName: $("fold-name"), foldOk: $("fold-ok"), foldCancel: $("fold-cancel"),
   foldPick: $("foldpick"), fpTitle: $("fp-title"), fpList: $("fp-list"),
@@ -611,6 +612,52 @@ let galTree = [];               // every folder, for the move-target picker
 let galTotal = 0;
 let galSelecting = false;
 const galSelected = new Set();  // rels selected in select mode
+let galSearchQuery = "";        // comma-separated keywords, "" = not searching
+let galSearchSeq = 0;           // ignores stale in-flight searches
+let galSearchInfo = null;       // hit counts of the last search
+
+/* Prompt search. Keywords are comma-separated and ANDed, and it walks the
+ * whole subtree of the folder being browsed — so searching inside "Venti"
+ * never reaches the gallery root. No folder navigation happens here: the
+ * grid simply shows flat results from wherever they live. */
+function setGalSearch(q, run) {
+  galSearchQuery = q || "";
+  els.gSearchClear.hidden = !galSearchQuery;
+  if (run !== false) runGallerySearch();
+}
+
+let galSearchTimer = null;
+function onGalSearchInput() {
+  clearTimeout(galSearchTimer);
+  const v = els.gSearch.value;
+  galSearchTimer = setTimeout(() => setGalSearch(v), 220);
+}
+
+async function runGallerySearch() {
+  const q = galSearchQuery.trim();
+  const seq = ++galSearchSeq;
+  if (!q) {                       // back to plain folder listing
+    galSearchQuery = "";
+    els.gSearchClear.hidden = true;
+    return loadGallery();
+  }
+  try {
+    const d = await api("/api/gallery?folder=" + encodeURIComponent(galFolder)
+                        + "&q=" + encodeURIComponent(q));
+    if (seq !== galSearchSeq) return;         // a newer keystroke won
+    images = (d.images || []).map((im) => ({
+      rel: im.rel, name: im.name, seed: im.seed, bytes: im.bytes,
+      mtime: im.mtime, folder: im.folder,
+    }));
+    galSearchInfo = { total: d.total || 0, scanned: d.scanned || 0,
+                      truncated: !!d.truncated };
+    galFolders = [];
+    renderGallery();
+  } catch (e) {
+    if (seq !== galSearchSeq) return;
+    if (e.message !== "locked") toast("Search failed: " + e.message, true);
+  }
+}
 
 function baseName(rel) {
   return String(rel || "").split("/").pop();
@@ -621,7 +668,12 @@ function joinFolder(parent, name) {
 }
 
 async function loadGallery(folder) {
-  if (folder !== undefined) galFolder = folder || "";
+  // an explicit folder argument is navigation: leave search mode behind
+  if (folder !== undefined) {
+    galFolder = folder || "";
+    if (galSearchQuery) setGalSearch("", false);
+  }
+  if (galSearchQuery) return runGallerySearch();
   try {
     const q = "/api/gallery?tree=1&folder=" + encodeURIComponent(galFolder);
     const d = await api(q);
@@ -646,22 +698,35 @@ function renderGallery() {
   renderFolders();
   renderGrid();
   const n = images.length;
-  els.gcount.textContent = n
-    ? `${n} image${n === 1 ? "" : "s"}`
-    : (galFolder ? "No images"
-                : (galFolders.length ? "No unfiled images" : "0 images"));
-  els.gtotal.textContent =
-    galFolder && galTotal !== n ? `${galTotal} in gallery` : "";
+  if (galSearchQuery) {
+    const total = galSearchInfo ? galSearchInfo.total : n;
+    els.gcount.textContent = n
+      ? `${total} match${total === 1 ? "" : "es"} for "${galSearchQuery}"`
+      : `No matches for "${galSearchQuery}"`;
+    els.gtotal.textContent = galSearchInfo && galSearchInfo.truncated
+      ? `showing first ${n}` : "";
+  } else {
+    els.gcount.textContent = n
+      ? `${n} image${n === 1 ? "" : "s"}`
+      : (galFolder ? "No images"
+                  : (galFolders.length ? "No unfiled images" : "0 images"));
+    els.gtotal.textContent =
+      galFolder && galTotal !== n ? `${galTotal} in gallery` : "";
+  }
   // the big empty state only when there is nothing to show at all
   const bare = !n && !galFolders.length;
   els.gempty.hidden = !bare;
   if (bare) {
-    els.gemptyText.textContent = galFolder
-      ? "This folder is empty."
-      : "No images yet. Ask the agent to draw something.";
+    els.gemptyText.textContent = galSearchQuery
+      ? "Nothing here matches. Try fewer keywords, or search from Gallery."
+      : (galFolder
+        ? "This folder is empty."
+        : "No images yet. Ask the agent to draw something.");
   }
   els.pgSelect.hidden = galSelecting || !n;
-  els.pgTag.hidden = galSelecting || !n;
+  // filing by keyword acts on the folder you are browsing, which is
+  // ambiguous while a recursive search is on screen
+  els.pgTag.hidden = galSelecting || !n || !!galSearchQuery;
   galTitleSync();
 }
 
@@ -734,6 +799,14 @@ function renderGrid() {
     cell.appendChild(img);
     cell.dataset.rel = im.rel;
     cell.dataset.name = im.name;
+    // a search hit can live in a subfolder — label it with the path from
+    // the folder being browsed, so the grid stays self-explanatory
+    if (im.folder !== undefined && im.folder !== galFolder) {
+      const rel = galFolder && im.folder.startsWith(galFolder + "/")
+        ? im.folder.slice(galFolder.length + 1) + "/"
+        : (im.folder ? im.folder + "/" : "");
+      if (rel) cell.appendChild(el("span", "g-loc", rel));
+    }
     if (galSelected.has(im.rel)) cell.classList.add("sel");
     els.grid.appendChild(cell);
   });
@@ -745,7 +818,8 @@ function galTitleSync() {
   const n = galSelected.size;
   els.pgTitle.textContent = galSelecting
     ? (n ? `${n} selected` : "Select images")
-    : (galFolder ? baseName(galFolder) : "Gallery");
+    : (galSearchQuery ? "Search"
+                     : (galFolder ? baseName(galFolder) : "Gallery"));
   els.pgMove.classList.toggle("armed", n > 0);
   els.pgDel.classList.toggle("armed", n > 0);
 }
@@ -779,6 +853,7 @@ function setGalSelect(on) {
 
 function galleryBack() {
   if (galSelecting) { setGalSelect(false); return; }
+  if (galSearchQuery) { els.gSearch.value = ""; setGalSearch(""); return; }
   if (galFolder) { loadGallery(parentOf(galFolder)); return; }
   els.pageGallery.hidden = true;
 }
@@ -1609,6 +1684,20 @@ $("pg-back").addEventListener("click", galleryBack);
 $("pg-refresh").addEventListener("click", () => loadGallery());
 els.pgNewFolder.addEventListener("click", () => newFolderIn(galFolder));
 els.pgTag.addEventListener("click", () => openFoldSheet("tag", galFolder, ""));
+els.gSearch.addEventListener("input", onGalSearchInput);
+els.gSearchClear.addEventListener("click", () => {
+  els.gSearch.value = "";
+  setGalSearch("");
+  els.gSearch.focus();
+});
+els.gSearch.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); clearTimeout(galSearchTimer); setGalSearch(els.gSearch.value); }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    els.gSearch.value = "";
+    setGalSearch("");
+  }
+});
 els.pgSelect.addEventListener("click", () => setGalSelect(true));
 els.pgAll.addEventListener("click", () => {
   const cells = [...els.grid.querySelectorAll(".gcell")];

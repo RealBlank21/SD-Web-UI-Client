@@ -73,6 +73,7 @@ STATIC_MIME = {
     ".txt": "text/plain; charset=utf-8",
 }
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+SEARCH_LIMIT = 500                   # cap on hits from /api/gallery/search
 GEN_TOOLS = {"generate_image", "edit_image"}
 PROGRESS_POLL = 1.2
 LLM_TIMEOUT = 180
@@ -1302,6 +1303,30 @@ def _positive_prompts(timeline: list) -> dict:
     return out
 
 
+# rel -> ((mtime_ns, size), positive, negative). A recursive search over a
+# few thousand files would otherwise re-parse every PNG chunk on each query.
+_prompt_cache: dict = {}
+
+
+def _prompts_of(path: Path, rel: str) -> tuple:
+    """(positive, negative) for an image, memoised on size+mtime so repeated
+    searches only pay for each PNG once."""
+    try:
+        st = path.stat()
+    except OSError:
+        return "", ""
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _prompt_cache.get(rel)
+    if hit is not None and hit[0] == key:
+        return hit[1], hit[2]
+    info = parse_png_info(path)
+    got = (info.get("prompt", "").strip(), info.get("negative", "").strip())
+    if len(_prompt_cache) > 8000:              # bounded; a plain clear is fine
+        _prompt_cache.clear()
+    _prompt_cache[rel] = (key, got[0], got[1])
+    return got
+
+
 def images_matching(parent: str, needle: str, timeline: list) -> dict:
     """Images sitting directly in folder `parent` whose POSITIVE prompt
     contains `needle` (case-insensitive substring). Negative prompts never
@@ -1330,7 +1355,7 @@ def images_matching(parent: str, needle: str, timeline: list) -> dict:
             continue
         total += 1
         rel = join_rel(parent, p.name)
-        prompt = (parse_png_info(p).get("prompt") or "").strip()
+        prompt, _neg = _prompts_of(p, rel)
         if not prompt:
             prompt = (known.get(rel) or "").strip()
         if not prompt:
@@ -1340,6 +1365,58 @@ def images_matching(parent: str, needle: str, timeline: list) -> dict:
         if low in prompt.casefold():
             rels.append(rel)
     return {"rels": rels, "checked": checked, "nometa": nometa, "total": total}
+
+
+def search_images(parent: str, query: str, timeline: list) -> dict:
+    """Recursive prompt search under `parent` ("" = the whole gallery).
+
+    `query` is a comma-separated list of keywords; a file matches when its
+    POSITIVE prompt contains every one of them (case-insensitive substring).
+    Scoping follows the folder you're browsing: a search inside "Venti" walks
+    "Venti" and everything below it, never the gallery root. Returns
+    {folder, q, keywords, images, scanned, total, truncated} — `total` is the
+    number of hits before the cap."""
+    folder = out_dir(parent)
+    keywords = [k.strip().casefold() for k in str(query or "").split(",")]
+    keywords = [k for k in keywords if k]
+    out = {"folder": _safe_rel(parent) or "", "q": str(query or "").strip(),
+           "keywords": keywords, "images": [], "scanned": 0,
+           "total": 0, "truncated": False}
+    if folder is None or not folder.is_dir() or not keywords:
+        return out
+    known = _positive_prompts(timeline)
+    hits = []
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in files:
+            if name.startswith(".") or Path(name).suffix.lower() not in IMG_EXTS:
+                continue
+            p = Path(root) / name
+            rel = rel_of(p)
+            prompt, _neg = _prompts_of(p, rel)
+            if not prompt:
+                prompt = (known.get(rel) or "").strip()
+            if not prompt:
+                continue
+            out["scanned"] += 1
+            low = prompt.casefold()
+            if not all(k in low for k in keywords):
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            hits.append({"rel": rel, "name": name,
+                         "folder": rel.rsplit("/", 1)[0] if "/" in rel else "",
+                         "bytes": st.st_size, "mtime": int(st.st_mtime),
+                         "seed": _seed_from_name(name)})
+    hits.sort(key=lambda h: h["mtime"], reverse=True)
+    out["total"] = len(hits)
+    if len(hits) > SEARCH_LIMIT:
+        hits = hits[:SEARCH_LIMIT]
+        out["truncated"] = True
+    out["images"] = hits
+    return out
 
 
 def parse_png_info(path: Path) -> dict:
@@ -1527,6 +1604,11 @@ class Handler(BaseHTTPRequestHandler):
             folder = _safe_rel((qs.get("folder") or [""])[0])
             if folder is None:
                 self._json({"error": "bad folder"}, 400)
+                return
+            if (qs.get("q") or [""])[0].strip():
+                self._json(search_images(folder,
+                                         (qs.get("q") or [""])[0],
+                                         self.app.agent.timeline))
                 return
             data = gallery_listing(folder)
             if (qs.get("tree") or [""])[0]:
