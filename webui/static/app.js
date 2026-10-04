@@ -25,7 +25,7 @@ const els = {
   pgTitle: $("pg-title"), pgNewFolder: $("pg-newfolder"),
   pgSelect: $("pg-select"), pgAll: $("pg-all"), pgMove: $("pg-move"),
   pgDel: $("pg-del"), pgTag: $("pg-tag"),
-  gSearch: $("g-search"), gSearchClear: $("g-search-clear"),
+  gSearch: $("g-search"),
   foldSheet: $("foldsheet"), foldTitle: $("fold-title"), foldSub: $("fold-sub"),
   foldName: $("fold-name"), foldOk: $("fold-ok"), foldCancel: $("fold-cancel"),
   foldPick: $("foldpick"), fpTitle: $("fp-title"), fpList: $("fp-list"),
@@ -622,7 +622,6 @@ let galSearchInfo = null;       // hit counts of the last search
  * grid simply shows flat results from wherever they live. */
 function setGalSearch(q, run) {
   galSearchQuery = q || "";
-  els.gSearchClear.hidden = !galSearchQuery;
   if (run !== false) runGallerySearch();
 }
 
@@ -638,7 +637,6 @@ async function runGallerySearch() {
   const seq = ++galSearchSeq;
   if (!q) {                       // back to plain folder listing
     galSearchQuery = "";
-    els.gSearchClear.hidden = true;
     return loadGallery();
   }
   try {
@@ -1685,11 +1683,6 @@ $("pg-refresh").addEventListener("click", () => loadGallery());
 els.pgNewFolder.addEventListener("click", () => newFolderIn(galFolder));
 els.pgTag.addEventListener("click", () => openFoldSheet("tag", galFolder, ""));
 els.gSearch.addEventListener("input", onGalSearchInput);
-els.gSearchClear.addEventListener("click", () => {
-  els.gSearch.value = "";
-  setGalSearch("");
-  els.gSearch.focus();
-});
 els.gSearch.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); clearTimeout(galSearchTimer); setGalSearch(els.gSearch.value); }
   if (e.key === "Escape") {

@@ -379,11 +379,9 @@ button:active { transform: scale(.97); }
 
 /* gallery is a full-screen page; page-body scrolls */
 .gallery-body { padding: 2px 12px calc(24px + env(safe-area-inset-bottom)); }
-.gsearch { margin: 4px 0 8px; padding: 0 8px 0 14px; }
-.gsearch input { min-width: 0; }
-.gsearch .iconbtn { width: 30px; height: 30px; flex: none; }
-.gsearch .iconbtn svg { width: 15px; height: 15px; }
-#page-gallery.selecting .gsearch { opacity: .4; pointer-events: none; }
+/* same pill as the character list, just re-aligned to the gallery's own
+   gutters (the base .searchbar carries the list view's 14px side margins) */
+#page-gallery .searchbar { margin: 2px 2px 10px; }
 .gbar {
   display: flex; align-items: baseline; justify-content: space-between;
   gap: 10px;
