@@ -1,13 +1,29 @@
-Nova Anime XL:
+### Nova Anime XL:
 masterpiece, best quality, amazing quality, 4k, very aesthetic, high resolution, ultra-detailed, absurdres, newest, esthetic, scenery, 1girl, solo, cute, pink hair, long hair, choppy bangs, long sidelocks, nebulae cosmic purple eyes, rimlit eyes, facing to the side, looking at viewer, downturned eyes, light smile, red annular solar eclipse halo, red choker, detailed purple blazer, collared white shirt, big red neckerchief, glowing stars in hand, dispersion \(optics\), from side, from below, dutch angle, portrait, upper body, head tilt, colorful, rim light, backlit, (colorful light particles:1.2), cosmic sky, aurora, chaos, perfect night, fantasy background, dreamlike atmosphere, BREAK, detailed background, blurry foreground, bokeh, depth of field, volumetric lighting
 Negative prompt: photorealistic, realistic, 3d, extra digits, (particles, adversarial_noise:1.2), multiple views, multiple angle, split view, grid view, two shot, outside border, picture frame, framed, border, letterboxed, pillarboxed, 2koma, modern, recent, old, oldest, cartoon, graphic, text, painting, crayon, graphite, abstract, glitch, deformed, mutated, ugly, disfigured, long body, lowres, bad anatomy, bad hands, missing fingers, extra fingers, extra digits, fewer digits, cropped, very displeasing, (worst quality, bad quality:1.2), sketch, jpeg artifacts, signature, watermark, username, (censored, bar_censor, mosaic_censor:1.2), simple background, conjoined, bad ai-generated
 Steps: 20, CFG scale: 4.5, Sampler: Euler a, Seed: 3282307999, Model: NovaAnimeILV19, width: 768, height: 1344, middle: [0, (shadow: [0, highlight: [20, Model hash: fa486caafc, Global Seed: 428649103, Hires steps: 40, Hires upscale: 1.5, Hires CFG Scale: 4, Denoising strength: 0.4, Clip skip: 2
 
-Nova Anime3D XL:
-masterpiece, best quality, amazing quality, 4k, very aesthetic, high resolution, ultra-detailed, absurdres, newest, esthetic, scenery, 3d, rendered, 1girl, solo, cute, pink hair, long hair, choppy bangs, long sidelocks, nebulae cosmic purple eyes, rimlit eyes, facing to the side, looking at viewer, downturned eyes, light smile, red annular solar eclipse halo, red choker, detailed purple blazer, collared white shirt, big red neckerchief, glowing stars in hand, dispersion \(optics\), from side, from below, dutch angle, portrait, upper body, head tilt, colorful, rim light, backlit, (colorful light particles:1.2), cosmic sky, aurora, chaos, perfect night, fantasy background, dreamlike atmosphere, BREAK, detailed background, blurry foreground, bokeh, depth of field, volumetric lighting
-Negative prompt: extra digits, (particles, adversarial_noise:1.2), multiple views, multiple angle, split view, grid view, two shot, outside border, picture frame, framed, border, letterboxed, pillarboxed, 2koma, modern, recent, old, oldest, cartoon, graphic, text, painting, crayon, graphite, abstract, glitch, deformed, mutated, ugly, disfigured, long body, lowres, bad anatomy, bad hands, missing fingers, extra fingers, extra digits, fewer digits, cropped, very displeasing, (worst quality, bad quality:1.2), sketch, jpeg artifacts, signature, watermark, username, (censored, bar_censor, mosaic_censor:1.2), simple background, conjoined, bad ai-generated
-Steps: 20, CFG scale: 4.5, Sampler: Euler a, Seed: 3941906949, Size: 768x1344, Model: NovaAnime3DILV7, middle: [0, (shadow: [0, highlight: [20, Model hash: 1d0c21959c, Global Seed: 428649103, Hires steps: 40, Hires upscale: 1.5, Hires CFG Scale: 4, Denoising strength: 0.4, Clip skip: 2
-Prefectious XL NSFW:
-masterpiece,best quality,amazing quality, 1girl, jacket on shoulders, blonde hair, navel, long hair, large breasts, black pants, kitagawa marin, looking at viewer, midriff, black shirt, hand in pocket, multicolored hair, crop top, gradient hair, red eyes, standing, covering own mouth, nail polish, white jacket, black nails, colored tips, stomach, taut shirt, pink hair, covered mouth, hair between eyes, open jacket, open clothes, sleeveless shirt, taut clothes, leaning back, red hair, against wall, ear piercing, jewelry, hand up, cropped shirt
-Negative prompt: bad quality,worst quality,worst detail,sketch,censor,artist name,signature, watermark, patreon username,
-Steps: 30, CFG scale: 7, Sampler: Euler a, Seed: 2189649923, VAE: sdxl_vae_fixed.safetensors, Size: 832x1216, Model: prefectious_nsfw.fp16, Version: v1.10.1, Model hash: 4286171e4b, Schedule type: Normal, ADetailer model: face_yolov8n.pt, ADetailer version: 24.8.0, Denoising strength: 0.24, SD upscale overlap: 64, ADetailer mask blur: 4, SD upscale upscaler: 4x-UltraSharp, ADetailer confidence: 0.3, ADetailer dilate erode: 4, ADetailer inpaint padding: 32, ADetailer denoising strength: 0.4, ADetailer inpaint only masked: True
+### MeinaMix:
+1girl, ponytail,white hair, purple eyes, t-shirt, skirt, thighhighs, flower, petals, light smile,medium breasts, collarbone, depth of field, petals, (illustration:1.1), landscape, background, abstract, mountainous horizon, cloud, sun,
+Negative prompt: (worst quality, low quality:1.4), nsfw
+Steps: 30, CFG scale: 7, Sampler: DPM++ SDE Karras, Seed: 1847947635, VAE: kl-f8-anime2.ckpt, Size: 512x1024, Model: Meina V12, Version: v1.8.0, Model hash: a5e5a941a3, Hires steps: 5, Hires upscale: 2, Hires upscaler: R-ESRGAN 4x+ Anime6B, Denoising strength: 0.45, Downcast alphas_cumprod: True, Clip skip: 2
+
+Recommendations of use:
+--------------------------------------------------------------------------------
+Enable Quantization in K samplers.
+
+Hires.fix is needed for prompts where the character is far away in order to make decent images, it drastically improve the quality of face and eyes!
+---------------------------------------------
+Recommended parameters:
+Sampler: DPM++ SDE Karras: 20 to 30 steps.
+Sampler: DPM++ 2M Karras: 20 to 60 steps.
+Sampler: Euler a: 40 to 60 steps.
+CFG Scale: 4 to 9.
+Resolutions: 512x768, 512x1024 for Portrait!
+Resolutions: 768x512, 1024x512, 1536x512 for Landscape!
+Hires.fix: R-ESRGAN 4x+Anime6b, with 10 steps at 0.3 up to 0.6 denoising.
+Clip Skip: 2.
+Negatives: ' (worst quality, low quality), (zombie, interlocked fingers) '
+Negatives if you can't use Hires.fix:
+'(worst quality:1.6, low quality:1.6), (zombie, sketch, interlocked fingers, comic)'
+--------------------------------------------------------------------------------
