@@ -20,6 +20,15 @@ const els = {
   msgs: $("msgs"), pill: $("pill"), pillText: $("pill-text"), pillBar: $("pill-bar"),
   input: $("input"), send: $("btn-send"),
   grid: $("grid"), gcount: $("gcount"), gempty: $("gempty"),
+  gfolders: $("gfolders"), gcrumbs: $("pg-crumbs"), gtotal: $("gtotal"),
+  gemptyText: $("gempty-text"),
+  pgTitle: $("pg-title"), pgNewFolder: $("pg-newfolder"),
+  pgSelect: $("pg-select"), pgAll: $("pg-all"), pgMove: $("pg-move"),
+  pgDel: $("pg-del"),
+  foldSheet: $("foldsheet"), foldTitle: $("fold-title"), foldSub: $("fold-sub"),
+  foldName: $("fold-name"), foldOk: $("fold-ok"), foldCancel: $("fold-cancel"),
+  foldPick: $("foldpick"), fpTitle: $("fp-title"), fpList: $("fp-list"),
+  fpCancel: $("fp-cancel"),
   composer: $("composer"),
   lb: $("lightbox"), lbImg: $("lb-img"), lbName: $("lb-name"),
   lbPrev: $("lb-prev"), lbNext: $("lb-next"), lbClose: $("lb-close"),
@@ -257,17 +266,26 @@ function addBubble(kind, text) {
   return m;
 }
 
-const variantIndex = new Map();   // file name -> generation card record
+const variantIndex = new Map();   // image rel path -> generation card record
+
+// '/outputs/<rel>' -> '<rel>'; a bare name passes through (older saves)
+function relFromUrl(url) {
+  const s = String(url || "");
+  return s.startsWith("/outputs/") ? decodeURIComponent(s.slice(9)) : s;
+}
 
 function addGeneration(evt, idx) {
-  const src = evt.src ? evt.src.split("/").pop() : null;
+  // every file may be gone (its folder was deleted) — keep the event so
+  // timeline indices stay stable, but draw nothing for it
+  if (!(evt.files || []).length) return;
+  const src = evt.src ? relFromUrl(evt.src) : null;
   let rec;
   if (src && variantIndex.has(src)) {
     // a regeneration of an existing image — extend that card's carousel
     rec = variantIndex.get(src);
     if (idx != null) rec.evtIdxs.push(idx);
     for (const f of evt.files || []) {
-      const name = f.split("/").pop();
+      const name = relFromUrl(f);
       if (!rec.files.includes(name)) rec.files.push(name);
     }
   } else {
@@ -281,7 +299,7 @@ function addGeneration(evt, idx) {
       '<span class="car-count"></span>' +
       '</div>';
     rec = { card,
-            files: (evt.files || []).map((f) => f.split("/").pop()),
+            files: (evt.files || []).map(relFromUrl),
             pos: 0, evtIdxs: idx != null ? [idx] : [] };
     rec.card.querySelector(".car-prev").addEventListener("click", (e) => {
       e.stopPropagation();
@@ -579,12 +597,44 @@ function handleEvent(evt) {
   if (evt.type !== "progress") scrollDown(true);
 }
 
-/* --------------------------------------------------------------- gallery */
+/* --------------------------------------------------------------- gallery
+ *
+ * The gallery mirrors the real folder tree inside outputs/. An image is
+ * identified by its "rel" path ("ai_2026….png" at the root,
+ * "Anime/portrait.png" in a folder) and the root of outputs/ doubles as the
+ * unfiled inbox — new generations always land there.
+ */
 
-async function loadGallery() {
+let galFolder = "";             // current folder rel path ("" = root)
+let galFolders = [];            // subfolders of galFolder
+let galTree = [];               // every folder, for the move-target picker
+let galTotal = 0;
+let galSelecting = false;
+const galSelected = new Set();  // rels selected in select mode
+
+function baseName(rel) {
+  return String(rel || "").split("/").pop();
+}
+
+function joinFolder(parent, name) {
+  return parent ? parent + "/" + name : name;
+}
+
+async function loadGallery(folder) {
+  if (folder !== undefined) galFolder = folder || "";
   try {
-    const d = await api("/api/gallery");
-    images = d.images || [];
+    const q = "/api/gallery?tree=1&folder=" + encodeURIComponent(galFolder);
+    const d = await api(q);
+    images = (d.images || []).map((im) => ({
+      rel: im.rel, name: im.name, seed: im.seed, bytes: im.bytes,
+      mtime: im.mtime,
+    }));
+    galFolders = d.folders || [];
+    galTree = d.tree || [];
+    galTotal = d.total || 0;
+    // drop selections that are no longer in this folder
+    const here = new Set(images.map((im) => im.rel));
+    for (const r of [...galSelected]) if (!here.has(r)) galSelected.delete(r);
     renderGallery();
   } catch (e) {
     if (e.message !== "locked") toast("Gallery failed: " + e.message, true);
@@ -592,29 +642,378 @@ async function loadGallery() {
 }
 
 function renderGallery() {
-  els.grid.textContent = "";
-  els.gcount.textContent = images.length
-    ? `${images.length} image${images.length === 1 ? "" : "s"}`
-    : "";
-  els.gempty.hidden = images.length > 0;
-  for (const im of images) {
-    const img = document.createElement("img");
-    img.src = "/thumb/" + im.name;
-    img.loading = "lazy";
-    img.alt = im.name;
-    img.title = im.name;
-    img.addEventListener("click", () => openLightbox(im.name));
-    els.grid.appendChild(img);
+  renderCrumbs();
+  renderFolders();
+  renderGrid();
+  const n = images.length;
+  els.gcount.textContent = n
+    ? `${n} image${n === 1 ? "" : "s"}`
+    : (galFolder ? "No images"
+                : (galFolders.length ? "No unfiled images" : "0 images"));
+  els.gtotal.textContent =
+    galFolder && galTotal !== n ? `${galTotal} in gallery` : "";
+  // the big empty state only when there is nothing to show at all
+  const bare = !n && !galFolders.length;
+  els.gempty.hidden = !bare;
+  if (bare) {
+    els.gemptyText.textContent = galFolder
+      ? "This folder is empty."
+      : "No images yet. Ask the agent to draw something.";
+  }
+  els.pgSelect.hidden = galSelecting || !n;
+  galTitleSync();
+}
+
+function renderCrumbs() {
+  const bar = els.gcrumbs;
+  bar.textContent = "";
+  const segs = galFolder ? galFolder.split("/") : [];
+  const root = el("button", null, "Gallery");
+  root.addEventListener("click", () => loadGallery(""));
+  root.classList.toggle("here", !segs.length);
+  bar.appendChild(root);
+  let acc = "";
+  segs.forEach((s, i) => {
+    acc = joinFolder(acc, s);
+    const last = i === segs.length - 1;
+    const sep = el("span", "sep", "/");
+    bar.appendChild(sep);
+    if (last) {
+      bar.appendChild(el("span", "here", s));
+    } else {
+      const b = el("button", null, s);
+      const to = acc;
+      b.addEventListener("click", () => loadGallery(to));
+      bar.appendChild(b);
+    }
+  });
+}
+
+function renderFolders() {
+  els.gfolders.textContent = "";
+  if (!galFolders.length) return;
+  for (const f of galFolders) {
+    const rel = joinFolder(galFolder, f.name);
+    const t = el("button", "gtile");
+    t.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+    const txt = el("div", "gt-text");
+    txt.appendChild(el("b", null, f.name));
+    txt.appendChild(el("span", null, f.count === 1 ? "1 image" : f.count + " images"));
+    t.appendChild(txt);
+    t.dataset.folder = rel;
+    t.addEventListener("click", () => {
+      if (galSelecting) { toast("Exit select mode first", true); return; }
+      loadGallery(rel);
+    });
+    els.gfolders.appendChild(t);
   }
 }
 
-/* -------------------------------------------------------------- lightbox */
+function renderGrid() {
+  els.grid.textContent = "";
+  images.forEach((im, i) => {
+    const cell = el("div", "gcell");
+    const img = document.createElement("img");
+    img.src = "/thumb/" + im.rel;
+    // eager for the first screenful (a lazy image inserted as the page
+    // reveals can be left unfetched), lazy for the long tail
+    if (i >= 24) img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = im.name;
+    img.title = im.name;
+    // on the cell, not the img, so the ✓ badge is tappable too
+    cell.addEventListener("click", () => {
+      if (galSelecting) { toggleGalPick(im.rel, cell); return; }
+      openLightbox(im.rel);
+    });
+    cell.appendChild(el("span", "g-check", "✓"));
+    cell.appendChild(img);
+    cell.dataset.rel = im.rel;
+    cell.dataset.name = im.name;
+    if (galSelected.has(im.rel)) cell.classList.add("sel");
+    els.grid.appendChild(cell);
+  });
+}
+
+/* ---- select mode (mirror of the history page) ---- */
+
+function galTitleSync() {
+  const n = galSelected.size;
+  els.pgTitle.textContent = galSelecting
+    ? (n ? `${n} selected` : "Select images")
+    : (galFolder ? baseName(galFolder) : "Gallery");
+  els.pgMove.classList.toggle("armed", n > 0);
+  els.pgDel.classList.toggle("armed", n > 0);
+}
+
+function toggleGalPick(rel, cell) {
+  if (galSelected.has(rel)) {
+    galSelected.delete(rel);
+    cell.classList.remove("sel");
+  } else {
+    galSelected.add(rel);
+    cell.classList.add("sel");
+  }
+  galTitleSync();
+}
+
+function setGalSelect(on) {
+  galSelecting = on;
+  galSelected.clear();
+  els.pageGallery.classList.toggle("selecting", on);
+  els.pgSelect.hidden = on || !images.length;
+  els.pgNewFolder.hidden = on;
+  els.pgAll.hidden = !on;
+  els.pgMove.hidden = !on;
+  els.pgDel.hidden = !on;
+  for (const c of els.grid.querySelectorAll(".gcell.sel")) {
+    c.classList.remove("sel");
+  }
+  galTitleSync();
+}
+
+function galleryBack() {
+  if (galSelecting) { setGalSelect(false); return; }
+  if (galFolder) { loadGallery(parentOf(galFolder)); return; }
+  els.pageGallery.hidden = true;
+}
+
+function parentOf(rel) {
+  const i = rel.lastIndexOf("/");
+  return i < 0 ? "" : rel.slice(0, i);
+}
+
+/* ---- folder + image actions ---- */
+
+async function galleryOp(body, okMsg) {
+  try {
+    const d = await api("/api/gallery/folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (okMsg) toast(okMsg);
+    await reloadChat();               // chat cards point at moved files
+    await loadGallery();
+    return d;
+  } catch (e) {
+    if (e.message !== "locked") toast(e.message, true);
+    throw e;
+  }
+}
+
+async function newFolderIn(parent) {
+  openFoldSheet("create", parent, "");
+}
+
+function openFoldSheet(mode, folder, currentName) {
+  foldMode = mode;
+  foldTarget = folder;
+  els.foldTitle.textContent = mode === "rename" ? "Rename folder" : "New folder";
+  els.foldOk.textContent = mode === "rename" ? "Rename" : "Create";
+  els.foldSub.textContent = mode === "rename"
+    ? "Renaming also moves the images inside it."
+    : (folder ? `Inside ${baseName(folder)}`
+              : "Folders group your images in the gallery.");
+  els.foldName.value = currentName || "";
+  els.foldSheet.hidden = false;
+  setTimeout(() => { els.foldName.focus(); els.foldName.select(); }, 60);
+}
+
+async function submitFoldSheet() {
+  const name = els.foldName.value.trim();
+  if (!name) { els.foldName.focus(); return; }
+  els.foldOk.disabled = true;
+  try {
+    if (foldMode === "rename") {
+      const d = await galleryOp({ action: "rename", folder: foldTarget, name },
+                                "Folder renamed");
+      // keep the user where they were: re-root the open folder if it lived
+      // inside the one that was just renamed
+      const was = foldTarget;
+      if (d && d.folder && was && (galFolder === was
+          || galFolder.startsWith(was + "/"))) {
+        await loadGallery(d.folder + galFolder.slice(was.length));
+      }
+    } else {
+      const d = await galleryOp({ action: "create", parent: foldTarget, name });
+      if (d && d.folder) await loadGallery(d.folder);
+    }
+    els.foldSheet.hidden = true;
+  } catch { /* toast already shown; keep the sheet open to fix the name */ }
+  finally { els.foldOk.disabled = false; }
+}
+
+function folderCtx(rel) {
+  const n = galFolders.find((f) => joinFolder(galFolder, f.name) === rel);
+  const count = n ? n.count : 0;
+  openCtx([
+    { label: "📂 Open", action: () => loadGallery(rel) },
+    { label: "＋ New folder inside", action: () => newFolderIn(rel) },
+    { label: "✎ Rename", action: () => openFoldSheet("rename", rel, baseName(rel)) },
+    { label: "⇄ Move to…", action: () => openFolderPicker(rel, true) },
+    { label: `🗑 Delete folder (${count} image${count === 1 ? "" : "s"})`,
+      danger: true, action: () => deleteFolder(rel, count) },
+  ], null);
+}
+
+async function deleteFolder(rel, count) {
+  const extra = count
+    ? ` It deletes the ${count} image${count === 1 ? "" : "s"} inside it.`
+    : "";
+  if (!confirm(`Delete the folder "${rel}"?${extra}`)) return;
+  const parent = parentOf(rel);
+  try {
+    await galleryOp({ action: "delete", folder: rel }, "Folder deleted");
+    await loadGallery(galFolder === rel ? parent : galFolder);
+  } catch { /* toast shown */ }
+}
+
+function imageCtx(rel) {
+  openCtx([
+    { label: "🔍 Open", action: () => openLightbox(rel) },
+    { label: "📁 Move to…", action: () => openFolderPicker([rel], false) },
+    { label: "⤓ Download", action: () => downloadImage(rel) },
+    { label: "🗑 Delete", danger: true, action: () => deleteImages([rel]) },
+  ], "/thumb/" + rel);
+}
+
+function downloadImage(rel) {
+  const a = document.createElement("a");
+  a.href = "/outputs/" + rel;
+  a.download = baseName(rel);
+  a.click();
+}
+
+async function deleteImages(rels) {
+  const n = rels.length;
+  if (!n) return;
+  if (!confirm(`Delete ${n} image${n === 1 ? "" : "s"}? This cannot be undone.`)) {
+    return;
+  }
+  if (galSelecting) setGalSelect(false);
+  try {
+    const d = await api("/api/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: rels }),
+    });
+    if (d.partial) toast(`Deleted ${d.removed} of ${n}`, true);
+    else toast(`Deleted ${d.removed} image${d.removed === 1 ? "" : "s"}`);
+    closeLightbox();
+    await reloadChat();
+    await loadGallery();
+  } catch (e) {
+    if (e.message !== "locked") toast("Delete failed: " + e.message, true);
+  }
+}
+
+/* ---- move-target picker ---- */
+
+let pickMode = "images";     // "images" | "folder"
+let pickRels = [];           // images to move
+let pickFolder = "";         // folder being re-parented
+
+function openFolderPicker(rels, isFolder) {
+  pickMode = isFolder ? "folder" : "images";
+  pickRels = Array.isArray(rels) ? rels.slice() : [rels];
+  pickFolder = isFolder ? rels : "";
+  els.fpTitle.textContent = isFolder
+    ? "Move folder"
+    : (pickRels.length === 1
+      ? "Move image" : `Move ${pickRels.length} images`);
+  renderPickList();
+  els.foldPick.hidden = false;
+}
+
+function renderPickList() {
+  const list = els.fpList;
+  list.textContent = "";
+  const self = pickMode === "folder" ? pickFolder : galFolder;
+
+  const row = (rel, name, depth, opts) => {
+    const b = el("button", "fp-row" + (opts.here ? " here" : ""));
+    b.style.paddingLeft = 8 + depth * 16 + "px";
+    b.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+    b.appendChild(el("span", "fp-name", name));
+    if (opts.tag) b.appendChild(el("span", "fp-lock", opts.tag));
+    b.addEventListener("click", () => confirmMove(rel, opts));
+    list.appendChild(b);
+  };
+
+  // root first, then every folder in tree order
+  row("", "Gallery (unfiled)", 0, { here: self === "", tag: pickMode === "images" ? "here" : "" });
+  for (const f of galTree) {
+    if (pickMode === "folder" && (f.rel === pickFolder
+        || f.rel.startsWith(pickFolder + "/"))) continue;   // no self/child
+    row(f.rel, f.name, f.depth + 1,
+        { here: f.rel === self, tag: pickMode === "images" && f.rel === self ? "here" : "" });
+  }
+  list.appendChild(el("div", "fp-sep", "or"));
+  const nb = el("button", "fp-row");
+  nb.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M12 5v14M5 12h14"/></svg>';
+  nb.appendChild(el("span", "fp-name", "New folder…"));
+  nb.addEventListener("click", () => {
+    els.foldPick.hidden = true;
+    openFoldSheet("create", galFolder, "");
+  });
+  list.appendChild(nb);
+}
+
+async function confirmMove(dest, opts) {
+  els.foldPick.hidden = true;
+  if (opts.here) { toast("Already there"); return; }
+  try {
+    if (pickMode === "folder") {
+      const d = await galleryOp(
+        { action: "move", folder: pickFolder, parent: dest }, "Folder moved");
+      if (d && d.folder) loadGallery(d.folder);
+    } else {
+      await galleryOp({ action: "move_images", rels: pickRels, folder: dest },
+                     `Moved ${pickRels.length} image${pickRels.length === 1 ? "" : "s"}`);
+    }
+    if (galSelecting) setGalSelect(false);
+  } catch { /* toast shown */ }
+}
+
+/* the chat view holds /outputs/ URLs — re-read it after files move */
+async function reloadChat() {
+  try {
+    const h = await api("/api/history");
+    renderHistory(h.timeline || []);
+    images = timelineImages(h.timeline || []);
+  } catch { /* the gallery still works without it */ }
+}
+
+/* -------------------------------------------------------------- lightbox
+ *
+ * lbList is the set of images the viewer pages through — a snapshot taken
+ * when it opens. That keeps navigation scoped to the folder the user is
+ * browsing, and keeps a chat card (which may reference an image outside any
+ * folder view) from mutating the gallery list.
+ */
 
 let lbIndex = -1;
+let lbList = [];
+let lbToken = 0;                 // guards the async metadata fetch below
 
-function openLightbox(name) {
-  lbIndex = images.findIndex((x) => x.name === name);
-  if (lbIndex < 0) { lbIndex = 0; images.unshift({ name, seed: null }); }
+function openLightbox(rel, list) {
+  const src = list || images;
+  lbList = src.slice();
+  lbIndex = lbList.findIndex((x) => x.rel === rel);
+  if (lbIndex < 0) {
+    lbList.unshift({ rel, name: baseName(rel), seed: null });
+    lbIndex = 0;
+  }
   toggleLbInfo(false);
   showLightbox();
   els.lb.hidden = false;
@@ -623,12 +1022,13 @@ function openLightbox(name) {
 function closeLightbox() { els.lb.hidden = true; }
 
 function showLightbox() {
-  const im = images[lbIndex];
+  const im = lbList[lbIndex];
   if (!im) return;
-  els.lbName.textContent = im.name;
-  els.lbImg.src = "/outputs/" + im.name;
+  const rel = im.rel || im.name;
+  els.lbName.textContent = baseName(rel);
+  els.lbImg.src = "/outputs/" + rel;
   els.lbPrev.style.visibility = lbIndex > 0 ? "visible" : "hidden";
-  els.lbNext.style.visibility = lbIndex < images.length - 1 ? "visible" : "hidden";
+  els.lbNext.style.visibility = lbIndex < lbList.length - 1 ? "visible" : "hidden";
 
   els.lbMeta.textContent = "";
   els.lbPrompt.textContent = "";
@@ -636,7 +1036,9 @@ function showLightbox() {
   els.lbParams.textContent = "";
   [els.lbPromptWrap, els.lbNegWrap, els.lbParamsWrap].forEach((w) => { w.hidden = true; });
 
-  api("/api/image_info?name=" + encodeURIComponent(im.name)).then((info) => {
+  const token = ++lbToken;      // paging fast must not stack up chips
+  api("/api/image_info?name=" + encodeURIComponent(rel)).then((info) => {
+    if (token !== lbToken || els.lb.hidden) return;
     const meta = els.lbMeta;
     const add = (t, cls) => { if (t) meta.appendChild(el("span", "chip " + (cls || ""), t)); };
     if (info.width) add(`${info.width}×${info.height}`);
@@ -652,7 +1054,7 @@ function showLightbox() {
 
 function lbMove(d) {
   const ni = lbIndex + d;
-  if (ni >= 0 && ni < images.length) { lbIndex = ni; showLightbox(); }
+  if (ni >= 0 && ni < lbList.length) { lbIndex = ni; showLightbox(); }
 }
 
 // the (i) button slides the info popup over the image
@@ -1177,7 +1579,99 @@ $("btn-overflow").addEventListener("click", () => {
   openCtx([{ label: "⚙ Settings", action: openSettings }], null);
 });
 $("btn-gallery").addEventListener("click", openGallery);
-$("pg-back").addEventListener("click", () => { els.pageGallery.hidden = true; });
+$("pg-back").addEventListener("click", galleryBack);
+$("pg-refresh").addEventListener("click", () => loadGallery());
+els.pgNewFolder.addEventListener("click", () => newFolderIn(galFolder));
+els.pgSelect.addEventListener("click", () => setGalSelect(true));
+els.pgAll.addEventListener("click", () => {
+  const cells = [...els.grid.querySelectorAll(".gcell")];
+  const all = cells.length && cells.every((c) => galSelected.has(c.dataset.rel));
+  for (const c of cells) {
+    if (all) { galSelected.delete(c.dataset.rel); c.classList.remove("sel"); }
+    else { galSelected.add(c.dataset.rel); c.classList.add("sel"); }
+  }
+  galTitleSync();
+});
+els.pgMove.addEventListener("click", () => {
+  if (!galSelected.size) { toast("Nothing selected", true); return; }
+  openFolderPicker([...galSelected], false);
+});
+els.pgDel.addEventListener("click", () => {
+  if (!galSelected.size) { toast("Nothing selected", true); return; }
+  deleteImages([...galSelected]);
+});
+
+/* gallery folder name sheet */
+let foldMode = "create", foldTarget = "";
+els.foldCancel.addEventListener("click", () => { els.foldSheet.hidden = true; });
+els.foldSheet.addEventListener("click", (e) => {
+  if (e.target === els.foldSheet) els.foldSheet.hidden = true;
+});
+els.foldOk.addEventListener("click", submitFoldSheet);
+els.foldName.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); submitFoldSheet(); }
+});
+els.fpCancel.addEventListener("click", () => { els.foldPick.hidden = true; });
+els.foldPick.addEventListener("click", (e) => {
+  if (e.target === els.foldPick) els.foldPick.hidden = true;
+});
+
+/* long-press / right-click inside the gallery */
+els.gfolders.addEventListener("contextmenu", (e) => {
+  const t = e.target.closest(".gtile");
+  if (!t || galSelecting) return;
+  e.preventDefault();
+  folderCtx(t.dataset.folder);
+});
+let gfLpTimer = null, gfLpStart = null;
+els.gfolders.addEventListener("touchstart", (e) => {
+  const t = e.target.closest(".gtile");
+  if (!t || galSelecting) return;
+  gfLpStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, rel: t.dataset.folder };
+  gfLpTimer = setTimeout(() => {
+    gfLpTimer = null;
+    if (navigator.vibrate) navigator.vibrate(25);
+    folderCtx(gfLpStart.rel);
+    gfLpStart = null;
+  }, 550);
+}, { passive: true });
+els.gfolders.addEventListener("touchmove", (e) => {
+  if (!gfLpTimer || !gfLpStart) return;
+  const dx = e.touches[0].clientX - gfLpStart.x;
+  const dy = e.touches[0].clientY - gfLpStart.y;
+  if (dx * dx + dy * dy > 144) { clearTimeout(gfLpTimer); gfLpTimer = null; }
+}, { passive: true });
+els.gfolders.addEventListener("touchend", () => {
+  if (gfLpTimer) { clearTimeout(gfLpTimer); gfLpTimer = null; }
+}, { passive: true });
+
+els.grid.addEventListener("contextmenu", (e) => {
+  const t = e.target.closest(".gcell");
+  if (!t || galSelecting) return;
+  e.preventDefault();
+  imageCtx(t.dataset.rel);
+});
+let ggLpTimer = null, ggLpStart = null;
+els.grid.addEventListener("touchstart", (e) => {
+  const t = e.target.closest(".gcell");
+  if (!t || galSelecting) return;
+  ggLpStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, rel: t.dataset.rel };
+  ggLpTimer = setTimeout(() => {
+    ggLpTimer = null;
+    if (navigator.vibrate) navigator.vibrate(25);
+    imageCtx(ggLpStart.rel);
+    ggLpStart = null;
+  }, 550);
+}, { passive: true });
+els.grid.addEventListener("touchmove", (e) => {
+  if (!ggLpTimer || !ggLpStart) return;
+  const dx = e.touches[0].clientX - ggLpStart.x;
+  const dy = e.touches[0].clientY - ggLpStart.y;
+  if (dx * dx + dy * dy > 144) { clearTimeout(ggLpTimer); ggLpTimer = null; }
+}, { passive: true });
+els.grid.addEventListener("touchend", () => {
+  if (ggLpTimer) { clearTimeout(ggLpTimer); ggLpTimer = null; }
+}, { passive: true });
 $("pg-refresh").addEventListener("click", loadGallery);
 $("btn-gridtoggle").addEventListener("click", () => {
   charGrid = !charGrid;
@@ -1271,6 +1765,7 @@ function switchView(v) {
 
 /* gallery — full-screen page opened from the Characters toolbar */
 function openGallery() {
+  setGalSelect(false);
   els.pageGallery.hidden = false;
   loadGallery();
 }
@@ -1278,9 +1773,9 @@ function openGallery() {
 /* ----------------------------------------------------------------- images */
 
 // native-resolution images everywhere; generation details live in the
-// lightbox info popup
-function imgSrcFor(name) {
-  return "/outputs/" + name;
+// lightbox info popup. `rel` may include folder segments.
+function imgSrcFor(rel) {
+  return "/outputs/" + rel;
 }
 
 /* accent color — custom UI theme (from the old Chatterbox appearance wheel) */
@@ -1561,24 +2056,6 @@ function copyText(text) {
     .catch(() => toast("Copy failed", true));
 }
 
-async function deleteImage(name) {
-  if (!confirm("Delete " + name + "?")) return;
-  try {
-    await api("/api/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    });
-    images.splice(lbIndex, 1);
-    if (!images.length) closeLightbox();
-    else if (lbIndex >= images.length) lbIndex = images.length - 1;
-    if (els.lb.hidden) loadGallery(); else showLightbox();
-    toast("Deleted");
-  } catch (e) {
-    if (e.message !== "locked") toast("Delete failed: " + e.message, true);
-  }
-}
-
 /* --------------------------------------------- context menu (hold / right-click) */
 
 const ctxEl = $("ctx"), ctxCard = $("ctx-card");
@@ -1607,16 +2084,22 @@ ctxEl.addEventListener("click", (e) => { if (e.target === ctxEl) closeCtx(); });
 
 function ctxItemsFor(el) {
   if (el.classList.contains("gen")) {
-    const name = el.dataset.file;
+    const rel = el.dataset.file;          // may live in a gallery folder
     const items = [];
-    if (name) items.push({ label: "↻ Regenerate", action: () => openRegen(name) });
-    if (name) items.push({ label: "✎ Edit in chat", action: () => {
+    if (rel) items.push({ label: "↻ Regenerate", action: () => openRegen(rel) });
+    if (rel) items.push({ label: "✎ Edit in chat", action: () => {
+      // a bare file name — edit_image resolves it anywhere in the tree
       switchView("chat");
-      els.input.value = `Edit ${name} — `;
+      els.input.value = `Edit ${baseName(rel)} — `;
       autosize(); els.input.focus(); els.send.classList.add("ready");
     }});
+    if (rel) items.push({ label: "📁 Show in gallery", action: () => {
+      els.pageGallery.hidden = false;
+      setGalSelect(false);
+      loadGallery(rel.includes("/") ? parentOf(rel) : "");
+    }});
     items.push({ label: "🗑 Delete from chat", danger: true, action: () => deleteChatEvent(el) });
-    return { items, previewSrc: name ? "/thumb/" + name : null };
+    return { items, previewSrc: rel ? "/thumb/" + rel : null };
   }
   if (el.classList.contains("msg")) {
     const items = [];
@@ -1696,11 +2179,11 @@ els.msgs.addEventListener("touchend", () => {
 
 /* ------------------------------------------------------- regenerate sheet */
 
-let regenName = null;
+let regenRel = null;                 // rel path — may include folders
 const regenEl = $("regen"), regenText = $("regen-text");
 
-function openRegen(name) {
-  regenName = name;
+function openRegen(rel) {
+  regenRel = rel;
   regenText.value = "";
   regenEl.hidden = false;
   setTimeout(() => regenText.focus(), 60);
@@ -1709,10 +2192,10 @@ function openRegen(name) {
 $("regen-cancel").addEventListener("click", () => { regenEl.hidden = true; });
 regenEl.addEventListener("click", (e) => { if (e.target === regenEl) regenEl.hidden = true; });
 $("regen-go").addEventListener("click", () => {
-  const name = regenName, instr = regenText.value.trim();
+  const rel = regenRel, instr = regenText.value.trim();
   regenEl.hidden = true;
-  if (!name) return;
-  runRegen(name, instr);
+  if (!rel) return;
+  runRegen(rel, instr);
 });
 regenText.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -1765,9 +2248,12 @@ async function runRegen(name, instr) {
             rec.card.scrollIntoView({ behavior: "smooth", block: "center" });
           }
           evtCounter++;                          // timeline gained one event
-          if (!images.some((x) => x.name === evt.file)) {
-            images.unshift({ name: evt.file, seed: evt.seed });
+          if (parentOf(evt.file) === galFolder
+              && !images.some((x) => x.rel === evt.file)) {
+            images.unshift({ rel: evt.file, name: baseName(evt.file),
+                             seed: evt.seed });
           }
+          if (!els.pageGallery.hidden) loadGallery();
           toast("Image regenerated");
           break;
         }
@@ -2189,17 +2675,12 @@ els.lbStage.addEventListener("click", (e) => {
   if (els.lbSheet.classList.contains("open")) toggleLbInfo(false);
 });
 $("lb-download").addEventListener("click", () => {
-  const im = images[lbIndex];
-  if (im) {
-    const a = document.createElement("a");
-    a.href = "/outputs/" + im.name;
-    a.download = im.name;
-    a.click();
-  }
+  const im = lbList[lbIndex];
+  if (im) downloadImage(im.rel || im.name);
 });
 $("lb-delete").addEventListener("click", () => {
-  const im = images[lbIndex];
-  if (im) deleteImage(im.name);
+  const im = lbList[lbIndex];
+  if (im) deleteImages([im.rel || im.name]);
 });
 for (const b of document.querySelectorAll(".copybtn")) {
   b.addEventListener("click", () => copyText($(b.dataset.copy).textContent));
@@ -2233,8 +2714,12 @@ document.addEventListener("keydown", (e) => {
     els.pageChform.hidden = true;
   } else if (e.key === "Escape" && !els.pageHist.hidden) {
     els.pageHist.hidden = true;
+  } else if (e.key === "Escape" && !els.foldSheet.hidden) {
+    els.foldSheet.hidden = true;
+  } else if (e.key === "Escape" && !els.foldPick.hidden) {
+    els.foldPick.hidden = true;
   } else if (e.key === "Escape" && !els.pageGallery.hidden) {
-    els.pageGallery.hidden = true;
+    galleryBack();
   } else if (e.key === "Escape" && !ctxEl.hidden) {
     closeCtx();
   } else if (e.key === "Escape" && !regenEl.hidden) {
@@ -2272,15 +2757,18 @@ async function init() {
   setInterval(refreshStatus, 30000);
 }
 
-// pull image names out of a restored timeline (newest first)
+// pull image rel paths out of a restored timeline (newest first)
 function timelineImages(timeline) {
   const seen = new Set();
   const out = [];
   for (const evt of timeline) {
     if (evt.type !== "generation") continue;
     for (const f of evt.files || []) {
-      const n = f.split("/").pop();
-      if (!seen.has(n)) { seen.add(n); out.push({ name: n, seed: evt.seed }); }
+      const rel = relFromUrl(f);
+      if (!seen.has(rel)) {
+        seen.add(rel);
+        out.push({ rel, name: baseName(rel), seed: evt.seed });
+      }
     }
   }
   return out.reverse();

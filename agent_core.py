@@ -288,13 +288,25 @@ def _gen_info(client, args: dict, elapsed: float, seed) -> dict:
 
 
 def _resolve_output_image(name: str, out_dir: Path) -> Path:
-    """Resolve a bare file name inside the outputs folder; refuse paths."""
+    """Resolve a bare file name to an image inside the outputs tree.
+
+    Only bare names are accepted (no paths). The LLM is told file names, not
+    paths, and paths are scrubbed from its replies — but a file may have been
+    filed into a gallery subfolder, so fall back to searching the tree. File
+    names embed a timestamp + seed, so collisions are not a practical worry.
+    """
     if not name or "/" in name or "\\" in name or ".." in name:
         raise ValueError(f"invalid image name: {name!r}")
-    p = (out_dir / name).resolve()
-    if p.parent != out_dir.resolve():
-        raise ValueError(f"invalid image name: {name!r}")
-    return p
+    p = out_dir / name
+    try:
+        if p.resolve().is_file() and p.resolve().parent == out_dir.resolve():
+            return p.resolve()
+        for hit in sorted(out_dir.rglob(name))[:1]:
+            if hit.is_file():
+                return hit.resolve()
+    except OSError:
+        pass
+    raise ValueError(f"invalid image name: {name!r}")
 
 
 def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:

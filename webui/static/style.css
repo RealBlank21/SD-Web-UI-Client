@@ -379,19 +379,114 @@ button:active { transform: scale(.97); }
 
 /* gallery is a full-screen page; page-body scrolls */
 .gallery-body { padding: 2px 12px calc(24px + env(safe-area-inset-bottom)); }
+.gbar {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 10px;
+}
 .gcount { flex: none; margin: 4px 4px 0; font-size: 12.5px; }
+#gtotal { flex: none; margin: 4px 0 0; font-size: 12.5px; }
+
+/* breadcrumb trail */
+.crumbs {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  margin: 2px 0 0; font-size: 12.5px; min-height: 20px;
+}
+.crumbs button {
+  padding: 3px 7px; border-radius: 7px; font-size: 12.5px;
+  color: var(--accent); max-width: 46vw;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.crumbs .sep { color: var(--dim); opacity: .6; }
+.crumbs .here { padding: 3px 2px; color: var(--text); font-weight: 600;
+  max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* subfolder tiles */
+.gfolders {
+  display: grid; gap: 6px; margin: 6px 0 2px;
+  grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
+}
+.gfolders:empty { display: none; }
+.gtile {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 9px 10px; border-radius: 12px; text-align: left;
+  background: var(--panel); border: 1px solid var(--line);
+}
+.gtile:active { background: var(--panel2); }
+.gtile svg { flex: none; width: 19px; height: 19px; color: var(--accent); }
+.gtile .gt-text { min-width: 0; }
+.gtile .gt-text b {
+  display: block; font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gtile .gt-text span { font-size: 11px; color: var(--dim); }
+
 .grid {
   display: grid; gap: 8px;
   grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
   padding: 4px 2px 20px;
 }
-.grid img {
+.gcell {
+  position: relative; border-radius: 10px; background: var(--panel);
+  cursor: pointer;
+}
+.gcell img {
   width: 100%; aspect-ratio: 1; object-fit: cover;
   border-radius: 10px; background: var(--panel);
   display: block; cursor: pointer;
 }
-.grid img:active { transform: scale(.97); }
-@media (min-width: 640px) { .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; } }
+.gcell:active img { transform: scale(.97); }
+.gcell .g-check {
+  display: none; align-items: center; justify-content: center;
+  position: absolute; top: 5px; left: 5px; z-index: 2;
+  width: 22px; height: 22px; border-radius: 7px;
+  background: rgba(6, 8, 14, .72); border: 1.5px solid var(--line);
+  color: transparent; font-size: 13px; font-weight: 700;
+}
+#page-gallery.selecting .gcell .g-check { display: flex; }
+.gcell.sel { outline: 2px solid var(--accent); outline-offset: -2px; }
+.gcell.sel .g-check {
+  background: var(--accent); border-color: var(--accent); color: #14101f;
+}
+#page-gallery.selecting .gcell img { opacity: .82; }
+#pg-move.armed, #pg-del.armed { color: var(--accent); }
+#pg-del.armed { color: var(--err); }
+
+@media (min-width: 640px) {
+  .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .gfolders { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+}
+
+/* folder name sheet + move-target picker (bottom sheet, like #regen) */
+#foldsheet, #foldpick {
+  position: fixed; inset: 0; z-index: 85;
+  background: rgba(5, 7, 12, .6);
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.foldpick-card { max-height: 76vh; display: flex; flex-direction: column; }
+#fold-name {
+  width: 100%; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 11px 12px; font-size: 16px; outline: none;
+}
+#fold-name:focus { border-color: #4a3f78; }
+.fp-list {
+  display: flex; flex-direction: column; gap: 1px;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  margin: 8px 0 4px; min-height: 0;
+}
+.fp-row {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 10px 8px; border-radius: 10px; text-align: left; font-size: 14px;
+}
+.fp-row:active { background: var(--panel2); }
+.fp-row svg { flex: none; width: 17px; height: 17px; color: var(--accent); }
+.fp-row .fp-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fp-row.here { color: var(--accent); font-weight: 600; }
+.fp-row .fp-lock { margin-left: auto; font-size: 11px; color: var(--dim); }
+.fp-sep { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--dim); margin: 10px 0 2px; }
 
 /* -------------------------------------------------------------- composer */
 

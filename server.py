@@ -807,9 +807,9 @@ class Agent:
             return {"error": out["error"]}
 
         result = out["result"]
-        # file PATHS -> bare file names (privacy: no server layout leaks)
-        result["saved_files"] = [Path(f).name
-                                 for f in result.get("saved_files", [])]
+        # file PATHS -> rel paths (privacy: no server layout leaks)
+        result["saved_files"] = [rel_of(Path(f)) for f
+                                 in result.get("saved_files", [])]
         if result.get("gen"):
             result["gen"]["prompt"] = result["gen"].get("prompt", "")
             evt = {
@@ -901,13 +901,14 @@ _REGEN_KEYS = ("prompt", "negative_prompt", "width", "height", "steps",
                "cfg_scale", "sampler_name", "clip_skip")
 
 
-def _find_gen_args(agent: Agent, name: str) -> dict | None:
-    """The 'gen' snapshot of the timeline generation that produced `name`."""
+def _find_gen_args(agent: Agent, rel: str) -> dict | None:
+    """The 'gen' snapshot of the timeline generation that produced `rel`."""
+    base = Path(rel).name
     for evt in agent.timeline:
         if evt.get("type") != "generation":
             continue
-        files = [Path(f).name for f in evt.get("files", [])]
-        if name in files:
+        files = [rel_from_url(f) for f in evt.get("files", [])]
+        if rel in files or (base and base in [Path(f).name for f in files]):
             g = evt.get("gen") or {}
             if g.get("prompt"):
                 return g
@@ -948,17 +949,21 @@ def _args_from_png(path: Path) -> dict:
     return args
 
 
-def run_regeneration(agent: Agent, name: str, instruction: str, emit) -> dict:
+def run_regeneration(agent: Agent, rel: str, instruction: str, emit) -> dict:
     """Re-create an image directly — no LLM turn, no chat message.
 
     Empty instruction: same prompt/settings, fresh seed (txt2img).
     With instruction: img2img on the original, instruction appended to the
     original prompt (denoise 0.65 keeps the composition close).
+    The new variant is saved next to the original, so regenerating an image
+    that lives in a folder keeps it there.
     Returns a timeline-ready 'generation' event with 'src' lineage."""
     from sd_client import save_images
 
-    src = OUT_DIR / name
-    g = _find_gen_args(agent, name)
+    src = out_file(rel)
+    if src is None:
+        raise ValueError("image not found")
+    g = _find_gen_args(agent, rel)
     if g:
         args = {k: g[k] for k in _REGEN_KEYS if g.get(k) is not None}
         model = g.get("model") or None
@@ -982,7 +987,7 @@ def run_regeneration(agent: Agent, name: str, instruction: str, emit) -> dict:
         emit({"type": "status", "text": "generating…"})
         result = agent.client.txt2img(**args)
 
-    saved = save_images(result, out_dir=OUT_DIR, name_prefix="ai")
+    saved = save_images(result, out_dir=src.parent, name_prefix="ai")
     if not saved:
         raise ValueError("the generator returned no image")
     try:
@@ -994,24 +999,141 @@ def run_regeneration(agent: Agent, name: str, instruction: str, emit) -> dict:
             "cfg_scale", "sampler_name", "denoising_strength")}
     gen["model"] = model or "(unknown)"
     return {"type": "generation",
-            "files": ["/outputs/" + f.name for f in saved],
+            "files": ["/outputs/" + rel_of(f) for f in saved],
             "count": len(saved),
             "seed": seed,
             "gen": gen,
-            "src": name}
+            "src": rel}
 
 
 # ------------------------------------------------------------- gallery
+#
+# Images are real files under outputs/ and folders are real subdirectories of
+# it. An image is addressed by its "rel" path relative to outputs/:
+# "ai_20260101-120000_42_0.png" at the root, "Anime/portrait.png" inside a
+# folder. The root of outputs/ doubles as the unfiled inbox — new generations
+# always land there, so the root view shows everything not filed away yet.
+
+MAX_FOLDER_DEPTH = 8
+
 
 def _safe_name(name: str) -> str | None:
+    """One safe path segment: no separators, no traversal, no leading dot."""
     if not name or "/" in name or "\\" in name or ".." in name \
             or name.startswith("."):
         return None
     return name
 
 
+def _safe_rel(rel: str) -> str | None:
+    """A safe path relative to outputs/ ("a/b/c.png"); "" is the root.
+    None means the input was unsafe."""
+    if not rel:
+        return ""
+    parts = str(rel).replace("\\", "/").split("/")
+    if len(parts) > MAX_FOLDER_DEPTH:
+        return None
+    for p in parts:
+        if _safe_name(p) is None:
+            return None
+    return "/".join(parts)
+
+
+def _out_root() -> Path:
+    return OUT_DIR.resolve()
+
+
+def _resolve(rel: str) -> Path | None:
+    """Resolve a validated rel path to an existing file inside outputs/,
+    refusing anything that escapes the tree (traversal, absolute paths,
+    symlinks)."""
+    rel = _safe_rel(rel)
+    if rel is None or rel == "":
+        return None
+    p = (OUT_DIR / rel).resolve()
+    try:
+        p.relative_to(_out_root())
+    except ValueError:
+        return None
+    return p if p.is_file() else None
+
+
+def out_file(rel: str) -> Path | None:
+    """Existing image file for a rel path, or None."""
+    return _resolve(rel)
+
+
+def out_dir(rel: str) -> Path | None:
+    """Folder for a rel path ('' = the gallery root), or None if it would
+    escape outputs/."""
+    rel = _safe_rel(rel if rel is not None else "")
+    if rel is None:
+        return None
+    p = (OUT_DIR / rel).resolve()
+    try:
+        p.relative_to(_out_root())
+    except ValueError:
+        return None
+    return p
+
+
+def rel_of(path: Path) -> str:
+    """Path -> its rel path under outputs/."""
+    return path.resolve().relative_to(_out_root()).as_posix()
+
+
+def join_rel(parent: str, name: str) -> str:
+    """Rel path of `name` inside `parent` ('' parent = the gallery root)."""
+    return f"{parent}/{name}" if parent else name
+
+
+def rel_from_url(url: str) -> str:
+    """'/outputs/<rel>' (or a bare name, from older saves) -> '<rel>'."""
+    s = str(url or "")
+    if s.startswith("/outputs/"):
+        s = s[len("/outputs/"):]
+    return _safe_rel(unquote(s)) or ""
+
+
+def clean_folder_name(raw: str) -> str | None:
+    """Sanitise a user-typed folder name. None when it is unusable."""
+    name = " ".join(str(raw or "").split())        # collapse whitespace
+    name = name.rstrip(". ")                       # Win32 drops these too
+    if not name or len(name) > 60:
+        return None
+    if "/" in name or "\\" in name or "\x00" in name:
+        return None
+    if name.startswith("."):
+        return None
+    if any(ord(c) < 32 for c in name):
+        return None
+    return name
+
+
+def unique_name(folder: Path, name: str) -> str:
+    """A free file name in `folder`. The counter goes in the prefix segment
+    ('ai' -> 'ai-2') so the '<prefix>_<stamp>_<seed>_<n>.png' pattern — and
+    with it _seed_from_name() and the thumbnail stem — stays intact."""
+    def free(nm):
+        return not (folder / nm).exists()
+
+    if free(name):
+        return name
+    stem, dot, ext = name.rpartition(".")
+    if not dot:
+        stem, ext = name, ""
+    suffix = ("." + ext) if ext else ""
+    head, sep, tail = stem.partition("_")
+    for n in range(2, 500):
+        cand = f"{head}-{n}{sep}{tail}" if sep else f"{head}-{n}"
+        cand += suffix
+        if free(cand):
+            return cand
+    return stem + "-" + secrets.token_hex(2) + suffix
+
+
 def _seed_from_name(name: str) -> str | None:
-    m = re.search(r"_\d{8}-\d{6}_(\d+)_\d+\.", name)
+    m = re.search(r"_\d{8}-\d{6}_(\d+)_\d+\.", Path(name).name)
     return m.group(1) if m else None
 
 
@@ -1034,23 +1156,131 @@ def thumbnail(path: Path) -> Path | None:
         return None
 
 
-def gallery_images() -> list[dict]:
-    items = []
+def gallery_listing(rel: str = "") -> dict:
+    """One folder level: its subfolders plus the images directly inside it."""
+    folder = out_dir(rel)
+    out = {"folder": _safe_rel(rel) or "", "images": [], "folders": [],
+           "total": gallery_total()}
+    if folder is None or not folder.is_dir():
+        return out
+    folders, images = [], []
     try:
-        files = [p for p in OUT_DIR.iterdir()
-                 if p.is_file() and p.suffix.lower() in IMG_EXTS]
+        entries = sorted(folder.iterdir(), key=lambda p: p.name.lower())
     except OSError:
-        return []
-    for p in files:
+        return out
+    for p in entries:
+        if p.name.startswith("."):
+            continue                          # .thumbs and friends
         try:
+            if p.is_dir():
+                folders.append({"name": p.name,
+                                "count": _count_images(p)})
+                continue
+            if p.suffix.lower() not in IMG_EXTS:
+                continue
             st = p.stat()
         except OSError:
             continue
-        items.append({"name": p.name, "bytes": st.st_size,
-                      "mtime": int(st.st_mtime),
-                      "seed": _seed_from_name(p.name)})
-    items.sort(key=lambda x: x["mtime"], reverse=True)
-    return items
+        images.append({"rel": rel_of(p), "name": p.name, "bytes": st.st_size,
+                       "mtime": int(st.st_mtime),
+                       "seed": _seed_from_name(p.name)})
+    images.sort(key=lambda x: x["mtime"], reverse=True)
+    folders.sort(key=lambda f: f["name"].lower())
+    out["images"], out["folders"] = images, folders
+    return out
+
+
+def _count_images(folder: Path) -> int:
+    """Images anywhere below `folder` (subfolders included, dot dirs skipped)."""
+    n = 0
+    for _root, dirs, files in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        n += sum(1 for f in files if Path(f).suffix.lower() in IMG_EXTS)
+    return n
+
+
+def gallery_total() -> int:
+    """Every image in the gallery, folders included."""
+    return _count_images(OUT_DIR)
+
+
+def gallery_tree() -> list[dict]:
+    """Every folder in the gallery, sorted for the move-target picker.
+
+    Sorted by path segments so a folder always comes immediately before its
+    own children (os.walk emits them a level at a time, which detaches them).
+    """
+    out = []
+    for root, dirs, _files in os.walk(OUT_DIR):
+        depth = len(Path(root).relative_to(_out_root()).parts)
+        for d in dirs:
+            if d.startswith("."):
+                continue
+            out.append({"rel": rel_of(Path(root) / d), "name": d,
+                        "depth": depth})
+    out.sort(key=lambda f: f["rel"].split("/"))
+    return out
+
+
+def reindex_timeline(agent: Agent, mapping: dict, gone: set) -> bool:
+    """Point the chat timeline at images after files moved or vanished, so
+    generation cards keep resolving. `mapping` is old rel -> new rel; `gone`
+    is a set of rels that no longer exist. The events themselves stay put —
+    their indices are what /api/delete_event addresses."""
+    def fix(url: str) -> str | None:
+        rel = rel_from_url(url)
+        if not rel:
+            return url                       # cover cards, foreign urls
+        if rel in gone:
+            return None
+        return "/outputs/" + mapping[rel] if rel in mapping else url
+
+    touched = False
+    for evt in agent.timeline:
+        if evt.get("type") != "generation":
+            continue
+        files = evt.get("files") or []
+        fixed = [fix(f) for f in files]
+        if fixed != files:
+            touched = True
+        evt["files"] = [f for f in fixed if f]
+        if evt.get("src"):
+            src = fix(evt["src"])
+            if src is None:
+                src = ""
+            elif src != evt["src"]:
+                touched = True
+            evt["src"] = src
+    if touched:
+        agent._save_state()
+    return touched
+
+
+def move_images(rel_folder: str, rels: list) -> tuple[list, list]:
+    """Move images into a folder ("" = the gallery root). Returns
+    (mapping old rel -> new rel, rel paths that could not be moved)."""
+    dest = out_dir(rel_folder)
+    if dest is None:
+        return [], list(rels)
+    mapping, failed = [], []
+    for old_rel in rels:
+        src = out_file(old_rel)
+        if src is None:
+            failed.append(old_rel)
+            continue
+        if src.parent == dest:
+            continue                            # already there — no-op
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            new_name = unique_name(dest, src.name)
+            shutil.move(str(src), str(dest / new_name))
+        except OSError:
+            failed.append(old_rel)
+            continue
+        new_dir = rel_of(dest)
+        mapping.append((old_rel, f"{new_dir}/{new_name}" if new_dir
+                        else new_name))
+    return mapping, failed
 
 
 def parse_png_info(path: Path) -> dict:
@@ -1218,16 +1448,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/outputs/"):
-            name = _safe_name(path[len("/outputs/"):])
-            f = OUT_DIR / name if name else None
-            if f and f.is_file():
+            f = out_file(path[len("/outputs/"):])
+            if f:
                 self._file(f, cache="private, max-age=86400")
             else:
                 self.send_error(404)
         elif path.startswith("/thumb/"):
-            name = _safe_name(path[len("/thumb/"):])
-            f = OUT_DIR / name if name else None
-            if not (f and f.is_file()):
+            f = out_file(path[len("/thumb/"):])
+            if not f:
                 self.send_error(404)
                 return
             t = thumbnail(f)
@@ -1236,7 +1464,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/status":
             self.api_status()
         elif path == "/api/gallery":
-            self._json({"images": gallery_images()})
+            qs = parse_qs(urlparse(self.path).query)
+            folder = _safe_rel((qs.get("folder") or [""])[0])
+            if folder is None:
+                self._json({"error": "bad folder"}, 400)
+                return
+            data = gallery_listing(folder)
+            if (qs.get("tree") or [""])[0]:
+                data["tree"] = gallery_tree()
+            self._json(data)
         elif path == "/api/history":
             self._json({"timeline": self.app.agent.timeline,
                         "busy": self.app.agent.lock.locked()})
@@ -1336,21 +1572,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/model":
             self.api_model()
         elif path == "/api/delete":
-            body = self._body()
-            name = _safe_name(str(body.get("name", "")))
-            f = OUT_DIR / name if name else None
-            if not (f and f.is_file()):
-                self._json({"error": "not found"}, 404)
-                return
-            try:
-                f.unlink()
-                t = OUT_DIR / ".thumbs" / (f.stem + ".jpg")
-                if t.exists():
-                    t.unlink()
-            except OSError as e:
-                self._json({"error": str(e)}, 500)
-                return
-            self._json({"ok": True})
+            self.api_delete_images()
+        elif path == "/api/gallery/folder":
+            self.api_gallery_folder()
         elif path == "/api/delete_event":
             body = self._body()
             tl = self.app.agent.timeline
@@ -1414,10 +1638,9 @@ class Handler(BaseHTTPRequestHandler):
         """Re-generate an image directly — no chat message, no LLM turn.
         Streams SSE: progress events, then regen_done / regen_error."""
         body = self._body()
-        name = _safe_name(str(body.get("name", "")))
+        rel = _safe_rel(str(body.get("name", "")))
         instr = str(body.get("instruction", "")).strip()[:1000]
-        f = OUT_DIR / name if name else None
-        if not (f and f.is_file()):
+        if not rel or not out_file(rel):
             self._json({"error": "image not found"}, 404)
             return
         agent = self.app.agent
@@ -1432,7 +1655,7 @@ class Handler(BaseHTTPRequestHandler):
             def work():
                 try:
                     out["evt"] = run_regeneration(
-                        agent, name, instr, lambda e: q.put(e))
+                        agent, rel, instr, lambda e: q.put(e))
                 except Exception as e:            # noqa: BLE001 — report all
                     out["error"] = f"{type(e).__name__}: {e}"
 
@@ -1457,8 +1680,8 @@ class Handler(BaseHTTPRequestHandler):
                     agent.timeline.append(evt)
                     agent._save_state()
                     q.put({"type": "regen_done",
-                           "file": Path(evt["files"][0]).name,
-                           "src": name,
+                           "file": rel_from_url(evt["files"][0]),
+                           "src": rel,
                            "seed": evt.get("seed"),
                            "idx": len(agent.timeline) - 1})
             finally:
@@ -1574,7 +1797,7 @@ class Handler(BaseHTTPRequestHandler):
             "models": self.app.models_cache["models"],
             "llm": agent.llm_models,
             "has_key": agent.has_key(),
-            "gallery_count": len(gallery_images()),
+            "gallery_count": gallery_total(),
             "busy": agent.lock.locked(),
             "character": ({"id": char["id"],
                            "name": char.get("name", "")}
@@ -1791,12 +2014,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_image_info(self):
         qs = parse_qs(urlparse(self.path).query)
-        name = _safe_name((qs.get("name") or [""])[0])
-        f = OUT_DIR / name if name else None
-        if not (f and f.is_file()):
+        rel = _safe_rel((qs.get("name") or [""])[0]) or ""
+        f = out_file(rel)
+        if not f:
             self._json({"error": "not found"}, 404)
             return
-        info = {"name": name, "seed": _seed_from_name(name),
+        info = {"name": Path(rel).name, "rel": rel,
+                "seed": _seed_from_name(rel),
                 "prompt": "", "negative": "", "params": ""}
         try:
             st = f.stat()
@@ -1812,6 +2036,225 @@ class Handler(BaseHTTPRequestHandler):
             pass
         info.update(parse_png_info(f))
         self._json(info)
+
+    # ------------------------------------------------- gallery folders
+
+    def _folder_lock(self) -> bool:
+        """Folder mutations share the agent lock so they never race a
+        generation that is mid-write or mid-img2img-read."""
+        if not self.app.agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return False
+        return True
+
+    def api_delete_images(self):
+        """Delete one image ('name') or several ('names'), in any folder."""
+        body = self._body()
+        raw = body.get("names")
+        if not isinstance(raw, list):
+            raw = [body.get("name", "")]
+        rels = [r for r in (_safe_rel(str(v)) for v in raw[:200]) if r]
+        if not rels:
+            self._json({"error": "not found"}, 404)
+            return
+        agent = self.app.agent
+        removed, failed = [], False
+        for rel in rels:
+            f = out_file(rel)
+            if f is None:
+                failed = True
+                continue
+            try:
+                f.unlink()
+            except OSError:
+                failed = True
+                continue
+            t = OUT_DIR / ".thumbs" / (f.stem + ".jpg")
+            try:
+                if t.exists():
+                    t.unlink()
+            except OSError:
+                pass
+            removed.append(rel)
+        if removed:
+            reindex_timeline(agent, {}, set(removed))
+        if not removed:
+            self._json({"error": "not found"}, 404)
+            return
+        self._json({"ok": True, "removed": len(removed), "partial": failed})
+
+    def api_gallery_folder(self):
+        """POST {action}: create | rename | delete | move_images | move."""
+        body = self._body()
+        action = str(body.get("action", ""))
+        agent = self.app.agent
+
+        if action == "move_images":
+            if not self._folder_lock():
+                return
+            try:
+                dest = _safe_rel(str(body.get("folder", "")) or "")
+                if dest is None:
+                    self._json({"error": "bad folder"}, 400)
+                    return
+                dest_dir = out_dir(dest)
+                if dest_dir is None:
+                    self._json({"error": "bad folder"}, 400)
+                    return
+                if dest and not dest_dir.is_dir():
+                    self._json({"error": "no such folder"}, 404)
+                    return
+                rels = [r for r in
+                        (_safe_rel(str(v)) for v in (body.get("rels") or [])[:200])
+                        if r]
+                if not rels:
+                    self._json({"error": "nothing to move"}, 400)
+                    return
+                moved, failed = move_images(dest, rels)
+                mapping = {old: new for old, new in moved}
+                reindex_timeline(agent, mapping, set())
+                self._json({"ok": True,
+                            "moved": [{"from": o, "to": n} for o, n in moved],
+                            "failed": failed})
+            finally:
+                agent.lock.release()
+            return
+
+        if action == "create":
+            name = clean_folder_name(body.get("name", ""))
+            if not name:
+                self._json({"error": "bad folder name"}, 400)
+                return
+            parent = _safe_rel(str(body.get("parent", "")) or "")
+            if parent is None:
+                self._json({"error": "bad folder"}, 400)
+                return
+            base = out_dir(parent)
+            if base is None or not base.is_dir():
+                self._json({"error": "no such folder"}, 404)
+                return
+            if len(parent.split("/")) + 1 > MAX_FOLDER_DEPTH:
+                self._json({"error": "folders are nested too deep"}, 400)
+                return
+            target = base / name
+            if target.exists():
+                self._json({"error": "that folder already exists"}, 409)
+                return
+            if not self._folder_lock():
+                return
+            try:
+                target.mkdir(parents=True)
+            except OSError as e:
+                self._json({"error": str(e)}, 500)
+                return
+            finally:
+                agent.lock.release()
+            self._json({"ok": True, "folder": rel_of(target)})
+            return
+
+        if action in ("rename", "move"):
+            rel = _safe_rel(str(body.get("folder", "")) or "")
+            if not rel:
+                self._json({"error": "bad folder"}, 400)
+                return
+            src = out_dir(rel)
+            if src is None or not src.is_dir():
+                self._json({"error": "no such folder"}, 404)
+                return
+            up = rel.rsplit("/", 1)[0] if "/" in rel else ""
+            if action == "rename":
+                name = clean_folder_name(body.get("name", ""))
+                if not name:
+                    self._json({"error": "bad folder name"}, 400)
+                    return
+                dest_rel = join_rel(up, name)
+            else:
+                parent = _safe_rel(str(body.get("parent", "")) or "")
+                if parent is None:
+                    self._json({"error": "bad folder"}, 400)
+                    return
+                # never into itself or one of its own descendants
+                if parent and (parent == rel
+                               or parent.startswith(rel + "/")):
+                    self._json({"error": "a folder cannot live inside "
+                                         "itself"}, 400)
+                    return
+                if parent == up:
+                    self._json({"error": "already there"}, 400)
+                    return
+                if parent:
+                    pdir = out_dir(parent)
+                    if pdir is None or not pdir.is_dir():
+                        self._json({"error": "no such folder"}, 404)
+                        return
+                dest_rel = join_rel(parent, src.name)
+                if len(dest_rel.split("/")) > MAX_FOLDER_DEPTH:
+                    self._json({"error": "folders are nested too deep"}, 400)
+                    return
+            dest = out_dir(dest_rel)
+            if dest is None:
+                self._json({"error": "bad folder"}, 400)
+                return
+            if dest.exists():
+                self._json({"error": "a folder with that name exists"}, 409)
+                return
+            if not self._folder_lock():
+                return
+            try:
+                if action == "rename":              # re-root every file below
+                    moved = []
+                    for p in sorted(src.rglob("*")):
+                        if not p.is_file() or p.name.startswith("."):
+                            continue
+                        rel_old = rel_of(p)
+                        rel_new = dest_rel + rel_old[len(rel):]
+                        moved.append((rel_old, rel_new))
+                    shutil.move(str(src), str(dest))
+                    reindex_timeline(agent,
+                                     {o: n for o, n in moved}, set())
+                else:
+                    shutil.move(str(src), str(dest))
+            except OSError as e:
+                self._json({"error": str(e)}, 500)
+                return
+            finally:
+                agent.lock.release()
+            self._json({"ok": True, "folder": dest_rel})
+            return
+
+        if action == "delete":
+            rel = _safe_rel(str(body.get("folder", "")) or "")
+            if not rel:
+                self._json({"error": "the gallery root can't be deleted"},
+                           400)
+                return
+            folder = out_dir(rel)
+            if folder is None or not folder.is_dir():
+                self._json({"error": "no such folder"}, 404)
+                return
+            gone = set()
+            count = 0
+            try:
+                for p in folder.rglob("*"):
+                    if p.is_file() and not p.name.startswith("."):
+                        gone.add(rel_of(p))
+                        count += 1
+            except OSError:
+                pass
+            if not self._folder_lock():
+                return
+            try:
+                shutil.rmtree(folder)
+            except OSError as e:
+                self._json({"error": str(e)}, 500)
+                return
+            finally:
+                agent.lock.release()
+            reindex_timeline(agent, {}, gone)
+            self._json({"ok": True, "removed": count})
+            return
+
+        self._json({"error": "unknown action"}, 400)
 
     def api_settings(self):
         """GET returns masked settings; POST applies and persists them."""
@@ -2134,17 +2577,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": scrub_paths(
                     f"{type(e).__name__}: {e}")}, 502)
                 return
-            files = [Path(f).name for f in result.get("saved_files", [])]
+            files = [rel_of(Path(f)) for f in result.get("saved_files", [])]
             if not files:
                 self._json({"error": "generation produced no image"}, 502)
                 return
             name = files[0]
+            path = out_file(name)
+            if not path:
+                self._json({"error": "image vanished"}, 500)
+                return
             out: dict = {"ok": True, "name": name, "url": "/outputs/" + name}
             try:
                 from io import BytesIO
                 from PIL import Image
                 if purpose == "avatar":
-                    with Image.open(OUT_DIR / name) as im:
+                    with Image.open(path) as im:
                         side = min(im.size)
                         sq = im.convert("RGB").crop((
                             (im.width - side) // 2, (im.height - side) // 2,
@@ -2158,8 +2605,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     out["cover"] = ("data:image/png;base64,"
                                     + base64.b64encode(
-                                        (OUT_DIR / name).read_bytes()
-                                    ).decode())
+                                        path.read_bytes()).decode())
             except Exception:                          # noqa: BLE001
                 pass                                   # URL-only fallback
             self._json(out)
