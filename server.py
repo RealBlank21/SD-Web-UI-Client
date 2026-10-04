@@ -1283,6 +1283,65 @@ def move_images(rel_folder: str, rels: list) -> tuple[list, list]:
     return mapping, failed
 
 
+def _positive_prompts(timeline: list) -> dict:
+    """rel path -> positive prompt, from the chat timeline (no file reads)."""
+    out: dict = {}
+    for evt in timeline or []:
+        if evt.get("type") != "generation":
+            continue
+        prompt = (evt.get("gen") or {}).get("prompt")
+        if not prompt:
+            continue
+        urls = list(evt.get("files") or [])
+        if evt.get("src"):
+            urls.append(evt["src"])
+        for u in urls:
+            rel = rel_from_url(u)
+            if rel:
+                out[rel] = prompt
+    return out
+
+
+def images_matching(parent: str, needle: str, timeline: list) -> dict:
+    """Images sitting directly in folder `parent` whose POSITIVE prompt
+    contains `needle` (case-insensitive substring). Negative prompts never
+    match. The PNG's own parameters chunk wins — it records what was really
+    generated — and the timeline's gen snapshots cover images whose chunk is
+    missing. Returns {rels, checked, nometa, total}: `checked` had a readable
+    positive prompt, `nometa` had none at all, so the caller can tell "no
+    match" apart from "nothing to match against"."""
+    folder = out_dir(parent)
+    rels, checked, nometa, total = [], 0, 0, 0
+    if folder is None or not folder.is_dir():
+        return {"rels": rels, "checked": 0, "nometa": 0, "total": 0}
+    known = _positive_prompts(timeline)
+    low = needle.casefold()
+    try:
+        entries = sorted(folder.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return {"rels": rels, "checked": 0, "nometa": 0, "total": 0}
+    for p in entries:
+        if p.name.startswith("."):
+            continue                          # .thumbs and friends
+        try:
+            if p.is_dir() or p.suffix.lower() not in IMG_EXTS:
+                continue
+        except OSError:
+            continue
+        total += 1
+        rel = join_rel(parent, p.name)
+        prompt = (parse_png_info(p).get("prompt") or "").strip()
+        if not prompt:
+            prompt = (known.get(rel) or "").strip()
+        if not prompt:
+            nometa += 1
+            continue
+        checked += 1
+        if low in prompt.casefold():
+            rels.append(rel)
+    return {"rels": rels, "checked": checked, "nometa": nometa, "total": total}
+
+
 def parse_png_info(path: Path) -> dict:
     """Read SD WebUI's 'parameters' PNG chunk for the lightbox details."""
     try:
@@ -2084,7 +2143,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, "removed": len(removed), "partial": failed})
 
     def api_gallery_folder(self):
-        """POST {action}: create | rename | delete | move_images | move."""
+        """POST {action}: create | rename | delete | move_images | move |
+        organize."""
         body = self._body()
         action = str(body.get("action", ""))
         agent = self.app.agent
@@ -2118,6 +2178,45 @@ class Handler(BaseHTTPRequestHandler):
                             "failed": failed})
             finally:
                 agent.lock.release()
+            return
+
+        if action == "organize":
+            """Bulk file-by-prompt: create outputs/<parent>/<keyword> and move
+            every image sitting in <parent> whose POSITIVE prompt contains
+            the keyword. Plain substring matching, no model involved."""
+            parent = _safe_rel(str(body.get("folder", "")) or "")
+            if parent is None:
+                self._json({"error": "bad folder"}, 400)
+                return
+            base = out_dir(parent)
+            if base is None or not base.is_dir():
+                self._json({"error": "no such folder"}, 404)
+                return
+            keyword = str(body.get("keyword", ""))
+            needle = keyword.strip().casefold()
+            name = clean_folder_name(keyword)
+            if not needle or not name:
+                self._json({"error": "enter a keyword"}, 400)
+                return
+            if len(parent.split("/")) + 1 > MAX_FOLDER_DEPTH:
+                self._json({"error": "folders are nested too deep"}, 400)
+                return
+            target_rel = join_rel(parent, name)
+            if not self._folder_lock():
+                return
+            try:
+                out_dir(target_rel).mkdir(parents=True, exist_ok=True)
+                found = images_matching(parent, needle, agent.timeline)
+                moved, failed = move_images(target_rel, found["rels"])
+                reindex_timeline(agent, {o: n for o, n in moved}, set())
+            except OSError as e:
+                self._json({"error": str(e)}, 500)
+                return
+            finally:
+                agent.lock.release()
+            self._json({"ok": True, "folder": target_rel,
+                        "moved": len(moved), "checked": found["checked"],
+                        "nometa": found["nometa"], "failed": failed})
             return
 
         if action == "create":

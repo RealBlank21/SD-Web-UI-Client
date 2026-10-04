@@ -24,7 +24,7 @@ const els = {
   gemptyText: $("gempty-text"),
   pgTitle: $("pg-title"), pgNewFolder: $("pg-newfolder"),
   pgSelect: $("pg-select"), pgAll: $("pg-all"), pgMove: $("pg-move"),
-  pgDel: $("pg-del"),
+  pgDel: $("pg-del"), pgTag: $("pg-tag"),
   foldSheet: $("foldsheet"), foldTitle: $("fold-title"), foldSub: $("fold-sub"),
   foldName: $("fold-name"), foldOk: $("fold-ok"), foldCancel: $("fold-cancel"),
   foldPick: $("foldpick"), fpTitle: $("fp-title"), fpList: $("fp-list"),
@@ -661,6 +661,7 @@ function renderGallery() {
       : "No images yet. Ask the agent to draw something.";
   }
   els.pgSelect.hidden = galSelecting || !n;
+  els.pgTag.hidden = galSelecting || !n;
   galTitleSync();
 }
 
@@ -766,6 +767,7 @@ function setGalSelect(on) {
   els.pageGallery.classList.toggle("selecting", on);
   els.pgSelect.hidden = on || !images.length;
   els.pgNewFolder.hidden = on;
+  els.pgTag.hidden = on;
   els.pgAll.hidden = !on;
   els.pgMove.hidden = !on;
   els.pgDel.hidden = !on;
@@ -812,12 +814,22 @@ async function newFolderIn(parent) {
 function openFoldSheet(mode, folder, currentName) {
   foldMode = mode;
   foldTarget = folder;
-  els.foldTitle.textContent = mode === "rename" ? "Rename folder" : "New folder";
-  els.foldOk.textContent = mode === "rename" ? "Rename" : "Create";
-  els.foldSub.textContent = mode === "rename"
-    ? "Renaming also moves the images inside it."
-    : (folder ? `Inside ${baseName(folder)}`
-              : "Folders group your images in the gallery.");
+  if (mode === "tag") {
+    els.foldTitle.textContent = "File by keyword";
+    els.foldOk.textContent = "File them";
+    els.foldSub.textContent =
+      `Moves images here whose positive prompt mentions the keyword into ` +
+      `a new folder named after it.${folder ? ` Scoped to ${baseName(folder)}.` : ""}`;
+    els.foldName.placeholder = "e.g. chibi";
+  } else {
+    els.foldTitle.textContent = mode === "rename" ? "Rename folder" : "New folder";
+    els.foldOk.textContent = mode === "rename" ? "Rename" : "Create";
+    els.foldSub.textContent = mode === "rename"
+      ? "Renaming also moves the images inside it."
+      : (folder ? `Inside ${baseName(folder)}`
+                : "Folders group your images in the gallery.");
+    els.foldName.placeholder = "Folder name";
+  }
   els.foldName.value = currentName || "";
   els.foldSheet.hidden = false;
   setTimeout(() => { els.foldName.focus(); els.foldName.select(); }, 60);
@@ -828,7 +840,21 @@ async function submitFoldSheet() {
   if (!name) { els.foldName.focus(); return; }
   els.foldOk.disabled = true;
   try {
-    if (foldMode === "rename") {
+    if (foldMode === "tag") {
+      const d = await galleryOp({ action: "organize", folder: foldTarget,
+                                  keyword: name }, null);
+      els.foldSheet.hidden = true;
+      if (d) {
+        const n = d.moved || 0;
+        if (n) {
+          toast(`Filed ${n} image${n === 1 ? "" : "s"} into ${baseName(d.folder)}`);
+        } else if (d.nometa && !d.checked) {
+          toast("No image metadata to match", true);
+        } else {
+          toast(`Nothing here matches "${name}"`);
+        }
+      }
+    } else if (foldMode === "rename") {
       const d = await galleryOp({ action: "rename", folder: foldTarget, name },
                                 "Folder renamed");
       // keep the user where they were: re-root the open folder if it lived
@@ -1582,6 +1608,7 @@ $("btn-gallery").addEventListener("click", openGallery);
 $("pg-back").addEventListener("click", galleryBack);
 $("pg-refresh").addEventListener("click", () => loadGallery());
 els.pgNewFolder.addEventListener("click", () => newFolderIn(galFolder));
+els.pgTag.addEventListener("click", () => openFoldSheet("tag", galFolder, ""));
 els.pgSelect.addEventListener("click", () => setGalSelect(true));
 els.pgAll.addEventListener("click", () => {
   const cells = [...els.grid.querySelectorAll(".gcell")];
