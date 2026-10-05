@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=41">
+<link rel="stylesheet" href="/static/style.css?v=42">
 </head>
 <body>
 
@@ -136,7 +136,8 @@
 <div id="composer" hidden>
   <textarea id="input" rows="1" placeholder="Describe an image… or just chat" enterkeyhint="send"></textarea>
   <button id="btn-send" aria-label="Send">
-    <svg viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+    <svg class="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+    <svg class="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
   </button>
 </div>
 
@@ -397,11 +398,99 @@
 </div>
 
 <div id="regen" hidden>
-  <div class="regen-card">
+  <div class="regen-card regen-full">
     <b>Regenerate image</b>
-    <p class="dim">Describe the change — or leave empty for a fresh variation.</p>
-    <textarea id="regen-text" rows="3" placeholder="e.g. make the shirt a hoodie"
-              enterkeyhint="done"></textarea>
+    <p class="dim" id="regen-hint">Editing this image's recipe.</p>
+
+    <div>
+      <label class="rg-label" for="regen-mode">Mode</label>
+      <select id="regen-mode">
+        <option value="txt2img">Fresh variation — draw again from the prompt</option>
+        <option value="img2img">Edit this image — rework what is already there</option>
+      </select>
+    </div>
+
+    <div id="regen-text-row" hidden>
+      <label class="rg-label" for="regen-text">Quick change</label>
+      <textarea id="regen-text" rows="2"
+                placeholder="e.g. make the shirt a hoodie"></textarea>
+      <div class="rg-note">Appended to the prompt below.</div>
+    </div>
+
+    <div id="regen-denoise-row" hidden>
+      <label class="rg-label" for="regen-denoise">Denoise</label>
+      <input id="regen-denoise" type="number" min="0.05" max="1" step="0.05"
+             value="0.65" inputmode="decimal">
+      <div class="rg-note">Low keeps the original composition.</div>
+    </div>
+
+    <div>
+      <label class="rg-label" for="regen-prompt">Positive prompt</label>
+      <textarea id="regen-prompt" rows="4" placeholder="1girl, …"></textarea>
+    </div>
+
+    <div>
+      <label class="rg-label" for="regen-negative">Negative prompt</label>
+      <textarea id="regen-negative" rows="2" placeholder="lowres, bad hands, …"></textarea>
+    </div>
+
+    <div class="rg-grid">
+      <div>
+        <label class="rg-label" for="regen-w">Width</label>
+        <input id="regen-w" type="number" min="64" max="4096" step="8"
+               inputmode="numeric">
+      </div>
+      <div>
+        <label class="rg-label" for="regen-h">Height</label>
+        <input id="regen-h" type="number" min="64" max="4096" step="8"
+               inputmode="numeric">
+      </div>
+      <div>
+        <label class="rg-label" for="regen-steps">Steps</label>
+        <input id="regen-steps" type="number" min="1" max="150"
+               inputmode="numeric">
+      </div>
+      <div>
+        <label class="rg-label" for="regen-cfg">CFG</label>
+        <input id="regen-cfg" type="number" min="1" max="30" step="0.5"
+               inputmode="decimal">
+      </div>
+      <div>
+        <label class="rg-label" for="regen-batch">Batch</label>
+        <input id="regen-batch" type="number" min="1" max="8"
+               inputmode="numeric">
+      </div>
+      <div>
+        <label class="rg-label" for="regen-clip">Clip skip</label>
+        <input id="regen-clip" type="number" min="1" max="4"
+               inputmode="numeric">
+      </div>
+      <div>
+        <label class="rg-label" for="regen-seed">Seed</label>
+        <input id="regen-seed" type="text" placeholder="random"
+               inputmode="numeric" autocomplete="off" spellcheck="false">
+      </div>
+      <div>
+        <label class="rg-label" for="regen-sampler">Sampler</label>
+        <input id="regen-sampler" type="text" placeholder="DPM++ 2M Karras"
+               list="rg-samplers" autocomplete="off" spellcheck="false">
+        <datalist id="rg-samplers">
+          <option value="DPM++ 2M Karras"></option>
+          <option value="DPM++ SDE Karras"></option>
+          <option value="Euler a"></option>
+          <option value="Euler"></option>
+          <option value="DDIM"></option>
+        </datalist>
+      </div>
+      <div class="rg-span">
+        <label class="rg-label" for="regen-model">Checkpoint</label>
+        <input id="regen-model" type="text" list="rg-models"
+               placeholder="current checkpoint" autocomplete="off"
+               spellcheck="false">
+        <datalist id="rg-models"></datalist>
+      </div>
+    </div>
+
     <div class="regen-actions">
       <button id="regen-cancel">Cancel</button>
       <button id="regen-go">Regenerate</button>
@@ -448,6 +537,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=41"></script>
+<script src="/static/app.js?v=42"></script>
 </body>
 </html>

@@ -530,8 +530,14 @@ button:active { transform: scale(.97); }
   color: #14101f; opacity: .35; transition: opacity .15s;
 }
 #btn-send svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+#btn-send .i-stop { display: none; fill: currentColor; stroke: none; }
 #btn-send.ready { opacity: 1; }
 #btn-send.busy { opacity: .6; animation: pulse 1.1s infinite; }
+/* while a turn runs the same button stops it — hence always tappable */
+#btn-send.busy .i-send { display: none; }
+#btn-send.busy .i-stop { display: block; }
+#btn-send.stopping { opacity: .45; animation: none; }
+#btn-send.stopping .i-stop { display: block; }
 
 /* -------------------------------------------------------------- lightbox */
 
@@ -796,3 +802,57 @@ button:active { transform: scale(.97); }
   background: linear-gradient(135deg, var(--accent), var(--accent2));
   color: #14101f; border: 0;
 }
+
+/* the full regeneration recipe — a scrollable sheet, not a tall popup */
+#regen { overflow-y: auto; }
+.regen-full { max-height: 92dvh; overflow-y: auto; }
+/* the form is long on a phone: keep the actions in reach without scrolling */
+.regen-full .regen-actions {
+  position: sticky; bottom: 0;
+  margin-top: 2px;
+  padding-top: 10px;
+  background: linear-gradient(180deg, transparent, var(--panel) 30%);
+}
+.rg-label {
+  display: block;
+  font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--dim); margin-bottom: 4px;
+}
+.regen-full select,
+.regen-full input,
+.regen-full textarea {
+  width: 100%; resize: none; font: inherit; font-size: 15px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 11px;
+  padding: 9px 11px; outline: none;
+}
+.regen-full select { font-size: 14px; }
+.regen-full input:focus,
+.regen-full select:focus,
+.regen-full textarea:focus { border-color: #4a3f78; }
+.regen-full textarea { line-height: 1.4; }
+.rg-note { font-size: 11px; color: var(--dim); margin-top: 4px; }
+.rg-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;
+}
+.rg-span { grid-column: 1 / -1; }
+
+/* ---------------------------------------------- inline AI reply editing */
+
+.msg.editing { padding: 0; }
+.msg-edit { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.msg-edit textarea {
+  width: 100%; resize: vertical; font: inherit; font-size: 16px;
+  line-height: 1.4; color: var(--text); background: var(--bg);
+  border: 0; outline: none; padding: 12px 14px 4px;
+}
+.msg-edit-row { display: flex; gap: 8px; padding: 0 10px 10px; }
+.msg-edit-row button {
+  flex: 1; padding: 8px; font-size: 13px; border-radius: 10px;
+  background: var(--panel2); border: 1px solid var(--line);
+}
+.msg-edit-row button.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #14101f; border: 0;
+}
+.msg-edit-row button:disabled { opacity: .55; }

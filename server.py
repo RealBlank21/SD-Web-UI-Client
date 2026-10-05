@@ -325,6 +325,7 @@ class Agent:
         self.messages = [self._sys_msg()]
         self.timeline = []
         self.lock = threading.Lock()     # one turn at a time
+        self.stop_flag = threading.Event()  # set by /api/abort
         self.status_cb = None            # set while a turn streams
         self._load_state()
         self._rehydrate_char()
@@ -399,6 +400,35 @@ class Agent:
                 self.status_cb({"type": "status", "text": text})
             except Exception:
                 pass
+
+    # ------------------------------------------------------------ stopping
+
+    def request_stop(self):
+        """Ask the running turn (or image job) to stop as soon as it can."""
+        self.stop_flag.set()
+        self.emit_status("stopping…")
+        try:
+            self.client.interrupt()        # cuts an in-flight SD job short
+        except Exception:
+            pass
+
+    def stopped(self) -> bool:
+        return self.stop_flag.is_set()
+
+    # ----------------------------------------------------------- timeline
+
+    def push(self, evt: dict, emit=None) -> dict:
+        """Append to the timeline and stream it with its true index.
+
+        The index is what /api/delete_event and /api/edit_event address, so
+        the client must never have to count on its own — streamed-only events
+        (tool_start, progress) would desync a client-side counter. The stored
+        event stays index-free: array position is the truth after a deletion.
+        """
+        self.timeline.append(evt)
+        if emit is not None:
+            emit(dict(evt, idx=len(self.timeline) - 1))
+        return evt
 
     # -------------------------------------------------------------- LLM
 
@@ -699,10 +729,18 @@ class Agent:
 
     def run_turn(self, user_text: str, emit) -> None:
         self.messages.append({"role": "user", "content": user_text})
-        evt = {"type": "user", "text": user_text}
-        self.timeline.append(evt)
-        emit(evt)
+        self.push({"type": "user", "text": user_text}, emit)
+        self._complete(self.messages, emit)
 
+    def resume_turn(self, messages: list, emit) -> bool:
+        """Re-ask the model on `messages`, a working copy of the context.
+
+        Nothing on the agent is touched until the caller commits, so a stop
+        (or any failure) leaves the conversation exactly as it was.
+        Returns True when a reply actually landed."""
+        return self._complete(messages, emit)
+
+    def _complete(self, messages: list, emit) -> bool:
         reply = None
         char_temp = None
         char_mt = None
@@ -717,11 +755,14 @@ class Agent:
                 char_mt = None
         try:
             for _ in range(MAX_TOOL_ROUNDS):
-                data = self.llm_complete(self.messages,
+                if self.stopped():
+                    reply = None
+                    break
+                data = self.llm_complete(messages,
                                          temperature=char_temp,
                                          max_tokens=char_mt)
                 msg = data["choices"][0]["message"]
-                self.messages.append(_clean_assistant_msg(msg))
+                messages.append(_clean_assistant_msg(msg))
 
                 tool_calls = msg.get("tool_calls") or []
                 if not tool_calls:
@@ -732,6 +773,8 @@ class Agent:
                     break
 
                 for tc in tool_calls:
+                    if self.stopped():
+                        break
                     name = tc["function"]["name"]
                     try:
                         args = json.loads(
@@ -739,27 +782,114 @@ class Agent:
                     except json.JSONDecodeError:
                         args = {}
                     result = self._run_tool(name, args, emit)
-                    # keep the context lean: the "gen" snapshot is UI-only
-                    self.messages.append({
+                    # keep the context lean: the "gen" snapshot is UI-only,
+                    # but the prompt it held is NOT — the next turn has to
+                    # know which prompt actually produced the image on screen
+                    content = {k: v for k, v in result.items() if k != "gen"}
+                    gen = result.get("gen") or {}
+                    if gen.get("prompt"):
+                        content["prompt"] = gen["prompt"]
+                    files = content.get("saved_files") or []
+                    if files:
+                        # stable lineage id: survives every regeneration
+                        content["series"] = files[0]
+                    messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id"),
                         "name": name,
-                        "content": json.dumps(
-                            {k: v for k, v in result.items() if k != "gen"},
-                            ensure_ascii=False),
+                        "content": json.dumps(content, ensure_ascii=False),
                     })
             else:
                 reply = "(stopped: too many tool rounds)"
         except LLMError as e:
             evt = {"type": "error", "text": f"✗ {e}"}
-            self.timeline.append(evt)
-            emit(evt)
-            return
+            self.push(evt, emit)
+            return False
+
+        if self.stopped():
+            # the assistant message we just appended stays in context but gets
+            # no bubble — the user asked to stop, not to read a half answer
+            emit({"type": "stopped"})
+            return False
 
         if reply:                                 # empty final reply: no bubble
-            evt = {"type": "reply", "text": reply}
-            self.timeline.append(evt)
-            emit(evt)
+            # "mi" = messages length after appending this assistant message,
+            # so a later edit/regenerate can rewind the context exactly
+            evt = {"type": "reply", "text": reply, "mi": len(messages)}
+            self.push(evt, emit)
+            return True
+        return False
+
+    def reply_context(self, idx: int) -> list:
+        """The message list the model should see to re-answer timeline `idx`.
+
+        A slice, never a mutation — if the regeneration is stopped or fails,
+        the old reply and everything after it must survive untouched.
+        """
+        mi = self.timeline[idx].get("mi")
+        if isinstance(mi, int) and 1 < mi <= len(self.messages):
+            return self.messages[:mi - 1]
+        # older saves have no "mi" — drop the trailing assistant run
+        out = list(self.messages)
+        while len(out) > 1 and out[-1].get("role") == "assistant":
+            out.pop()
+        return out
+
+    def commit_reply(self, idx: int, messages: list, before: int) -> None:
+        """Adopt a regenerated reply.
+
+        Keeps what came before the old reply, drops the old reply and
+        whatever followed it, and keeps what the re-answer itself produced
+        (a freshly generated image, say) — `before` marks where that starts.
+        """
+        self.timeline = self.timeline[:idx] + self.timeline[before:]
+        self.messages = messages
+
+    def rollback_reply(self, before: int) -> None:
+        """Drop the events a failed regeneration left on the timeline.
+
+        Their context was discarded, so they must not linger as cards the
+        user cannot explain — but a trailing error is kept, because "nothing
+        happened" without a reason is worse than a red bubble.
+        """
+        keep = [e for e in self.timeline[before:] if e.get("type") == "error"]
+        self.timeline = self.timeline[:before] + keep
+
+    def sync_gen_context(self, series: str, rel: str, gen: dict | None) -> bool:
+        """Point the LLM's tool result at the newest variant of an image.
+
+        Regenerating rewrites the picture but not the conversation, so the
+        model would otherwise keep describing the original. Repoint the tool
+        message that produced the file at the one now on screen, and give it
+        the prompt that actually ran.
+
+        `series` identifies the lineage and `rel` is the new file. The match
+        accepts either the current file or the lineage's original, because a
+        second regeneration searches from a different variant than the first.
+        """
+        base = Path(series).name
+        for m in reversed(self.messages):
+            if m.get("role") != "tool":
+                continue
+            try:
+                content = json.loads(m.get("content") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(content, dict):
+                continue
+            files = [Path(str(f)).name for f in (content.get("saved_files")
+                                                 or [])]
+            root = Path(str(content.get("series") or "")).name
+            if base not in files and base != root:
+                continue
+            content["saved_files"] = [rel]
+            content["series"] = root or series
+            content.pop("count", None)
+            if gen and gen.get("prompt"):
+                content["prompt"] = gen["prompt"]
+            m["content"] = json.dumps(content, ensure_ascii=False)
+            return True
+        return False
 
     def _run_tool(self, name: str, args: dict, emit) -> dict:
         """Run one tool call in a worker thread; stream SD progress while
@@ -803,8 +933,7 @@ class Agent:
         if out["error"]:
             evt = {"type": "tool_error", "name": name,
                    "error": scrub_paths(out["error"])}
-            self.timeline.append(evt)
-            emit(evt)
+            self.push(evt, emit)
             return {"error": out["error"]}
 
         result = out["result"]
@@ -820,14 +949,12 @@ class Agent:
                 "seed": result.get("seed_used"),
                 "gen": result.get("gen"),
             }
-            self.timeline.append(evt)
-            emit(evt)
+            self.push(evt, emit)
         elif "models" in result:
             evt = {"type": "models",
                    "current_model": result.get("current_model"),
                    "models": result.get("models", [])}
-            self.timeline.append(evt)
-            emit(evt)
+            self.push(evt, emit)
         return result
 
 
@@ -873,6 +1000,7 @@ def run_chat_turn(agent: Agent, user_text: str):
     if not agent.lock.acquire(blocking=False):
         return ("busy", None)
     q = Queue()
+    agent.stop_flag.clear()
 
     def emit(evt):
         q.put(evt)
@@ -884,8 +1012,57 @@ def run_chat_turn(agent: Agent, user_text: str):
         except Exception as e:                         # noqa: BLE001 — last resort
             evt = {"type": "error",
                    "text": f"✗ server error — {type(e).__name__}: {e}"}
-            agent.timeline.append(evt)
-            emit(evt)
+            agent.push(evt, emit)
+        finally:
+            agent.status_cb = None
+            agent._save_state()
+            agent.lock.release()
+            q.put({"type": "done"})
+
+    threading.Thread(target=worker, daemon=True).start()
+    return ("ok", q)
+
+
+def run_reply_regen(agent: Agent, idx: int):
+    """Re-ask the model for a reply already on screen.
+
+    Returns (status, queue); status is ok/busy/nokey/bad_index.
+
+    The conversation is NOT rewound up front: the model answers against a
+    working copy, and the rewind is committed only once a new reply actually
+    exists. Stopping (or failing) therefore leaves the chat as it was, instead
+    of deleting the answer the user was trying to replace.
+    """
+    tl = agent.timeline
+    # validate the target before anything else — a stale index is the common
+    # case (the chat moved on) and shouldn't be reported as a missing key
+    if not (0 <= idx < len(tl)) or tl[idx].get("type") not in ("reply",
+                                                               "error"):
+        return ("bad_index", None)
+    if not agent.has_key():
+        return ("nokey", None)
+    if not agent.lock.acquire(blocking=False):
+        return ("busy", None)
+    ctx = agent.reply_context(idx)
+    before = len(tl)
+    q = Queue()
+    agent.stop_flag.clear()
+
+    def emit(evt):
+        q.put(evt)
+
+    def worker():
+        try:
+            agent.status_cb = emit
+            if agent.resume_turn(ctx, emit):
+                agent.commit_reply(idx, ctx, before)
+            else:
+                agent.rollback_reply(before)
+        except Exception as e:                         # noqa: BLE001 — last resort
+            agent.rollback_reply(before)
+            agent.push({"type": "error",
+                        "text": f"✗ server error — {type(e).__name__}: {e}"},
+                       emit)
         finally:
             agent.status_cb = None
             agent._save_state()
@@ -898,14 +1075,26 @@ def run_chat_turn(agent: Agent, user_text: str):
 
 # ------------------------------------------------- direct regeneration
 
+# everything the regen sheet may edit; anything else the caller sends is
+# dropped so a bad client can't push arbitrary payload keys into SD
 _REGEN_KEYS = ("prompt", "negative_prompt", "width", "height", "steps",
-               "cfg_scale", "sampler_name", "clip_skip")
+               "cfg_scale", "sampler_name", "clip_skip", "seed",
+               "batch_size", "denoising_strength")
+
+_REGEN_DEFAULTS = {"width": 1024, "height": 1024, "steps": 25,
+                   "cfg_scale": 7.0, "sampler_name": "DPM++ 2M Karras",
+                   "clip_skip": 1, "batch_size": 1}
 
 
 def _find_gen_args(agent: Agent, rel: str) -> dict | None:
-    """The 'gen' snapshot of the timeline generation that produced `rel`."""
+    """The 'gen' snapshot of the timeline generation that produced `rel`.
+
+    Newest wins: regenerations are appended after the original, and the card's
+    carousel is sitting on the newest variant — so that is the recipe the
+    regen sheet should open with.
+    """
     base = Path(rel).name
-    for evt in agent.timeline:
+    for evt in reversed(agent.timeline):
         if evt.get("type") != "generation":
             continue
         files = [rel_from_url(f) for f in evt.get("files", [])]
@@ -914,6 +1103,24 @@ def _find_gen_args(agent: Agent, rel: str) -> dict | None:
             if g.get("prompt"):
                 return g
     return None
+
+
+def gen_args_for(agent: Agent, rel: str) -> tuple[dict, dict]:
+    """(args, source) — the full generation recipe for `rel`.
+
+    Timeline snapshot first (it holds the model's checkpoint and prompt
+    exactly), PNG parameters chunk as the fallback for images that came from
+    outside this chat. `source` is 'chat' or 'png' so the sheet can say so.
+    """
+    src = out_file(rel)
+    g = _find_gen_args(agent, rel)
+    if g:
+        args = {k: g.get(k) for k in _REGEN_KEYS if g.get(k) is not None}
+        args["model"] = g.get("model") or None
+        return args, {"source": "chat"}
+    if src is None:
+        return {}, {"source": "none"}
+    return _args_from_png(src), {"source": "png"}
 
 
 def _args_from_png(path: Path) -> dict:
@@ -950,12 +1157,61 @@ def _args_from_png(path: Path) -> dict:
     return args
 
 
-def run_regeneration(agent: Agent, rel: str, instruction: str, emit) -> dict:
+def _clean_gen_args(args: dict) -> dict:
+    """Clamp the sheet's fields into sane SD ranges, dropping blanks."""
+    out: dict = {}
+    p = str(args.get("prompt") or "").strip()
+    if p:
+        out["prompt"] = p[:4000]
+    out["negative_prompt"] = str(args.get("negative_prompt") or "").strip()[:2000]
+
+    def num(key, lo, hi, default, cast=int):
+        v = args.get(key)
+        if v is None or v == "":
+            return cast(default)
+        try:
+            return max(lo, min(hi, cast(v)))
+        except (TypeError, ValueError):
+            return cast(default)
+
+    def dim(key, default):
+        """A1111 only takes multiples of 8 — snap to the nearest one."""
+        return max(64, min(4096, (num(key, 64, 4096, default) + 4) // 8 * 8))
+
+    out["width"] = dim("width", _REGEN_DEFAULTS["width"])
+    out["height"] = dim("height", _REGEN_DEFAULTS["height"])
+    out["steps"] = num("steps", 1, 150, _REGEN_DEFAULTS["steps"])
+    out["cfg_scale"] = num("cfg_scale", 1.0, 30.0,
+                           _REGEN_DEFAULTS["cfg_scale"], float)
+    out["batch_size"] = num("batch_size", 1, 8, _REGEN_DEFAULTS["batch_size"])
+    out["clip_skip"] = num("clip_skip", 1, 4, _REGEN_DEFAULTS["clip_skip"])
+    s = str(args.get("sampler_name") or "").strip()
+    if s:
+        out["sampler_name"] = s[:80]
+    sd = args.get("seed")
+    if sd is not None and str(sd).strip() not in ("", "-1"):
+        out["seed"] = num("seed", 0, 2 ** 53 - 1, -1)
+    d = args.get("denoising_strength")
+    if d is not None and str(d).strip() != "":
+        out["denoising_strength"] = num("denoising_strength", 0.01, 1.0, 0.65,
+                                        float)
+    return out
+
+
+def run_regeneration(agent: Agent, rel: str, instruction: str, emit,
+                     overrides: dict | None = None) -> dict:
     """Re-create an image directly — no LLM turn, no chat message.
 
-    Empty instruction: same prompt/settings, fresh seed (txt2img).
-    With instruction: img2img on the original, instruction appended to the
-    original prompt (denoise 0.65 keeps the composition close).
+    Starts from the image's own recipe (newest chat snapshot, else the PNG
+    parameters chunk) and lets the caller override every field the regen
+    sheet exposes: both prompts, resolution, steps, CFG, sampler, clip skip,
+    batch, seed and checkpoint.
+
+    Mode is explicit: `mode="img2img"` reworks the original image (denoise
+    decides how loosely the instruction may bend it); `mode="txt2img"` draws
+    a fresh variation from the prompt alone. A non-empty instruction with no
+    explicit mode means img2img, which is what it always used to do.
+
     The new variant is saved next to the original, so regenerating an image
     that lives in a folder keeps it there.
     Returns a timeline-ready 'generation' event with 'src' lineage."""
@@ -964,27 +1220,45 @@ def run_regeneration(agent: Agent, rel: str, instruction: str, emit) -> dict:
     src = out_file(rel)
     if src is None:
         raise ValueError("image not found")
-    g = _find_gen_args(agent, rel)
-    if g:
-        args = {k: g[k] for k in _REGEN_KEYS if g.get(k) is not None}
-        model = g.get("model") or None
-    else:
-        args = _args_from_png(src)            # fall back to the PNG chunk
-        model = None
-    if not args.get("prompt"):
-        raise ValueError("no original prompt found for this image")
 
+    base, origin = gen_args_for(agent, rel)
+    model = base.get("model") or None
+    args = {k: base[k] for k in _REGEN_KEYS if base.get(k) is not None}
+
+    mode = str((overrides or {}).get("mode") or "").strip().lower()
+    if mode not in ("txt2img", "img2img"):
+        mode = "img2img" if instruction else "txt2img"
+    if mode == "txt2img":
+        args.pop("denoising_strength", None)
+        # a fresh variation rolls a new seed — unless the sheet pins one
+        if not str((overrides or {}).get("seed", "")).strip():
+            args.pop("seed", None)
+
+    # the sheet's own values win; anything blank keeps the original recipe
+    for k, v in (overrides or {}).items():
+        if k in ("mode", "instruction") or v is None or v == "":
+            continue
+        args[k] = v
     if instruction:
         args["prompt"] = (args.get("prompt", "") + ", "
                           + instruction).strip(" ,")
-        args["denoising_strength"] = 0.65
+    if mode == "img2img":
+        args.setdefault("denoising_strength", 0.65)
+
+    args = _clean_gen_args(args)
+    if not args.get("prompt"):
+        raise ValueError("no original prompt found for this image")
+
+    ckpt = str((overrides or {}).get("model") or model or "").strip()
+    if ckpt and ckpt != "(unknown)":
+        emit({"type": "status", "text": "loading checkpoint…"})
+        agent.client.set_model(ckpt)
+        model = ckpt
+
+    if mode == "img2img":
         emit({"type": "status", "text": "applying change…"})
         result = agent.client.img2img(init_image_path=src, **args)
     else:
-        args.pop("seed", None)                # fresh variation: new seed
-        if model:
-            emit({"type": "status", "text": "loading checkpoint…"})
-            agent.client.set_model(model)
         emit({"type": "status", "text": "generating…"})
         result = agent.client.txt2img(**args)
 
@@ -997,14 +1271,16 @@ def run_regeneration(agent: Agent, rel: str, instruction: str, emit) -> dict:
         seed = None
     gen = {k: args.get(k) for k in
            ("prompt", "negative_prompt", "width", "height", "steps",
-            "cfg_scale", "sampler_name", "denoising_strength")}
+            "cfg_scale", "sampler_name", "clip_skip", "batch_size", "seed",
+            "denoising_strength")}
     gen["model"] = model or "(unknown)"
     return {"type": "generation",
             "files": ["/outputs/" + rel_of(f) for f in saved],
             "count": len(saved),
             "seed": seed,
             "gen": gen,
-            "src": rel}
+            "src": rel,
+            "origin": origin.get("source", "chat")}
 
 
 # ------------------------------------------------------------- gallery
@@ -1631,6 +1907,16 @@ class Handler(BaseHTTPRequestHandler):
             self.api_cover(path[len("/api/cover/"):])
         elif path == "/api/image_info":
             self.api_image_info()
+        elif path == "/api/regen_meta":
+            qs = parse_qs(urlparse(self.path).query)
+            rel = _safe_rel((qs.get("name") or [""])[0])
+            if not rel or not out_file(rel):
+                self._json({"error": "image not found"}, 404)
+                return
+            args, origin = gen_args_for(self.app.agent, rel)
+            args.setdefault("prompt", "")
+            self._json({"gen": args, "origin": origin.get("source", "png"),
+                        "models": self.app.models_cache["models"]})
         else:
             self.send_error(404)
 
@@ -1734,7 +2020,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.app.agent.timeline = [e for i, e in enumerate(tl)
                                            if i not in idxs]
                 self.app.agent._save_state()
-                self._json({"ok": True, "removed": len(idxs)})
+                # the caller re-reads /api/history — every later index moved
+                self._json({"ok": True, "removed": len(idxs),
+                            "timeline": self.app.agent.timeline})
                 return
             try:
                 idx = int(body.get("index", -1))
@@ -1745,11 +2033,90 @@ class Handler(BaseHTTPRequestHandler):
                 return
             evt = tl.pop(idx)
             self.app.agent._save_state()
-            self._json({"ok": True, "removed": evt.get("type")})
+            self._json({"ok": True, "removed": evt.get("type"),
+                        "timeline": self.app.agent.timeline})
+        elif path == "/api/edit_event":
+            self.api_edit_event()
+        elif path == "/api/regen_reply":
+            self.api_regen_reply()
+        elif path == "/api/abort":
+            self.api_abort()
         else:
             self.send_error(404)
 
     # -------------------------------------------------------------- APIs
+
+    def api_edit_event(self):
+        """Rewrite the text of a reply/error bubble in the active chat.
+
+        Both the display timeline and the LLM message list are patched, so
+        what the user reads is what the model will see next.
+        """
+        body = self._body()
+        agent = self.app.agent
+        tl = agent.timeline
+        try:
+            idx = int(body.get("index", -1))
+        except (TypeError, ValueError):
+            idx = -1
+        if not (0 <= idx < len(tl)):
+            self._json({"error": "bad index"}, 400)
+            return
+        evt = tl[idx]
+        if evt.get("type") not in ("reply", "error"):
+            self._json({"error": "that message can't be edited"}, 400)
+            return
+        text = str(body.get("text", ""))[:8000].strip()
+        if not text:
+            self._json({"error": "empty message"}, 400)
+            return
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            text = scrub_paths(text)
+            evt["text"] = text
+            mi = evt.get("mi")
+            if isinstance(mi, int) and 1 <= mi <= len(agent.messages) \
+                    and agent.messages[mi - 1].get("role") == "assistant":
+                agent.messages[mi - 1]["content"] = text
+            agent._save_state()
+            self._json({"ok": True, "text": text, "timeline": agent.timeline})
+        finally:
+            agent.lock.release()
+
+    def api_regen_reply(self):
+        """Re-ask the model for a reply already on screen.
+
+        The model answers against a working copy of the context and the
+        rewind is committed only once a new reply exists, so stopping or
+        failing leaves the chat untouched. Anything the old answer had after
+        it in the conversation goes with it (branching, not stacking).
+        """
+        body = self._body()
+        try:
+            idx = int(body.get("index", -1))
+        except (TypeError, ValueError):
+            idx = -1
+        status, q = run_reply_regen(self.app.agent, idx)
+        if status == "nokey":
+            self._json({"error": "no_api_key",
+                        "message": "Add your OpenRouter API key in Settings "
+                                   "before regenerating."}, 400)
+            return
+        if status == "busy":
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        if status == "bad_index":
+            self._json({"error": "bad index"}, 400)
+            return
+        self._sse_stream(q)
+
+    def api_abort(self):
+        """Stop the running turn and/or image job. Always safe to call."""
+        agent = self.app.agent
+        agent.request_stop()
+        self._json({"ok": True})
 
     def _sse_stream(self, q: Queue):
         """Write queue events as an SSE stream until a 'done' event."""
@@ -1781,6 +2148,8 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         rel = _safe_rel(str(body.get("name", "")))
         instr = str(body.get("instruction", "")).strip()[:1000]
+        over = body.get("overrides")
+        overrides = over if isinstance(over, dict) else None
         if not rel or not out_file(rel):
             self._json({"error": "image not found"}, 404)
             return
@@ -1789,6 +2158,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
         q = Queue()
+        agent.stop_flag.clear()
 
         def worker():
             out = {"evt": None, "error": None}
@@ -1796,7 +2166,7 @@ class Handler(BaseHTTPRequestHandler):
             def work():
                 try:
                     out["evt"] = run_regeneration(
-                        agent, rel, instr, lambda e: q.put(e))
+                        agent, rel, instr, lambda e: q.put(e), overrides)
                 except Exception as e:            # noqa: BLE001 — report all
                     out["error"] = f"{type(e).__name__}: {e}"
 
@@ -1813,15 +2183,21 @@ class Handler(BaseHTTPRequestHandler):
                                    "eta": p.get("eta_relative")})
                         except Exception:
                             pass
-                if out["error"]:
+                if agent.stopped():
+                    q.put({"type": "regen_stopped"})
+                elif out["error"]:
                     q.put({"type": "regen_error",
                            "error": scrub_paths(out["error"])})
                 else:
                     evt = out["evt"]
-                    agent.timeline.append(evt)
+                    agent.push(evt)
+                    new_rel = rel_from_url(evt["files"][0])
+                    # the picture changed — the conversation must follow it,
+                    # or the next turn keeps describing the old one
+                    agent.sync_gen_context(rel, new_rel, evt.get("gen"))
                     agent._save_state()
                     q.put({"type": "regen_done",
-                           "file": rel_from_url(evt["files"][0]),
+                           "file": new_rel,
                            "src": rel,
                            "seed": evt.get("seed"),
                            "idx": len(agent.timeline) - 1})

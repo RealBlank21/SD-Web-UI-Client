@@ -61,6 +61,13 @@ class SDClient:
     def progress(self) -> dict:
         return self._get("/sdapi/v1/progress?skip_current_image=false")
 
+    def interrupt(self):
+        """Stop the running job on the WebUI side (used by "stop")."""
+        try:
+            self._post("/sdapi/v1/interrupt", {})
+        except Exception:
+            pass                            # best effort — never raises
+
     def wait_until_ready(self, poll_seconds: float = 2.0, max_wait: int = 300):
         """Block until the server isn't busy."""
         waited = 0.0

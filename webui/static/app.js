@@ -453,15 +453,35 @@ function stopProgressPolling() {
 
 /* ------------------------------------------------------------------ chat */
 
+/* Tapping send while a turn is running stops it. The local SSE reader is
+ * dropped immediately so the UI unsticks at once; the server flag stops the
+ * next LLM round and /sdapi/v1/interrupt cuts a live SD job short. */
+let busyStop = false;
+let busyAbort = null;
+
+function stopGeneration() {
+  if (!busy) return;
+  busyStop = true;
+  els.send.classList.add("stopping");
+  els.send.classList.remove("busy");
+  pill("stopping…", false);
+  if (busyAbort) { busyAbort.abort(); busyAbort = null; }
+  api("/api/abort", { method: "POST" }).catch(() => {});
+}
+
 function setBusy(b) {
   busy = b;
+  if (!b) { busyStop = false; busyAbort = null; }
   els.send.classList.toggle("busy", b);
+  els.send.classList.toggle("stopping", !!busyStop);
+  els.send.setAttribute("aria-label", b ? "Stop generating" : "Send");
   els.send.classList.toggle("ready", !b && els.input.value.trim().length > 0);
 }
 
 async function sendMessage() {
+  if (busy) { stopGeneration(); return; }
   const text = els.input.value.trim();
-  if (!text || busy) return;
+  if (!text) return;
   els.input.value = "";
   autosize();
   await sendText(text);
@@ -480,11 +500,13 @@ async function sendText(text) {
   scrollDown(true);
   pill("thinking…", false);
 
+  busyAbort = new AbortController();
   try {
     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: text }),
+      signal: busyAbort.signal,
     });
     if (resp.status === 401) { showGate(); return; }
     if (resp.status === 400) {
@@ -505,11 +527,12 @@ async function sendText(text) {
     }
     await consumeSSE(resp);
   } catch (e) {
-    if (e.message === "locked") return;
+    if (busyStop || e.message === "locked") return;   // we asked for this
     pillHide();
     addBubble("error", "Connection lost — " + e.message +
       " (the turn keeps running on the server; refresh to catch up)");
   } finally {
+    busyAbort = null;
     pillHide();
     setBusy(false);
     refreshStatus();
@@ -538,17 +561,21 @@ function consumeSSE(resp, handler) {
   return next();
 }
 
-let evtCounter = 0;       // next timeline index for live events
+let evtCounter = 0;       // fallback index for streamed-only events
 
-function tagIdx(node) {
-  node.dataset.idx = evtCounter++;
+/* Streamed events carry the index the server gave them ('idx'). Counting
+ * them here instead would drift: tool_start / progress / status are streamed
+ * but never stored, so a local counter overshoots and every later delete
+ * lands out of range ("bad index"). Prefer the server's number. */
+function tagIdx(node, idx) {
+  node.dataset.idx = idx != null ? idx : evtCounter++;
   return node;
 }
 
 function handleEvent(evt) {
   switch (evt.type) {
     case "user":
-      evtCounter++;
+      if (evt.idx == null) evtCounter++;
       break; // already shown
     case "status":
       pill(esc(evt.text), false);
@@ -563,32 +590,38 @@ function handleEvent(evt) {
     case "tool_start":
       markToolDone(lastTool());
       addToolStart(evt.name);
-      tagIdx(els.msgs.lastChild);
       pill(evt.name + "…", false);
       break;
     case "generation":
       markToolDone(evt.gen && (evt.gen.denoising_strength != null) ? "edit_image" : "generate_image");
-      addGeneration(evt, evtCounter++);
+      addGeneration(evt, evt.idx != null ? evt.idx : evtCounter++);
       pill("done — loading images…", false);
       break;
     case "models":
       markToolDone("list_sd_models");
       addModels(evt);
-      tagIdx(els.msgs.lastChild);
+      tagIdx(els.msgs.lastChild, evt.idx);
       break;
     case "tool_error":
       markToolDone(lastTool());
       addBubble("error", `✗ ${evt.name} — ${evt.error}`);
+      tagIdx(els.msgs.lastChild, evt.idx);
       break;
     case "reply":
       stopProgressPolling();
       markToolDone(lastTool());
-      tagIdx(addBubble("ai", evt.text));
+      tagIdx(addBubble("ai", evt.text), evt.idx);
       break;
     case "error":
       stopProgressPolling();
       markToolDone(lastTool());
-      tagIdx(addBubble("error", evt.text));
+      tagIdx(addBubble("error", evt.text), evt.idx);
+      break;
+    case "stopped":
+      stopProgressPolling();
+      markToolDone(lastTool());
+      pillHide();
+      addBubble("ai", "*stopped*");
       break;
     case "done":
       stopProgressPolling();
@@ -666,9 +699,11 @@ function joinFolder(parent, name) {
 }
 
 async function loadGallery(folder) {
-  // an explicit folder argument is navigation: leave search mode behind
-  if (folder !== undefined) {
-    galFolder = folder || "";
+  // only a string navigates (and leaves search mode behind). Anything else —
+  // notably the click event a bare addEventListener("click", loadGallery)
+  // hands over — is a plain refresh, so it must not clobber galFolder.
+  if (typeof folder === "string") {
+    galFolder = folder;
     if (galSearchQuery) setGalSearch("", false);
   }
   if (galSearchQuery) return runGallerySearch();
@@ -2212,14 +2247,177 @@ function ctxItemsFor(el) {
   }
   if (el.classList.contains("msg")) {
     const items = [];
+    const editable = el.classList.contains("ai")
+                     && el.dataset.idx != null;
     if (!el.classList.contains("error")) {
       items.push({ label: "⧉ Copy",
         action: () => copyText(el.dataset.raw || el.textContent) });
+    }
+    if (editable) {
+      items.push({ label: "✎ Edit message",
+        action: () => startMsgEdit(el) });
+      items.push({ label: "↻ Regenerate reply",
+        action: () => regenReply(el) });
     }
     items.push({ label: "🗑 Delete", danger: true, action: () => deleteChatEvent(el) });
     return { items, previewSrc: null };
   }
   return null;
+}
+
+/* ----------------------------------------------------- editing an AI reply
+ *
+ * Inline, so the conversation stays readable while you fix it. Save patches
+ * the bubble AND the server's LLM context, so the corrected text is what the
+ * model carries into the next turn.
+ */
+
+function startMsgEdit(node) {
+  if (node.querySelector(".msg-edit")) return;
+  const raw = node.dataset.raw || node.textContent || "";
+  const box = el("div", "msg-edit");
+  const ta = el("textarea", null);
+  ta.value = raw;
+  ta.rows = Math.min(14, Math.max(3, raw.split("\n").length + 1));
+  const row = el("div", "msg-edit-row");
+  const cancel = el("button", null, "Cancel");
+  const save = el("button", "primary", "Save");
+  row.appendChild(cancel);
+  row.appendChild(save);
+  box.appendChild(ta);
+  box.appendChild(row);
+  node.classList.add("editing");
+  node.textContent = "";
+  node.appendChild(box);
+
+  const done = () => {
+    box.remove();
+    node.classList.remove("editing");
+    renderMsgText(node, raw);
+  };
+  cancel.addEventListener("click", done);
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.stopPropagation(); done(); }
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      save.click();
+    }
+  });
+  save.addEventListener("click", async () => {
+    const text = ta.value.trim();
+    if (!text || text === raw) { done(); return; }
+    save.disabled = true;
+    save.textContent = "Saving…";
+    try {
+      const d = await api("/api/edit_event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ index: +node.dataset.idx, text }),
+      });
+      done();
+      renderMsgText(node, d.text || text);
+    } catch (e) {
+      if (e.message === "locked") return;
+      save.disabled = false;
+      save.textContent = "Save";
+      toast("Edit failed: " + e.message, true);
+    }
+  });
+  setTimeout(() => { ta.focus(); ta.setSelectionRange(ta.value.length,
+                                                        ta.value.length); }, 30);
+}
+
+function renderMsgText(node, text) {
+  node.dataset.raw = text;
+  node.innerHTML = mdToHtml(text);
+}
+
+/* ---------------------------------------------- regenerate an AI reply --
+ *
+ * Asks the model to answer again from just before the old reply. The server
+ * answers against a working copy and only commits once a new reply exists,
+ * so a stop or failure leaves the chat as it was. The whole chat is
+ * re-rendered when the turn lands, so bubbles and indices agree again.
+ */
+
+async function regenReply(node) {
+  if (busy) { toast("Busy — wait for the current job", true); return; }
+  const idx = +node.dataset.idx;
+  if (!Number.isFinite(idx)) return;
+  if (!confirm("Regenerate this reply?\n\nEverything after it in the chat "
+               + "will be replaced.")) return;
+  setBusy(true);
+  switchView("chat");
+  pill("rewriting…", false);
+  busyAbort = new AbortController();
+  try {
+    const resp = await fetch("/api/regen_reply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index: idx }),
+      signal: busyAbort.signal,
+    });
+    if (resp.status === 401) { showGate(); return; }
+    if (resp.status === 409) {
+      pillHide();
+      toast("The agent is still working — try again shortly", true);
+      return;
+    }
+    if (!resp.ok) {
+      const d = await resp.json().catch(() => ({}));
+      pillHide();
+      if (d.error === "no_api_key") { openSettings(); return; }
+      toast(d.error || "Regeneration failed", true);
+      return;
+    }
+    await consumeSSE(resp, (evt) => {
+      switch (evt.type) {
+        case "status":
+          pill(esc(evt.text), false);
+          break;
+        case "progress":
+          pillProgress(evt.progress || 0, "regenerating…");
+          break;
+        case "tool_start":
+          pill(evt.name + "…", false);
+          break;
+        case "generation": {
+          // an image made while re-answering — show it above the new reply.
+          // No index: the server commits the rewind only after the turn
+          // lands, so anything streamed now is provisional. reloadChat()
+          // below re-draws the whole chat with the real ones.
+          addGeneration(evt, null);
+          break;
+        }
+        case "reply":
+          addBubble("ai", evt.text);
+          break;
+        case "error":
+          addBubble("error", evt.text);
+          break;
+        case "stopped":
+          // nothing was committed, so reloadChat() restores the old answer —
+          // a bubble here would just flash and vanish
+          toast("Stopped — the previous reply was kept");
+          break;
+        case "done":
+          break;
+      }
+      scrollDown(true);
+    });
+    // the server rewound and re-answered — re-read the chat wholesale so
+    // bubbles, variant cards and indices all agree again
+    await reloadChat();
+  } catch (e) {
+    if (busyStop || e.message === "locked") return;
+    pillHide();
+    toast("Connection lost — " + e.message, true);
+  } finally {
+    busyAbort = null;
+    pillHide();
+    setBusy(false);
+    refreshStatus();
+  }
 }
 
 async function deleteChatEvent(node) {
@@ -2237,7 +2435,7 @@ async function deleteChatEvent(node) {
     ? "Remove this image and its regenerations from the chat?"
     : "Remove this from the chat?")) return;
   try {
-    await api("/api/delete_event", {
+    const d = await api("/api/delete_event", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ indices: idxs }),
@@ -2248,7 +2446,16 @@ async function deleteChatEvent(node) {
         for (const f of rec.files) variantIndex.delete(f);
       }
     }
-    node.remove();
+    // every index after the removed one just shifted down, and the DOM has no
+    // way to know by how much — re-render from the server's copy instead of
+    // yanking the node and leaving stale data-idx on its neighbours
+    if (d.timeline) {
+      renderHistory(d.timeline);
+      images = timelineImages(d.timeline);
+    } else {
+      node.remove();
+      await reloadChat();
+    }
   } catch (e) {
     if (e.message !== "locked") toast("Delete failed: " + e.message, true);
   }
@@ -2286,45 +2493,147 @@ els.msgs.addEventListener("touchend", () => {
   if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
 }, { passive: true });
 
-/* ------------------------------------------------------- regenerate sheet */
+/* ------------------------------------------------------- regenerate sheet
+ *
+ * Full recipe editor: both prompts, resolution, steps, CFG, sampler, clip
+ * skip, batch, seed and checkpoint, pre-filled from the image's own history
+ * (newest chat snapshot, else its PNG parameters chunk). Everything is
+ * optional — a blank field keeps whatever the original used.
+ */
 
 let regenRel = null;                 // rel path — may include folders
-const regenEl = $("regen"), regenText = $("regen-text");
+let regenModels = [];                // checkpoints, for the datalist
+const regenEl = $("regen");
+const regenF = {
+  mode: $("regen-mode"),
+  prompt: $("regen-prompt"),
+  negative: $("regen-negative"),
+  width: $("regen-w"),
+  height: $("regen-h"),
+  steps: $("regen-steps"),
+  cfg: $("regen-cfg"),
+  sampler: $("regen-sampler"),
+  clip: $("regen-clip"),
+  batch: $("regen-batch"),
+  seed: $("regen-seed"),
+  model: $("regen-model"),
+  denoise: $("regen-denoise"),
+  text: $("regen-text"),
+  hint: $("regen-hint"),
+};
 
-function openRegen(rel) {
-  regenRel = rel;
-  regenText.value = "";
-  regenEl.hidden = false;
-  setTimeout(() => regenText.focus(), 60);
+function regenSetMode() {
+  const edit = regenF.mode.value === "img2img";
+  $("regen-denoise-row").hidden = !edit;
+  $("regen-text-row").hidden = !edit;
 }
 
-$("regen-cancel").addEventListener("click", () => { regenEl.hidden = true; });
-regenEl.addEventListener("click", (e) => { if (e.target === regenEl) regenEl.hidden = true; });
-$("regen-go").addEventListener("click", () => {
-  const rel = regenRel, instr = regenText.value.trim();
-  regenEl.hidden = true;
-  if (!rel) return;
-  runRegen(rel, instr);
-});
-regenText.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-    e.preventDefault();
-    $("regen-go").click();
+async function openRegen(rel) {
+  regenRel = rel;
+  regenF.mode.value = "txt2img";
+  regenF.text.value = "";
+  regenF.prompt.value = regenF.negative.value = "";
+  regenF.sampler.value = "";
+  regenF.model.value = "";
+  regenF.denoise.value = "0.65";
+  regenF.hint.textContent = "Reading the original recipe…";
+  regenSetMode();
+  regenEl.hidden = false;
+  try {
+    const d = await api("/api/regen_meta?name=" + encodeURIComponent(rel));
+    const g = d.gen || {};
+    regenF.prompt.value = g.prompt || "";
+    regenF.negative.value = g.negative_prompt || "";
+    regenF.width.value = g.width || 1024;
+    regenF.height.value = g.height || 1024;
+    regenF.steps.value = g.steps != null ? g.steps : 25;
+    regenF.cfg.value = g.cfg_scale != null ? g.cfg_scale : 7;
+    regenF.sampler.value = g.sampler_name || "DPM++ 2M Karras";
+    regenF.clip.value = g.clip_skip != null ? g.clip_skip : 1;
+    regenF.batch.value = g.batch_size != null ? g.batch_size : 1;
+    regenF.seed.value = g.seed != null && g.seed >= 0 ? g.seed : "";
+    regenF.model.value = g.model && g.model !== "(unknown)" ? g.model : "";
+    if (g.denoising_strength != null) {
+      regenF.denoise.value = g.denoising_strength;
+    }
+    regenModels = d.models || [];
+    const dl = $("rg-models");
+    dl.textContent = "";
+    for (const m of regenModels) {
+      const o = document.createElement("option");
+      o.value = m;
+      dl.appendChild(o);
+    }
+    regenF.hint.textContent = d.origin === "png"
+      ? "Read from the image's own settings."
+      : "Editing this image's recipe — the newest version of it.";
+  } catch (e) {
+    regenF.hint.textContent = "Could not read the original recipe; fill it in.";
   }
+  setTimeout(() => regenF.prompt.focus(), 60);
+}
+
+function regenOverrides() {
+  const mode = regenF.mode.value;
+  const o = {
+    mode,
+    prompt: regenF.prompt.value,
+    negative_prompt: regenF.negative.value,
+    width: regenF.width.value,
+    height: regenF.height.value,
+    steps: regenF.steps.value,
+    cfg_scale: regenF.cfg.value,
+    sampler_name: regenF.sampler.value.trim(),
+    clip_skip: regenF.clip.value,
+    batch_size: regenF.batch.value,
+    model: regenF.model.value.trim(),
+  };
+  const seed = regenF.seed.value.trim();
+  if (seed) o.seed = seed;
+  if (mode === "img2img") o.denoising_strength = regenF.denoise.value;
+  return o;
+}
+
+function closeRegen() {
+  regenEl.hidden = true;
+  regenRel = null;
+}
+
+$("regen-cancel").addEventListener("click", closeRegen);
+regenEl.addEventListener("click", (e) => { if (e.target === regenEl) closeRegen(); });
+regenF.mode.addEventListener("change", regenSetMode);
+$("regen-go").addEventListener("click", () => {
+  const rel = regenRel;
+  if (!rel) return;
+  const instr = regenF.text.value.trim();
+  const over = regenOverrides();
+  closeRegen();
+  runRegen(rel, instr, over);
 });
+for (const f of [regenF.prompt, regenF.negative, regenF.text]) {
+  f.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      $("regen-go").click();
+    }
+  });
+}
 
 /* ------------------------------------- direct regeneration (no chat message) */
 
-async function runRegen(name, instr) {
+async function runRegen(name, instr, overrides) {
   if (busy) { toast("Busy — wait for the current job", true); return; }
   setBusy(true);
   switchView("chat");
-  pill(instr ? "applying change…" : "regenerating…", false);
+  const editing = overrides && overrides.mode === "img2img";
+  pill(editing ? "applying change…" : "regenerating…", false);
+  busyAbort = new AbortController();
   try {
     const resp = await fetch("/api/regenerate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, instruction: instr }),
+      body: JSON.stringify({ name, instruction: instr, overrides }),
+      signal: busyAbort.signal,
     });
     if (resp.status === 401) { showGate(); return; }
     if (resp.status === 409) {
@@ -2355,8 +2664,9 @@ async function runRegen(name, instr) {
             rec.pos = rec.files.length - 1;      // show the new variant
             renderCarousel(rec);
             rec.card.scrollIntoView({ behavior: "smooth", block: "center" });
+          } else {
+            evtCounter = Math.max(evtCounter, (evt.idx ?? -1) + 1);
           }
-          evtCounter++;                          // timeline gained one event
           if (parentOf(evt.file) === galFolder
               && !images.some((x) => x.rel === evt.file)) {
             images.unshift({ rel: evt.file, name: baseName(evt.file),
@@ -2370,16 +2680,21 @@ async function runRegen(name, instr) {
           pillHide();
           toast(evt.error, true);
           break;
+        case "regen_stopped":
+          pillHide();
+          toast("Stopped");
+          break;
         case "done":
           pillHide();
           break;
       }
     });
   } catch (e) {
-    if (e.message === "locked") return;
+    if (busyStop || e.message === "locked") return;
     pillHide();
     toast("Connection lost — " + e.message, true);
   } finally {
+    busyAbort = null;
     setBusy(false);
     refreshStatus();
   }
