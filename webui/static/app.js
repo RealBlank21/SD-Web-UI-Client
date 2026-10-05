@@ -49,6 +49,8 @@ const els = {
   scsDelete: $("scs-delete"),
   shCur: $("sh-cur"), shSd: $("sh-sd"), shLlm: $("sh-llm"), shKey: $("sh-key"),
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
+  shArch: $("sh-arch"), shComps: $("sh-comps"),
+  shCompActions: $("sh-comp-actions"),
   shUsername: $("sh-username"),
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
   chName: $("ch-name"),
@@ -1218,8 +1220,10 @@ async function openSettings() {
   try {
     // refresh=1 → server asks SD to rescan its models dir, fresh list
     const s = await api("/api/status?refresh=1");
+    sdCaps = s.capabilities || {};
     els.shSdok.textContent = s.sd_ok ? "· connected" : "· unreachable";
     els.shCur.textContent = s.current_model ? `· now: ${s.current_model}` : "";
+    els.shArch.textContent = s.current_arch ? `· loaded: ${s.current_arch}` : "";
     els.shLlm.value = (s.llm || []).join(", ");
     els.shModels.textContent = "";
     if (s.models.length) {
@@ -1230,7 +1234,6 @@ async function openSettings() {
         els.shModels.appendChild(o);
       }
       els.shLoad.disabled = false;
-      els.shModelhint = undefined; // keep hint as-is
     } else {
       els.shModels.appendChild(el("option", null, s.sd_ok ? "(no models)" : "(server unreachable)"));
       els.shLoad.disabled = true;
@@ -1244,10 +1247,146 @@ async function openSettings() {
       els.shSys.value = cfg.system_prompt || "";
       els.shSysState.textContent = cfg.system_prompt_custom ? "· custom" : "· default";
       els.shUsername.value = cfg.username || "";
-    } catch { /* optional */ }
+      savedComps = cfg.sd_components || {};
+      renderComps(cfg.current_arch || s.current_arch || "");
+    } catch (e) {
+      // settings are optional, but a failure here (a broken render, say) must
+      // not vanish — it would leave the panel silently empty
+      if (e && e.message !== "locked") console.warn("settings:", e);
+    }
   } catch (e) {
     if (e.message !== "locked") toast("Status failed: " + e.message, true);
   }
+}
+
+/* ------------------------------------------- model components (Forge Neo) */
+
+/** What the connected Forge Neo offers: samplers, schedule types, companion
+ *  files, precision options and the per-architecture profiles. */
+let sdCaps = {};
+/** Per-architecture companion config, mirrors data/config.json sd_components */
+let savedComps = {};
+let compArch = "";
+
+/** Architectures worth showing: every slot the server knows that either has a
+ *  model, already has components saved, or is a modular family (the rest are
+ *  legacy SD1.5/SDXL and need no companions). */
+function compArchList() {
+  const rows = sdCaps.architectures || [];
+  const legacy = new Set(["sd", "xl"]);
+  const out = [];
+  for (const r of rows) {
+    if (!legacy.has(r.arch) || r.checkpoint || savedComps[r.arch]) {
+      out.push(r);
+    }
+  }
+  if (!out.length) return [];
+  const cur = out.findIndex((r) => r.arch === compArch);
+  return out;
+}
+
+function renderComps(activeArch) {
+  const box = els.shComps;
+  box.textContent = "";
+  const rows = compArchList();
+  els.shCompActions.hidden = rows.length === 0;
+  if (!rows.length) {
+    box.appendChild(el("div", "hint",
+      "No modular architectures reported by the server — this looks like a " +
+      "legacy SD1.5/SDXL-only install."));
+    return;
+  }
+  if (activeArch) compArch = activeArch;
+  if (!rows.some((r) => r.arch === compArch)) compArch = rows[0].arch;
+  const r = rows.find((x) => x.arch === compArch);
+  const saved = savedComps[r.arch] || {};
+
+  const card = el("div", "comp-card on");
+
+  const sel = el("select", "comp-arch");
+  for (const row of rows) {
+    const o = el("option", null, row.label || row.arch);
+    o.value = row.arch;
+    if (row.arch === r.arch) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.addEventListener("change", () => renderComps(sel.value));
+  card.appendChild(sel);
+
+  const head = el("div", "comp-head");
+  const bits = [`CFG ${r.cfg}`, `${r.steps} steps`, `${r.sampler}/${r.scheduler}`];
+  if (r.distilled) bits.unshift("low-guidance");
+  if (r.video) bits.push("video");
+  head.appendChild(el("span", "dim", bits.join(" · ")));
+  card.appendChild(head);
+
+  const fields = [
+    ["Text encoder", "dl-te", "text_encoder", "server default",
+     saved.text_encoder || ""],
+    ["VAE", "dl-vae", "sd_vae", "Automatic", saved.sd_vae || ""],
+    ["Precision", "dl-lb", "low_bits", "Automatic",
+     saved.low_bits || r.low_bits || ""],
+  ];
+  for (const [label, list, field, ph, val] of fields) {
+    const wrap = el("label", null, label);
+    const inp = el("input");
+    inp.type = "text";
+    inp.setAttribute("list", list);   // .list is read-only on the element
+    inp.placeholder = ph;
+    inp.value = val;
+    inp.dataset.arch = r.arch;
+    inp.dataset.field = field;
+    wrap.appendChild(inp);
+    card.appendChild(wrap);
+  }
+
+  const cur = [];
+  if ((r.modules || []).length) cur.push("attached: " + r.modules.join(", "));
+  if (r.checkpoint) cur.push("checkpoint: " + r.checkpoint);
+  if (cur.length) card.appendChild(el("div", "hint", cur.join(" · ")));
+  box.appendChild(card);
+
+  fillList("dl-te", sdCaps.text_encoders, true);
+  fillList("dl-vae", ["Automatic"].concat((sdCaps.vaes || [])
+    .filter((v) => v !== "Automatic")), true);
+  fillList("dl-lb", sdCaps.low_bits, false);
+}
+
+function fillList(id, values, placeholder) {
+  const dl = $(id);
+  if (!dl) return;
+  dl.textContent = "";
+  for (const v of values || []) {
+    if (!v) continue;
+    dl.appendChild(el("option", null, v));
+  }
+  if (placeholder) {
+    dl.appendChild(el("option", null, "— clear —"));
+  }
+}
+
+/** Read the component form into {arch: {field: value}}, blank = cleared. */
+function collectComps() {
+  const out = {};
+  for (const inp of els.shComps.querySelectorAll("input[data-field]")) {
+    const arch = inp.dataset.arch, field = inp.dataset.field;
+    const val = inp.value.trim();
+    out[arch] = out[arch] || {};
+    if (val === "— clear —" || val === "") delete out[arch][field];
+    else out[arch][field] = val;
+    if (!Object.keys(out[arch]).length) delete out[arch];
+  }
+  return out;
+}
+
+async function applyComps(arch, values) {
+  const d = await api("/api/model/components", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ arch, ...values }),
+  });
+  toast("Components applied");
+  return d;
 }
 
 async function saveSettings(patch, btn, okMsg) {
@@ -1277,13 +1416,24 @@ async function loadModel() {
   els.shLoad.disabled = true;
   els.shLoad.textContent = "Loading…";
   try {
+    // the saved per-architecture components travel with the switch, so a
+    // modular model never comes up without its text encoder / VAE
+    const arch = archOfModel(title);
+    const comps = savedComps[arch] || {};
     const d = await api("/api/model", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: title }),
+      body: JSON.stringify({ model: title, arch, ...comps }),
     });
     els.shCur.textContent = `· now: ${d.current_model || title}`;
-    toast("Checkpoint loaded");
+    els.shArch.textContent = d.arch ? `· loaded: ${d.arch}` : "";
+    if ((d.modules || []).length) {
+      toast("Loaded with " + d.modules.join(", "));
+    } else {
+      toast("Checkpoint loaded");
+    }
+    compArch = d.arch || arch;
+    renderComps(compArch);
   } catch (e) {
     if (e.message !== "locked") toast("Load failed: " + e.message, true);
   } finally {
@@ -1293,9 +1443,16 @@ async function loadModel() {
   }
 }
 
+/** Architecture of a checkpoint title, from the status model_detail list. */
+function archOfModel(title) {
+  const hit = (sdModelDetail || []).find((m) => m.title === title);
+  return (hit && hit.arch) || "";
+}
+
 /* ------------------------------------------------------------- characters */
 
 let statusModels = [];        // checkpoint titles cache for the char form
+let sdModelDetail = [];       // [{title, arch}] — which family each model is
 let editCharId = null;        // null = creating new
 let pendingAvatar = "";       // dataURL while editing
 let pendingCover = "";        // character's first image, dataURL while editing
@@ -1311,6 +1468,8 @@ async function refreshChars() {
     chars = d.characters || [];
     activeCharId = d.active || "";
     statusModels = s.models || [];
+    sdModelDetail = s.model_detail || [];
+    sdCaps = s.capabilities || sdCaps;
   } catch (e) {
     if (e.message !== "locked") toast("Characters failed: " + e.message, true);
   }
@@ -2544,14 +2703,17 @@ els.msgs.addEventListener("touchend", () => {
 
 /* ------------------------------------------------------- regenerate sheet
  *
- * Full recipe editor: both prompts, resolution, steps, CFG, sampler, clip
- * skip, batch, seed and checkpoint, pre-filled from the image's own history
+ * Full recipe editor: both prompts, resolution, steps, CFG, sampler, schedule
+ * type, distilled CFG, clip skip, batch, seed, checkpoint and the companion
+ * components of a modular model — pre-filled from the image's own history
  * (newest chat snapshot, else its PNG parameters chunk). Everything is
  * optional — a blank field keeps whatever the original used.
  */
 
 let regenRel = null;                 // rel path — may include folders
 let regenModels = [];                // checkpoints, for the datalist
+let regenArch = "";                  // architecture of the image's model
+let regenProfile = null;             // its CFG/step guidance, when known
 const regenEl = $("regen");
 const regenF = {
   mode: $("regen-mode"),
@@ -2562,10 +2724,15 @@ const regenF = {
   steps: $("regen-steps"),
   cfg: $("regen-cfg"),
   sampler: $("regen-sampler"),
+  sched: $("regen-sched"),
+  dcfg: $("regen-dcfg"),
   clip: $("regen-clip"),
   batch: $("regen-batch"),
   seed: $("regen-seed"),
   model: $("regen-model"),
+  te: $("regen-te"),
+  vae: $("regen-vae"),
+  lb: $("regen-lb"),
   denoise: $("regen-denoise"),
   text: $("regen-text"),
   hint: $("regen-hint"),
@@ -2577,45 +2744,115 @@ function regenSetMode() {
   $("regen-text-row").hidden = !edit;
 }
 
+/** Show the distilled-CFG field and the component block only where they
+ *  apply: a distilled DiT has a real guidance value, and only a modular
+ *  architecture has companion files to attach. */
+function regenSyncArch() {
+  const p = regenProfile;
+  const distilled = !!(p && p.distilled);
+  $("regen-dcfg-wrap").hidden = !distilled;
+  const modular = !!p && !["sd", "xl"].includes(regenArch);
+  $("regen-comp").hidden = !modular;
+  const note = $("regen-arch");
+  if (p) {
+    const bits = [`${regenArch || "model"}`];
+    if (distilled) {
+      bits.push("low-guidance: CFG 1–2, few steps");
+    } else if (modular) {
+      bits.push(`CFG ${p.cfg_range ? p.cfg_range.join("–") : "4–6"}`);
+    } else {
+      bits.push(`CFG ${p.cfg_range ? p.cfg_range.join("–") : "4–7"}`);
+    }
+    if (p.video) bits.push("video model");
+    note.textContent = bits.join(" · ");
+    note.hidden = false;
+  } else {
+    note.hidden = true;
+  }
+}
+
+function regenFillLists() {
+  const caps = sdCaps || {};
+  fillList("rg-samplers", caps.samplers, false);
+  fillList("rg-scheds", schedLabels(caps.schedulers), false);
+  fillList("rg-tes", caps.text_encoders, true);
+  fillList("rg-vaes", ["Automatic"].concat((caps.vaes || [])
+    .filter((v) => v !== "Automatic")), true);
+  fillList("rg-lbs", caps.low_bits, false);
+}
+
+/** API schedule names -> the labels the WebUI shows. */
+function schedLabels(names) {
+  const special = {
+    flow_match: "FlowMatchEulerDiscrete", flux2: "Flux2",
+    sgm_uniform: "SGM Uniform", linear_quadratic: "Linear Quadratic",
+    kl_optimal: "KL Optimal", align_your_steps: "Align Your Steps",
+    bong_tangent: "Bong Tangent",
+  };
+  return (names || []).map((n) => special[n]
+    || n.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()));
+}
+
 async function openRegen(rel) {
   regenRel = rel;
+  regenProfile = null;
+  regenArch = "";
   regenF.mode.value = "txt2img";
   regenF.text.value = "";
   regenF.prompt.value = regenF.negative.value = "";
   regenF.sampler.value = "";
+  regenF.sched.value = "";
+  regenF.dcfg.value = "";
   regenF.model.value = "";
+  regenF.te.value = regenF.vae.value = regenF.lb.value = "";
   regenF.denoise.value = "0.65";
   regenF.hint.textContent = "Reading the original recipe…";
   regenSetMode();
+  regenSyncArch();
   regenEl.hidden = false;
   try {
     const d = await api("/api/regen_meta?name=" + encodeURIComponent(rel));
     const g = d.gen || {};
+    const def = d.defaults || {};
     regenF.prompt.value = g.prompt || "";
     regenF.negative.value = g.negative_prompt || "";
-    regenF.width.value = g.width || 1024;
-    regenF.height.value = g.height || 1024;
-    regenF.steps.value = g.steps != null ? g.steps : 25;
-    regenF.cfg.value = g.cfg_scale != null ? g.cfg_scale : 7;
-    regenF.sampler.value = g.sampler_name || "DPM++ 2M Karras";
-    regenF.clip.value = g.clip_skip != null ? g.clip_skip : 1;
+    regenF.width.value = g.width || def.width || 1024;
+    regenF.height.value = g.height || def.height || 1024;
+    regenF.steps.value = g.steps != null ? g.steps
+      : (def.steps != null ? def.steps : 25);
+    regenF.cfg.value = g.cfg_scale != null ? g.cfg_scale
+      : (def.cfg_scale != null ? def.cfg_scale : 7);
+    regenF.sampler.value = g.sampler_name || def.sampler_name || "Euler a";
+    regenF.sched.value = g.scheduler && g.scheduler !== "automatic"
+      ? g.scheduler : "";
+    regenF.dcfg.value = g.distilled_cfg_scale != null
+      ? g.distilled_cfg_scale : "";
+    regenF.clip.value = g.clip_skip != null ? g.clip_skip
+      : (def.clip_skip != null ? def.clip_skip : "");
     regenF.batch.value = g.batch_size != null ? g.batch_size : 1;
     regenF.seed.value = g.seed != null && g.seed >= 0 ? g.seed : "";
     regenF.model.value = g.model && g.model !== "(unknown)" ? g.model : "";
+    regenF.te.value = g.text_encoder || "";
+    regenF.vae.value = g.sd_vae || "";
+    regenF.lb.value = g.low_bits || "";
     if (g.denoising_strength != null) {
       regenF.denoise.value = g.denoising_strength;
     }
     regenModels = d.models || [];
-    const dl = $("rg-models");
-    dl.textContent = "";
-    for (const m of regenModels) {
-      const o = document.createElement("option");
-      o.value = m;
-      dl.appendChild(o);
-    }
-    regenF.hint.textContent = d.origin === "png"
+    fillList("rg-models", regenModels, false);
+    regenArch = d.arch || g.arch || archOfModel(regenF.model.value) || "";
+    regenProfile = d.profile
+      || (sdCaps.architectures || []).find((a) => a.arch === regenArch)
+      || null;
+    if (d.capabilities) sdCaps = d.capabilities;
+    regenFillLists();
+    regenSyncArch();
+    const src = d.origin === "png"
       ? "Read from the image's own settings."
       : "Editing this image's recipe — the newest version of it.";
+    regenF.hint.textContent = (g.notes || []).length
+      ? src + " Note: " + g.notes.join("; ")
+      : src;
   } catch (e) {
     regenF.hint.textContent = "Could not read the original recipe; fill it in.";
   }
@@ -2633,10 +2870,19 @@ function regenOverrides() {
     steps: regenF.steps.value,
     cfg_scale: regenF.cfg.value,
     sampler_name: regenF.sampler.value.trim(),
+    scheduler: regenF.sched.value.trim(),
     clip_skip: regenF.clip.value,
     batch_size: regenF.batch.value,
     model: regenF.model.value.trim(),
   };
+  const dcfg = regenF.dcfg.value.trim();
+  if (dcfg) o.distilled_cfg_scale = dcfg;
+  const te = regenF.te.value.trim();
+  if (te && te !== "— clear —") o.text_encoder = te;
+  const vae = regenF.vae.value.trim();
+  if (vae && vae !== "— clear —") o.sd_vae = vae;
+  const lb = regenF.lb.value.trim();
+  if (lb) o.low_bits = lb;
   const seed = regenF.seed.value.trim();
   if (seed) o.seed = seed;
   if (mode === "img2img") o.denoising_strength = regenF.denoise.value;
@@ -2814,6 +3060,35 @@ $("sh-reset-sys").addEventListener("click", async () => {
   }
 });
 $("sh-load").addEventListener("click", loadModel);
+$("sh-comp-save").addEventListener("click", async (e) => {
+  const comps = collectComps();
+  // replace the whole map: an emptied card means "no companions for that arch"
+  await saveSettings({ sd_components: comps }, e.currentTarget,
+    "Components saved");
+  savedComps = comps;
+  renderComps(compArch);
+});
+$("sh-comp-apply").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  const arch = compArch;
+  const values = {};
+  for (const inp of els.shComps.querySelectorAll("input[data-field]")) {
+    if (inp.dataset.arch !== arch) continue;
+    let v = inp.value.trim();
+    if (v === "— clear —") v = "";
+    values[inp.dataset.field] = v;
+  }
+  btn.disabled = true;
+  btn.textContent = "Applying…";
+  try {
+    await applyComps(arch, values);
+  } catch (err) {
+    if (err.message !== "locked") toast("Apply failed: " + err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Apply now";
+  }
+});
 $("sh-save-username").addEventListener("click", () => {
   saveSettings({ username: els.shUsername.value.trim() },
     $("sh-save-username"), "Name saved");

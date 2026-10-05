@@ -848,6 +848,41 @@ button:active { transform: scale(.97); }
 }
 .rg-span { grid-column: 1 / -1; }
 
+/* companion components of a modular model (Forge Neo) */
+#regen-comp {
+  margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px;
+}
+#regen-comp summary {
+  font-size: 12px; color: var(--dim); cursor: pointer; padding: 4px 0;
+  list-style: none;
+}
+#regen-comp summary::-webkit-details-marker { display: none; }
+#regen-comp summary::before { content: "▸ "; }
+#regen-comp[open] summary::before { content: "▾ "; }
+.rg-comp { margin-top: 8px; }
+
+/* per-architecture component cards in Settings > Image */
+.comp-list { display: flex; flex-direction: column; gap: 8px; }
+.comp-card {
+  border: 1px solid var(--line); border-radius: 12px; padding: 10px;
+  background: var(--panel2); display: flex; flex-direction: column; gap: 8px;
+}
+.comp-card.on { border-color: var(--accent); }
+.comp-head {
+  display: flex; flex-direction: column; gap: 2px; font-size: 13px;
+}
+.comp-head .dim { font-size: 11px; }
+.comp-card label {
+  display: flex; flex-direction: column; gap: 4px; font-size: 11px;
+  color: var(--dim);
+}
+.comp-card input,
+.comp-card select {
+  font-size: 16px; padding: 8px 10px; border-radius: 10px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+}
+.comp-card select { font-size: 14px; }
+
 /* ---------------------------------------------- inline AI reply editing */
 
 .msg.editing { padding: 0; }

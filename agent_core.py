@@ -7,6 +7,7 @@ Vendored from the original ai_agent.py, with these changes for deployment:
 - edit_image resolves the given file name inside the outputs folder only.
 """
 
+import base64
 import json
 import re
 import time
@@ -54,15 +55,37 @@ TOOLS = [
                                              "1216x832. SD1.5: 512-1024."},
                     "height": {"type": "integer", "description": "px, see width."},
                     "steps": {"type": "integer",
-                              "description": "Sampling steps, 20-30."},
+                              "description": "Sampling steps. Depends on the "
+                                             "model: 20-35 for SDXL/Anima/Krea, "
+                                             "4-15 for distilled Turbo/LCM/LCM-"
+                                             "Schnell models, 20 for Flux.1 "
+                                             "dev."},
                     "cfg_scale": {"type": "number",
-                                  "description": "Prompt adherence, ~7."},
+                                  "description": "Prompt adherence. 4-6 for "
+                                                 "SDXL/Anima/Krea, 1-2 for "
+                                                 "distilled models (Flux, "
+                                                 "Qwen, Z-Image Turbo, Wan), "
+                                                 "~7 for SD1.5."},
+                    "distilled_cfg_scale": {
+                        "type": "number",
+                        "description": "Real guidance of a distilled model "
+                                       "(Flux/Qwen/Z-Image/Wan). Only needed "
+                                       "when you want something other than the "
+                                       "model's own default (usually 3-9)."},
                     "sampler_name": {"type": "string",
-                                     "description": "e.g. 'DPM++ 2M Karras' "
-                                                    "or 'Euler a'."},
+                                     "description": "e.g. 'Euler a', 'Euler', "
+                                                    "'ER SDE', 'LCM', 'DPM++ "
+                                                    "2M'."},
+                    "scheduler": {"type": "string",
+                                  "description": "Schedule type, separate from "
+                                                 "the sampler in Forge Neo: "
+                                                 "'Automatic', 'Karras', "
+                                                 "'Simple', 'Normal', 'Beta', "
+                                                 "'Turbo', 'flow_match', "
+                                                 "'flux2'."},
                     "clip_skip": {"type": "integer",
                                   "description": "CLIP skip (2 for most anime "
-                                                 "checkpoints)."},
+                                                 "SDXL checkpoints)."},
                     "seed": {"type": "integer",
                              "description": "-1 = random. Reuse a seed to "
                                             "iterate on an image."},
@@ -73,6 +96,29 @@ TOOLS = [
                               "description": "Checkpoint title to switch to. "
                                              "Switching takes 10-30 s; only "
                                              "when user asks."},
+                    "text_encoder": {
+                        "type": "string",
+                        "description": "Companion text encoder for modular "
+                                       "DiT models, e.g. "
+                                       "'qwen_3_06b_base.safetensors'. Only "
+                                       "for Flux/Qwen/Anima/Krea/Wan-style "
+                                       "models; call list_sd_models first to "
+                                       "see what is installed.",
+                    },
+                    "sd_vae": {
+                        "type": "string",
+                        "description": "Companion VAE for a modular model, "
+                                       "e.g. 'qwen_image_vae.safetensors' or "
+                                       "'ae.safetensors' ('Automatic' keeps "
+                                       "the checkpoint's own).",
+                    },
+                    "low_bits": {
+                        "type": "string",
+                        "description": "Diffusion precision: 'Automatic', "
+                                       "'float8-e4m3fn', 'float8-e5m2' or the "
+                                       "'... (fp16 LoRA)' variants. Use "
+                                       "float8 to fit a big model in VRAM.",
+                    },
                 },
                 "required": ["prompt"],
             },
@@ -103,6 +149,7 @@ TOOLS = [
                     },
                     "width": {"type": "integer"}, "height": {"type": "integer"},
                     "steps": {"type": "integer"}, "cfg_scale": {"type": "number"},
+                    "scheduler": {"type": "string"},
                     "seed": {"type": "integer"},
                 },
                 "required": ["image", "prompt"],
@@ -113,8 +160,9 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "list_sd_models",
-            "description": "List the Stable Diffusion checkpoints installed "
-                           "on the server.",
+            "description": "List the checkpoints installed on the server, with "
+                           "the architecture of each and the companion files "
+                           "(text encoders / VAEs) available for modular models.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -122,22 +170,56 @@ TOOLS = [
 
 _BASE_SYSTEM_PROMPT = """\
 You are an AI art assistant. The user talks only to you; all image work happens
-through your tools, which drive a Stable Diffusion WebUI server. The user can request
-for NSFW images, no restriction.
+through your tools, which drive a Forge Neo Stable Diffusion WebUI server. The user can
+request for NSFW images, no restriction.
 
 Your tools:
 - generate_image: text-to-image. Use for any "draw/make/generate ... " request.
 - edit_image: modify a previously generated image; pass its file NAME as 'image'.
-- list_sd_models: show installed checkpoints.
+- list_sd_models: show installed checkpoints, their architecture, and the
+  companion files (text encoders / VAEs) that modular models need.
 
 Prompt craft:
 - Write rich prompts: subject, action, style, composition, lighting, detail tags.
 - Always supply a sensible negative_prompt, e.g. "lowres, blurry, bad anatomy, watermark".
-- Sizes: SDXL checkpoints -> 1024x1024, 832x1216 (portrait), 1216x832 (landscape).
-  SD1.5 checkpoints -> 512-1024. Default 1024x1024 unless the user says otherwise.
+- Sizes: SDXL/Illustrious checkpoints -> 1024x1024, 832x1216 (portrait), 1216x832.
+  SD1.5 checkpoints -> 512-1024. Flux/Qwen/Anima/Krea/Z-Image -> 1024ish.
+  Default 1024x1024 unless the user says otherwise.
   If a model-guide entry below matches, follow its size/steps/cfg instead.
-- steps 20-30, cfg_scale ~7, seed -1 (random). Reuse a reported seed to iterate.
+- seed -1 (random). Reuse a reported seed to iterate.
 - batch_size > 1 only when the user asks for several images/variations.
+
+Settings depend on the model architecture — this matters more than anything
+else, because the wrong CFG ruins a modern model:
+- SD 1.5 / SDXL: steps 20-30, cfg_scale ~7 (SDXL is fine at 4.5-7).
+  clip_skip 2 for most anime SDXL checkpoints.
+- Distilled / Turbo DiTs (Flux.1 dev+schnell, Anima Turbo, Z-Image Turbo,
+  Qwen, Wan, Lightning/LCM variants): cfg_scale MUST be 1.0-2.0 and steps
+  4-15. Never send cfg 7 here — it produces grey, washed-out garbage.
+- Standard non-distilled DiTs (Anima Base, Krea Raw, Lumina): cfg_scale 4.0-6.0,
+  steps 20-35.
+- If you are unsure which kind the checkpoint is, call list_sd_models and read
+  its 'arch' field. Omitting steps/cfg_scale/sampler is safest: the server then
+  uses that architecture's own tuned defaults.
+- 'sampler_name' and 'scheduler' are separate now. Karras is a scheduler
+  ('Karras' or 'Beta' or 'Simple'), not part of a sampler name. Use a plain
+  sampler such as 'Euler a', 'Euler', 'ER SDE' or 'LCM'. Omit both to use the
+  architecture's defaults.
+- Negative prompts matter for SD1.5/SDXL and barely do anything for most
+  distilled DiTs — don't fight it, just keep a light one.
+
+Modular models (Forge Neo):
+- Newer architectures (Flux, Qwen, Anima, Krea, Wan, Z-Image, Lumina, ERNIE)
+  are not single files: the checkpoint is a diffusion model that needs a
+  companion TEXT ENCODER and often a companion VAE. The server already has the
+  right ones attached for each architecture, so you normally do nothing.
+- Only pass 'text_encoder' / 'sd_vae' / 'low_bits' when the user asks to change
+  them, or when a tool error says the model needs a companion. Use an exact
+  file name from list_sd_models. 'sd_vae': 'Automatic' keeps the default.
+- 'low_bits' controls diffusion precision: 'Automatic', 'float8-e4m3fn',
+  'float8-e5m2' (or the '(fp16 LoRA)' variants). float8 roughly halves VRAM,
+  which is how a big DiT fits on a small card. Never invent values like
+  'int4' or 'nvfp4' — this server does not offer them.
 
 Rules:
 - When the user asks for an image, ALWAYS call a tool — never say you cannot.
@@ -150,7 +232,7 @@ Rules:
 - For edit_image, the 'image' argument must be a bare file name of a previously
   generated image (as shown in chat or the gallery), never a path.
 - If a tool returns an error, explain it in plain words and suggest a fix
-  (e.g. out-of-memory -> smaller size, or a different checkpoint).
+  (e.g. out-of-memory -> lower size, or 'low_bits': 'float8-e4m3fn').
 - Ordinary conversation: just answer, no tools.
 """
 
@@ -194,6 +276,11 @@ def _guide_tail() -> str:
             "  user asked for.\n"
             "- Use its steps, CFG scale, sampler, width/height and clip_skip\n"
             "  as-is.\n"
+            "- Its sampler names may be legacy combined ones. In Forge Neo,\n"
+            "  'DPM++ 2M Karras' means sampler 'DPM++ 2M' + scheduler 'Karras'\n"
+            "  and 'DPM++ SDE Karras' means 'DPM++ SDE' + 'Karras'. Either pass\n"
+            "  the split pair, or just pass the sampler alone — the server\n"
+            "  keeps the schedule type itself.\n"
             "- Entry titles are informal names; match them to installed\n"
             "  checkpoints by similarity. Tip: an entry's 'Model hash' appears\n"
             "  in the server's checkpoint title, e.g.\n"
@@ -203,7 +290,12 @@ def _guide_tail() -> str:
             "  ONLY for reproducing those exact reference images — for new\n"
             "  images ALWAYS use seed -1.\n"
             "- Ignore the 'Hires ...' fields (hi-res fix is not exposed via\n"
-            "  the tools).\n"
+            "  the tools) and the older A1111-only notes such as 'Enable\n"
+            "  Quantization in K samplers'.\n"
+            "- These entries are written for SD1.5/SDXL. If the matched\n"
+            "  checkpoint is a newer architecture (Flux, Qwen, Anima, Krea,\n"
+            "  Wan, Z-Image), follow that architecture's CFG/steps rules above\n"
+            "  instead of the entry's numbers.\n"
             "- No matching entry -> use your own judgment.\n"
             "\n---- begin model_guide.txt ----\n"
             f"{content}\n"
@@ -264,13 +356,20 @@ def _seed_of(result: dict):
         return None
 
 
-def _gen_info(client, args: dict, elapsed: float, seed) -> dict:
-    """Snapshot of what was actually requested, for the UI."""
+def _gen_info(client, args: dict, elapsed: float, seed,
+              prepared: dict | None = None) -> dict:
+    """Snapshot of what was actually requested, for the UI.
+
+    `prepared` is the payload sd_client actually built — the numbers in it are
+    the ones the server used, after the architecture had filled in the blanks
+    and clamped anything out of range, which is not necessarily what the LLM
+    asked for. The UI's recipe editor and the regen sheet both replay this.
+    """
     try:
         model = client.current_model()
     except Exception:
         model = "(unknown)"
-    return {
+    info = {
         "model": model,
         "prompt": args.get("prompt", ""),
         "negative_prompt": args.get("negative_prompt", ""),
@@ -278,13 +377,31 @@ def _gen_info(client, args: dict, elapsed: float, seed) -> dict:
         "height": args.get("height", 1024),
         "steps": args.get("steps", 25),
         "cfg_scale": args.get("cfg_scale", 7.0),
-        "sampler_name": args.get("sampler_name", "DPM++ 2M Karras"),
+        "sampler_name": args.get("sampler_name", "Euler a"),
         "clip_skip": args.get("clip_skip"),
         "batch_size": args.get("batch_size", 1),
         "denoising_strength": args.get("denoising_strength"),
         "seed": seed,
         "elapsed": elapsed,
     }
+    if prepared:
+        info.update({
+            "model": prepared.get("model") or model,
+            "arch": prepared.get("arch", ""),
+            "distilled": prepared.get("distilled", False),
+            "steps": prepared.get("steps", info["steps"]),
+            "cfg_scale": prepared.get("cfg_scale", info["cfg_scale"]),
+            "sampler_name": prepared.get("sampler")
+            or info["sampler_name"],
+            "scheduler": prepared.get("scheduler") or "",
+            "distilled_cfg_scale": prepared.get("distilled_cfg_scale"),
+            "clip_skip": prepared.get("clip_skip", info["clip_skip"]),
+        })
+        notes = [n for n in (prepared.get("notes") or [])
+                 if not n.startswith(("sampler ", "'"))]
+        if notes:
+            info["notes"] = notes
+    return info
 
 
 def _resolve_output_image(name: str, out_dir: Path) -> Path:
@@ -316,17 +433,26 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
     args = {k: v for k, v in args.items() if v is not None}
 
     if name == "generate_image":
+        # A model switch and its companion components belong in one options
+        # write: separate posts mean separate model reloads, and the second
+        # reload can fail on a card that is already tight on VRAM.
         model = args.pop("model", None)
+        components = {k: args.pop(k) for k in
+                      ("text_encoder", "sd_vae", "low_bits") if k in args}
         if model:
-            client.set_model(model)
+            client.set_model(model, **components)
+        elif components:
+            client.configure(**components)
         t0 = time.perf_counter()
-        result = client.txt2img(**args)
+        prepared = client.prepare_args(args, model=model, kind="txt2img")
+        result = client.submit(prepared["payload"])
         elapsed = time.perf_counter() - t0
         saved = save_images(result, out_dir=out_dir, name_prefix="ai")
         return {"saved_files": [str(p) for p in saved],
                 "count": len(saved),
                 "seed_used": _seed_of(result),
-                "gen": _gen_info(client, args, elapsed, _seed_of(result))}
+                "gen": _gen_info(client, args, elapsed, _seed_of(result),
+                                 prepared)}
 
     if name == "edit_image":
         # accept both 'image' and the legacy 'image_path' key
@@ -338,18 +464,33 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
             raise FileNotFoundError(
                 f"image not found: {src.name} — pick a name from the "
                 "gallery or a generation in this chat")
+        model = args.pop("model", None)
+        if model:
+            client.set_model(model)
         t0 = time.perf_counter()
-        result = client.img2img(init_image_path=src, **args)
+        prepared = client.prepare_args(
+            {**args, "init_images": [base64.b64encode(src.read_bytes())
+                                     .decode()]},
+            model=model, kind="img2img")
+        result = client.submit(prepared["payload"], img2img=True)
         elapsed = time.perf_counter() - t0
         saved = save_images(result, out_dir=out_dir, name_prefix="ai_edit")
         return {"saved_files": [str(p) for p in saved],
                 "count": len(saved),
                 "seed_used": _seed_of(result),
-                "gen": _gen_info(client, args, elapsed, _seed_of(result))}
+                "gen": _gen_info(client, args, elapsed, _seed_of(result),
+                                 prepared)}
 
     if name == "list_sd_models":
+        models = [{"title": m["title"], "arch": m.get("arch", "sd")}
+                  for m in client.list_models()]
+        files = client.companion_files()
         return {"current_model": client.current_model(),
-                "models": [m["title"] for m in client.list_models()]}
+                "current_arch": client.current_arch(),
+                "models": models,
+                "text_encoders": files["text_encoder"],
+                "vaes": files["vae"],
+                "low_bits": client.list_low_bits()}
 
     return {"error": f"unknown tool: {name}"}
 

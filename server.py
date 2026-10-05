@@ -42,7 +42,12 @@ import requests
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from sd_client import SDClient, SDWebUIError
+from sd_client import (                              # vendored WebUI client
+    SDClient,
+    SDWebUIError,
+    guess_arch,
+    is_distilled,
+)
 from agent_core import (                      # vendored agent brain
     DEFAULT_BASE_PROMPT,
     DEFAULT_LLM,
@@ -100,6 +105,11 @@ DEFAULT_CONFIG = {
     "system_prompt": "",   # custom system message; "" = built-in default
     "username": "",          # how the AI knows the user
     "persona_id": "",        # active user persona (data/personas.json)
+    # per-architecture companion files, e.g.
+    # {"qwen": {"text_encoder": "qwen_3_06b_base.safetensors",
+    #           "sd_vae": "qwen_image_vae.safetensors",
+    #           "low_bits": "float8-e4m3fn"}}
+    "sd_components": {},
 }
 
 
@@ -383,6 +393,17 @@ class Agent:
 
     def char_tags(self) -> str:
         return (self.char or {}).get("appearance", "") or ""
+
+    def saved_components(self, arch: str) -> dict:
+        """Companion files configured for an architecture in Settings.
+
+        Filled into a tool call's arguments before it runs, so switching to a
+        Qwen checkpoint re-attaches the Qwen text encoder and VAE in the same
+        options write as the switch itself (one model load, not two).
+        """
+        comps = (self.cfg.get("sd_components") or {}).get(
+            (arch or "").lower())
+        return dict(comps) if isinstance(comps, dict) else {}
 
     def set_auto_images(self, on: bool) -> bool:
         """Turn the model's image tools on/off for the active chat.
@@ -947,6 +968,12 @@ class Agent:
             cp = (self.char.get("checkpoint") or "").strip()
             if cp and not args.get("model"):
                 args["model"] = cp
+            # a checkpoint switch carries its architecture's saved companion
+            # files, so a modular model never loads without its text encoder
+            if args.get("model"):
+                arch = self.client.arch_for(args["model"])
+                for k, v in self.saved_components(arch).items():
+                    args.setdefault(k, v)
             size = self.char.get("size") or []
             if name == "generate_image" and len(size) == 2:
                 args.setdefault("width", size[0])
@@ -1133,12 +1160,103 @@ def run_reply_regen(agent: Agent, idx: int):
 # everything the regen sheet may edit; anything else the caller sends is
 # dropped so a bad client can't push arbitrary payload keys into SD
 _REGEN_KEYS = ("prompt", "negative_prompt", "width", "height", "steps",
-               "cfg_scale", "sampler_name", "clip_skip", "seed",
-               "batch_size", "denoising_strength")
+               "cfg_scale", "sampler_name", "scheduler", "clip_skip", "seed",
+               "batch_size", "denoising_strength", "distilled_cfg_scale")
 
+# companion-component fields: these change the loaded pipeline rather than the
+# request, so they ride the options route and are applied with the checkpoint
+_COMPONENT_KEYS = ("text_encoder", "sd_vae", "low_bits")
+
+#: legacy monolithic defaults, only used when the WebUI cannot be reached.
+#: No clip_skip here on purpose — an unreachable server cannot be told what it
+#: is already set to, and a filler value would override it.
 _REGEN_DEFAULTS = {"width": 1024, "height": 1024, "steps": 25,
-                   "cfg_scale": 7.0, "sampler_name": "DPM++ 2M Karras",
-                   "clip_skip": 1, "batch_size": 1}
+                   "cfg_scale": 7.0, "sampler_name": "Euler a",
+                   "scheduler": "automatic", "batch_size": 1}
+
+
+def _safe_arch(agent: Agent) -> str:
+    try:
+        return agent.client.current_arch()
+    except Exception:                                 # noqa: BLE001
+        return ""
+
+
+def _sd_capabilities(client) -> dict:
+    """Samplers, schedule types, companion files and precision options.
+
+    Every list comes from the WebUI itself, so the pickers never offer a value
+    the server would reject.
+    """
+    try:
+        if not client.options():
+            return {}
+        client.capabilities()
+        files = client.companion_files()
+        return {"samplers": client.list_samplers(),
+                "schedulers": client.list_schedulers(),
+                "low_bits": client.list_low_bits(),
+                "text_encoders": files["text_encoder"],
+                "vaes": client.list_vaes(),
+                "architectures": client.architecture_summary(),
+                "video": client.video_supported()}
+    except Exception:                                 # noqa: BLE001
+        return {}
+
+
+def _public_profile(client, arch: str) -> dict:
+    """Architecture profile in the shape the UI wants (JSON-safe)."""
+    try:
+        p = client.arch_profile(arch)
+    except Exception:                                 # noqa: BLE001
+        return {}
+    legacy = arch in ("sd", "xl")
+    return {"arch": p.get("arch", arch), "label": p.get("label", arch),
+            "cfg": p.get("cfg"), "steps": p.get("steps"),
+            "sampler": p.get("sampler"), "scheduler": p.get("scheduler"),
+            # None for sd/xl: they advertise a value, but an ordinary sampler
+            # never reads it and the payload builder does not send it
+            "distilled_cfg_scale": None if legacy else p.get("dcfg"),
+            "distilled": bool(p.get("distilled")),
+            "video": bool(p.get("video")),
+            "cfg_range": p.get("cfg_range"), "step_range": p.get("step_range"),
+            "enforce": bool(p.get("enforce"))}
+
+
+def regen_defaults(client, model: str = "") -> dict:
+    """Blank-field defaults for the regen sheet, from the architecture.
+
+    A sheet opened on a Flux image must not offer SDXL's 1024/CFG 7/25 steps:
+    those are exactly the values that ruin a distilled model. When the WebUI
+    is unreachable this falls back to the legacy numbers.
+    """
+    try:
+        model = model or client.current_model()
+        prof = client.arch_profile(client.arch_for(model))
+    except Exception:                                 # noqa: BLE001
+        return dict(_REGEN_DEFAULTS)
+    size = int(prof.get("size") or 1024)
+    steps = int(prof["steps"])
+    lo, hi = prof.get("step_range") or [1, 150]
+    if is_distilled(model) and not (lo <= steps <= hi):
+        # a Turbo/Schnell variant of a family whose default suits the full
+        # model — offer the same low default the payload builder would pick
+        steps = int(lo + (hi - lo) // 3)
+    out = {"width": size, "height": size, "steps": steps,
+           "cfg_scale": float(prof["cfg"]),
+           "sampler_name": prof["sampler"],
+           "scheduler": prof["scheduler"], "batch_size": 1}
+    # Clip skip is a real option on Neo, and a blank recipe must NOT send a
+    # filler value: that would override whatever the server is set to (2 for
+    # most anime SDXL checkpoints) and quietly degrade the image. Offer the
+    # current value so the sheet shows what will be used.
+    try:
+        cur = client.options().get("CLIP_stop_at_last_layers")
+        if cur:
+            out["clip_skip"] = int(float(cur))
+    except Exception:                                 # noqa: BLE001
+        pass
+    return out
 
 
 def _find_gen_args(agent: Agent, rel: str) -> dict | None:
@@ -1172,32 +1290,49 @@ def gen_args_for(agent: Agent, rel: str) -> tuple[dict, dict]:
     if g:
         args = {k: g.get(k) for k in _REGEN_KEYS if g.get(k) is not None}
         args["model"] = g.get("model") or None
-        return args, {"source": "chat"}
+        return args, {"source": "chat", "arch": g.get("arch", ""),
+                      "notes": g.get("notes") or []}
     if src is None:
         return {}, {"source": "none"}
-    return _args_from_png(src), {"source": "png"}
+    args = _args_from_png(src)
+    return args, {"source": "png",
+                  "arch": guess_arch(str(args.get("model") or ""))}
 
 
 def _args_from_png(path: Path) -> dict:
-    """Recover generation args from the image's PNG parameters chunk."""
+    """Recover generation args from the image's PNG parameters chunk.
+
+    Forge Neo writes a few extra fields an old parser never saw — the schedule
+    type and the distilled CFG of a modern model — and they are the difference
+    between reproducing an image and merely resembling it.
+    """
     info = parse_png_info(path)
     args: dict = {"prompt": info.get("prompt", ""),
                   "negative_prompt": info.get("negative", "")}
     p = info.get("params", "")
 
     def grab(key: str):
-        m = re.search(key + r":\s*([^,]+)", p)
+        m = re.search(re.escape(key) + r":\s*([^,]+)", p)
         return m.group(1).strip() if m else None
 
-    steps = grab("Steps")
-    if steps and steps.isdigit():
-        args["steps"] = int(steps)
-    try:
-        cfg = grab("CFG scale")
-        if cfg:
-            args["cfg_scale"] = float(cfg)
-    except ValueError:
-        pass
+    def grab_num(key: str, cast):
+        raw = grab(key)
+        if raw is None:
+            return None
+        try:
+            return cast(raw)
+        except ValueError:
+            return None
+
+    steps = grab_num("Steps", int)
+    if steps:
+        args["steps"] = steps
+    cfg = grab_num("CFG scale", float)
+    if cfg is not None:
+        args["cfg_scale"] = cfg
+    dcfg = grab_num("Distilled CFG Scale", float)
+    if dcfg is not None:
+        args["distilled_cfg_scale"] = dcfg
     size = grab("Size")
     if size:
         m = re.match(r"(\d+)x(\d+)", size)
@@ -1206,19 +1341,36 @@ def _args_from_png(path: Path) -> dict:
     sampler = grab("Sampler")
     if sampler:
         args["sampler_name"] = sampler
-    clip = grab("Clip skip")
-    if clip and clip.isdigit():
-        args["clip_skip"] = int(clip)
+    sched = grab("Schedule type")
+    if sched:
+        args["scheduler"] = sched
+    clip = grab_num("Clip skip", int)
+    if clip:
+        args["clip_skip"] = clip
+    model = grab("Model")
+    if model:
+        args["model"] = model
+    vae = grab("VAE")
+    if vae and vae.lower() not in ("none", "automatic"):
+        args["sd_vae"] = vae
     return args
 
 
-def _clean_gen_args(args: dict) -> dict:
-    """Clamp the sheet's fields into sane SD ranges, dropping blanks."""
+def _clean_gen_args(args: dict, client=None, model: str = "") -> dict:
+    """Clamp the sheet's fields into sane SD ranges, dropping blanks.
+
+    The ranges that matter come from the checkpoint's architecture (a distilled
+    model gets 1-2 CFG and 4-15 steps whether or not the sheet's numbers say
+    so); everything else is just bounded to something the WebUI accepts.
+    """
     out: dict = {}
     p = str(args.get("prompt") or "").strip()
     if p:
         out["prompt"] = p[:4000]
     out["negative_prompt"] = str(args.get("negative_prompt") or "").strip()[:2000]
+
+    defaults = regen_defaults(client, model) if client is not None \
+        else dict(_REGEN_DEFAULTS)
 
     def num(key, lo, hi, default, cast=int):
         v = args.get(key)
@@ -1233,16 +1385,33 @@ def _clean_gen_args(args: dict) -> dict:
         """A1111 only takes multiples of 8 — snap to the nearest one."""
         return max(64, min(4096, (num(key, 64, 4096, default) + 4) // 8 * 8))
 
-    out["width"] = dim("width", _REGEN_DEFAULTS["width"])
-    out["height"] = dim("height", _REGEN_DEFAULTS["height"])
-    out["steps"] = num("steps", 1, 150, _REGEN_DEFAULTS["steps"])
-    out["cfg_scale"] = num("cfg_scale", 1.0, 30.0,
-                           _REGEN_DEFAULTS["cfg_scale"], float)
-    out["batch_size"] = num("batch_size", 1, 8, _REGEN_DEFAULTS["batch_size"])
-    out["clip_skip"] = num("clip_skip", 1, 4, _REGEN_DEFAULTS["clip_skip"])
+    out["width"] = dim("width", defaults["width"])
+    out["height"] = dim("height", defaults["height"])
+    out["steps"] = num("steps", 1, 150, defaults["steps"])
+    out["cfg_scale"] = num("cfg_scale", 1.0, 30.0, defaults["cfg_scale"],
+                           float)
+    out["batch_size"] = num("batch_size", 1, 8, defaults["batch_size"])
+    # Clip skip is only sent when the caller actually asked for it. A blank
+    # sheet field means "whatever the server is set to" — and since Neo turns
+    # clip skip into a real per-request override, a filler value here would
+    # silently override the server's setting (2 for most anime SDXL models)
+    # and degrade every regeneration. `defaults` carries the current value
+    # purely so the sheet can show it.
+    if args.get("clip_skip") not in (None, ""):
+        out["clip_skip"] = num("clip_skip", 1, 4,
+                               defaults.get("clip_skip", 1))
     s = str(args.get("sampler_name") or "").strip()
     if s:
         out["sampler_name"] = s[:80]
+    sched = str(args.get("scheduler") or "").strip()
+    if sched:
+        out["scheduler"] = sched[:40]
+    dcfg = args.get("distilled_cfg_scale")
+    if dcfg is not None and str(dcfg).strip() != "":
+        # 0 would switch the real guidance off entirely — treat it as unset
+        val = num("distilled_cfg_scale", 0.0, 30.0, 0.0, float)
+        if val > 0:
+            out["distilled_cfg_scale"] = val
     sd = args.get("seed")
     if sd is not None and str(sd).strip() not in ("", "-1"):
         out["seed"] = num("seed", 0, 2 ** 53 - 1, -1)
@@ -1279,6 +1448,8 @@ def run_regeneration(agent: Agent, rel: str, instruction: str, emit,
     base, origin = gen_args_for(agent, rel)
     model = base.get("model") or None
     args = {k: base[k] for k in _REGEN_KEYS if base.get(k) is not None}
+    components = {k: str((overrides or {}).get(k) or "").strip()
+                  for k in _COMPONENT_KEYS}
 
     mode = str((overrides or {}).get("mode") or "").strip().lower()
     if mode not in ("txt2img", "img2img"):
@@ -1300,22 +1471,39 @@ def run_regeneration(agent: Agent, rel: str, instruction: str, emit,
     if mode == "img2img":
         args.setdefault("denoising_strength", 0.65)
 
-    args = _clean_gen_args(args)
-    if not args.get("prompt"):
-        raise ValueError("no original prompt found for this image")
-
     ckpt = str((overrides or {}).get("model") or model or "").strip()
     if ckpt and ckpt != "(unknown)":
-        emit({"type": "status", "text": "loading checkpoint…"})
-        agent.client.set_model(ckpt)
+        arch = agent.client.arch_for(ckpt)
+        args = _clean_gen_args(args, agent.client, ckpt)
+        if not args.get("prompt"):
+            raise ValueError("no original prompt found for this image")
+        # one options write for checkpoint + companions: separate writes mean
+        # separate model reloads, and the second one can fail on a tight card
+        emit({"type": "status", "text": f"loading {arch} checkpoint…"})
+        agent.client.set_model(
+            ckpt, arch=arch,
+            **{k: v for k, v in components.items() if v})
         model = ckpt
+    else:
+        args = _clean_gen_args(args, agent.client, "")
+        if not args.get("prompt"):
+            raise ValueError("no original prompt found for this image")
+        if any(components.values()):
+            agent.client.configure(
+                **{k: v for k, v in components.items() if v})
 
     if mode == "img2img":
         emit({"type": "status", "text": "applying change…"})
-        result = agent.client.img2img(init_image_path=src, **args)
+        prepared = agent.client.prepare_args(args, model=ckpt or model,
+                                             kind="img2img")
+        prepared["payload"]["init_images"] = [
+            base64.b64encode(src.read_bytes()).decode()]
+        result = agent.client.submit(prepared["payload"], img2img=True)
     else:
         emit({"type": "status", "text": "generating…"})
-        result = agent.client.txt2img(**args)
+        prepared = agent.client.prepare_args(args, model=ckpt or model,
+                                             kind="txt2img")
+        result = agent.client.submit(prepared["payload"])
 
     saved = save_images(result, out_dir=src.parent, name_prefix="ai")
     if not saved:
@@ -1324,11 +1512,27 @@ def run_regeneration(agent: Agent, rel: str, instruction: str, emit,
         seed = json.loads(result.get("info", "{}")).get("seed")
     except json.JSONDecodeError:
         seed = None
+    # snapshot what was actually sent, not what the sheet asked for — the
+    # architecture fills in and clamps values, and the recipe must replay
     gen = {k: args.get(k) for k in
            ("prompt", "negative_prompt", "width", "height", "steps",
             "cfg_scale", "sampler_name", "clip_skip", "batch_size", "seed",
             "denoising_strength")}
-    gen["model"] = model or "(unknown)"
+    gen.update({
+        "model": model or "(unknown)",
+        "arch": prepared["arch"],
+        "distilled": prepared["distilled"],
+        "sampler_name": prepared["sampler"],
+        "scheduler": prepared["scheduler"] or "",
+        "steps": prepared["steps"],
+        "cfg_scale": prepared["cfg_scale"],
+        "clip_skip": prepared["clip_skip"],
+        "distilled_cfg_scale": prepared["distilled_cfg_scale"],
+    })
+    if prepared.get("notes"):
+        gen["notes"] = prepared["notes"]
+    if any(components.values()):
+        gen.update({k: v for k, v in components.items() if v})
     return {"type": "generation",
             "files": ["/outputs/" + rel_of(f) for f in saved],
             "count": len(saved),
@@ -1968,10 +2172,22 @@ class Handler(BaseHTTPRequestHandler):
             if not rel or not out_file(rel):
                 self._json({"error": "image not found"}, 404)
                 return
-            args, origin = gen_args_for(self.app.agent, rel)
+            agent = self.app.agent
+            args, origin = gen_args_for(agent, rel)
             args.setdefault("prompt", "")
+            # the sheet needs the architecture to pre-fill blank fields with
+            # that family's own defaults instead of SDXL's
+            model = str(args.get("model") or "")
+            arch = origin.get("arch") or agent.client.arch_for(model)
+            if not model:
+                arch = agent.client.current_arch()
+                model = agent.client.current_model()
             self._json({"gen": args, "origin": origin.get("source", "png"),
-                        "models": self.app.models_cache["models"]})
+                        "arch": arch, "model": model,
+                        "profile": _public_profile(agent.client, arch),
+                        "defaults": regen_defaults(agent.client, model),
+                        "models": self.app.models_cache["models"],
+                        "capabilities": _sd_capabilities(agent.client)})
         else:
             self.send_error(404)
 
@@ -2055,6 +2271,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/settings":
             self.api_settings()
         elif path == "/api/model":
+            self.api_model()
+        elif path == "/api/model/components":
+            self.api_model_components()
             self.api_model()
         elif path == "/api/delete":
             self.api_delete_images()
@@ -2360,13 +2579,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_status(self):
         agent = self.app.agent
-        sd_ok, cur = False, ""
+        client = agent.client
+        sd_ok, cur, arch = False, "", ""
         try:
-            r = requests.get(f"{agent.client.base_url}/sdapi/v1/options",
-                             timeout=4)
-            if r.status_code == 200:
+            opts = client.options()
+            if opts:
                 sd_ok = True
-                cur = r.json().get("sd_model_checkpoint", "")
+                cur = str(opts.get("sd_model_checkpoint") or "")
+                arch = client.current_arch()
         except Exception:
             pass
         now = time.time()
@@ -2374,26 +2594,45 @@ class Handler(BaseHTTPRequestHandler):
         if force or now - self.app.models_cache["ts"] > 300:
             if force:                                     # ask SD to rescan
                 try:
-                    requests.get(
-                        f"{agent.client.base_url}"
-                        f"/sdapi/v1/refresh-checkpoints", timeout=10)
+                    client.refresh_models()
                 except Exception:
                     pass
             try:
-                r = requests.get(
-                    f"{agent.client.base_url}/sdapi/v1/sd-models", timeout=6)
-                if r.status_code == 200:
-                    self.app.models_cache["models"] = [
-                        m.get("title", "") for m in r.json()]
-                    self.app.models_cache["ts"] = now
+                models = client.list_models()
+                self.app.models_cache["models"] = [m["title"] for m in models]
+                self.app.models_cache["detail"] = models
+                self.app.models_cache["ts"] = now
             except Exception:
                 pass
+        caps = {}
+        if sd_ok:
+            # what this Forge Neo build can actually do — the frontend builds
+            # its sampler/schedule/component pickers from this
+            try:
+                c = client.capabilities(force=force)
+                files = client.companion_files()
+                caps = {
+                    "arch": arch,
+                    "samplers": client.list_samplers(),
+                    "schedulers": client.list_schedulers(),
+                    "low_bits": client.list_low_bits(),
+                    "text_encoders": files["text_encoder"],
+                    "vaes": client.list_vaes(),
+                    "architectures": client.architecture_summary(),
+                    "video": client.video_supported(),
+                    "video_endpoint": client.video_endpoint() or "",
+                }
+            except Exception:
+                caps = {}
         char = agent.char
         self._json({
-            "sd_url": agent.client.base_url,
+            "sd_url": client.base_url,
             "sd_ok": sd_ok,
             "current_model": cur,
+            "current_arch": arch,
             "models": self.app.models_cache["models"],
+            "model_detail": self.app.models_cache.get("detail") or [],
+            "capabilities": caps,
             "llm": agent.llm_models,
             "has_key": agent.has_key(),
             "gallery_count": gallery_total(),
@@ -2910,7 +3149,10 @@ class Handler(BaseHTTPRequestHandler):
                         "key_masked": masked, "has_key": bool(key),
                         "system_prompt": override or DEFAULT_BASE_PROMPT,
                         "system_prompt_custom": bool(override),
-                        "username": cfg.get("username", "")})
+                        "username": cfg.get("username", ""),
+                        "sd_components": cfg.get("sd_components") or {},
+                        "current_arch": _safe_arch(agent),
+                        "capabilities": _sd_capabilities(agent.client)})
             return
         body = self._body()
         cfg = dict(agent.cfg)
@@ -2950,6 +3192,20 @@ class Handler(BaseHTTPRequestHandler):
             sys_touched = True
         if "username" in body:
             cfg["username"] = str(body["username"]).strip()[:60]
+        if "sd_components" in body:
+            comps = body["sd_components"]
+            if not isinstance(comps, dict):
+                self._json({"error": "sd_components must be an object"}, 400)
+                return
+            clean: dict = {}
+            for arch, vals in comps.items():
+                if not isinstance(vals, dict):
+                    continue
+                entry = {k: str(vals[k]).strip()[:120]
+                         for k in _COMPONENT_KEYS if vals.get(k)}
+                if entry:
+                    clean[str(arch).strip()[:16].lower()] = entry
+            cfg["sd_components"] = clean
         save_config(cfg)
         agent.apply_config(cfg)
         if sys_touched:
@@ -3211,6 +3467,10 @@ class Handler(BaseHTTPRequestHandler):
             cp = str(cp).strip() if cp else ""
             if cp:
                 args["model"] = cp
+                arch = agent.client.arch_for(cp)
+                args.update(agent.saved_components(arch))
+            else:
+                arch = agent.client.current_arch()
             try:
                 result = execute_tool(agent.client, "generate_image", args,
                                       OUT_DIR)
@@ -3218,6 +3478,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": scrub_paths(
                     f"{type(e).__name__}: {e}")}, 502)
                 return
+            if arch and result.get("gen"):
+                result["gen"]["arch"] = arch
             files = [rel_of(Path(f)) for f in result.get("saved_files", [])]
             if not files:
                 self._json({"error": "generation produced no image"}, 502)
@@ -3254,6 +3516,12 @@ class Handler(BaseHTTPRequestHandler):
             agent.lock.release()
 
     def api_model(self):
+        """Load a checkpoint, optionally with its companion components.
+
+        A modular DiT needs a text encoder and a VAE attached to the right
+        architecture slot, so those travel with the switch instead of being a
+        separate settings trip. Everything goes out as one options write.
+        """
         body = self._body()
         title = str(body.get("model", "")).strip()
         if not title:
@@ -3264,17 +3532,51 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
         try:
-            agent.client.set_model(title)
-            cur, t0 = "", time.time()
-            while time.time() - t0 < 90:              # load takes 10-30 s
-                try:
-                    cur = agent.client.current_model()
-                    if title in cur:
-                        break
-                except Exception:
-                    pass
-                time.sleep(2)
-            self._json({"ok": True, "current_model": cur or title})
+            arch = str(body.get("arch") or "").strip() \
+                or agent.client.arch_for(title)
+            components = {k: str(body.get(k) or "").strip()
+                          for k in _COMPONENT_KEYS}
+            info = agent.client.set_model(
+                title, arch=arch,
+                **{k: v for k, v in components.items() if v})
+            self._json({"ok": True,
+                        "current_model": info.get("model") or title,
+                        "arch": info.get("arch", arch),
+                        "modules": info.get("modules") or [],
+                        "low_bits": info.get("low_bits") or "",
+                        "profile": _public_profile(agent.client, arch)})
+        except SDWebUIError as e:
+            self._json({"error": str(e)}, 502)
+        except Exception as e:                        # noqa: BLE001
+            self._json({"error": f"{type(e).__name__}: {e}"}, 502)
+        finally:
+            agent.lock.release()
+
+    def api_model_components(self):
+        """Attach/clear the companion files and precision of one architecture.
+
+        This is the Settings > Image hook. It writes options rather than a
+        per-request override: on Neo an override reloads the model inside the
+        request, and a reload that does not fit reports "Failed to load model".
+        """
+        body = self._body()
+        agent = self.app.agent
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            arch = str(body.get("arch") or "").strip() \
+                or agent.client.current_arch()
+            # an empty value means "clear this slot" and is sent on purpose;
+            # a key the client left out is simply not passed
+            components = {k: str(body[k]).strip()
+                          for k in _COMPONENT_KEYS if k in body}
+            info = agent.client.configure(arch, **components)
+            self.app.models_cache["ts"] = 0.0
+            self._json({"ok": True, **info,
+                        "profile": _public_profile(agent.client, arch)})
+        except SDWebUIError as e:
+            self._json({"error": str(e)}, 400)
         except Exception as e:                        # noqa: BLE001
             self._json({"error": f"{type(e).__name__}: {e}"}, 502)
         finally:
@@ -3287,7 +3589,7 @@ class App:
     def __init__(self, password: str):
         self.password = password
         self.session_secret = load_session_secret()
-        self.models_cache = {"ts": 0.0, "models": []}
+        self.models_cache = {"ts": 0.0, "models": [], "detail": []}
         migrate_flat_chats()                 # Phase A → B chat layout
         self.agent = Agent(load_config())    # loads chat + character too
 

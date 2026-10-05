@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=43">
+<link rel="stylesheet" href="/static/style.css?v=44">
 </head>
 <body>
 
@@ -330,6 +330,17 @@
         <button id="sh-load">Load</button>
       </div>
       <div class="hint" id="sh-modelhint">Loading a checkpoint takes 10-30 s.</div>
+
+      <label>Model components <span class="dim" id="sh-arch"></span></label>
+      <div class="hint" id="sh-compintro">Newer models (Flux, Qwen, Anima, Krea, Wan, Z-Image) are not single files — the diffusion model needs a text encoder and often a VAE attached to its own slot. They are set here once and re-applied whenever you switch to that architecture.</div>
+      <div id="sh-comps" class="comp-list"></div>
+      <datalist id="dl-te"></datalist>
+      <datalist id="dl-vae"></datalist>
+      <datalist id="dl-lb"></datalist>
+      <div class="row" id="sh-comp-actions" hidden>
+        <button id="sh-comp-save">Save components</button>
+        <button id="sh-comp-apply" class="primary">Apply now</button>
+      </div>
     </section>
 
     <section class="sh-body" data-pane="visuals" hidden>
@@ -466,7 +477,8 @@
       <div>
         <label class="rg-label" for="regen-clip">Clip skip</label>
         <input id="regen-clip" type="number" min="1" max="4"
-               inputmode="numeric">
+               inputmode="numeric" placeholder="server's"
+               title="Leave blank to keep the server's current value">
       </div>
       <div>
         <label class="rg-label" for="regen-seed">Seed</label>
@@ -475,15 +487,33 @@
       </div>
       <div>
         <label class="rg-label" for="regen-sampler">Sampler</label>
-        <input id="regen-sampler" type="text" placeholder="DPM++ 2M Karras"
+        <input id="regen-sampler" type="text" placeholder="Euler a"
                list="rg-samplers" autocomplete="off" spellcheck="false">
         <datalist id="rg-samplers">
-          <option value="DPM++ 2M Karras"></option>
-          <option value="DPM++ SDE Karras"></option>
           <option value="Euler a"></option>
           <option value="Euler"></option>
-          <option value="DDIM"></option>
+          <option value="DPM++ 2M"></option>
+          <option value="ER SDE"></option>
+          <option value="LCM"></option>
         </datalist>
+      </div>
+      <div>
+        <label class="rg-label" for="regen-sched">Schedule type</label>
+        <input id="regen-sched" type="text" placeholder="Automatic"
+               list="rg-scheds" autocomplete="off" spellcheck="false">
+        <datalist id="rg-scheds">
+          <option value="Automatic"></option>
+          <option value="Karras"></option>
+          <option value="Beta"></option>
+          <option value="Simple"></option>
+          <option value="Normal"></option>
+        </datalist>
+      </div>
+      <div id="regen-dcfg-wrap" hidden>
+        <label class="rg-label" for="regen-dcfg">Distilled CFG</label>
+        <input id="regen-dcfg" type="number" min="0" max="30" step="0.05"
+               inputmode="decimal">
+        <div class="rg-note">Real guidance of a distilled model.</div>
       </div>
       <div class="rg-span">
         <label class="rg-label" for="regen-model">Checkpoint</label>
@@ -491,8 +521,34 @@
                placeholder="current checkpoint" autocomplete="off"
                spellcheck="false">
         <datalist id="rg-models"></datalist>
+        <div class="rg-note" id="regen-arch" hidden></div>
       </div>
     </div>
+
+    <details id="regen-comp" hidden>
+      <summary>Model components <span class="dim">— text encoder, VAE, precision</span></summary>
+      <div class="rg-grid rg-comp">
+        <div>
+          <label class="rg-label" for="regen-te">Text encoder</label>
+          <input id="regen-te" type="text" list="rg-tes"
+                 placeholder="server default" autocomplete="off" spellcheck="false">
+          <datalist id="rg-tes"></datalist>
+        </div>
+        <div>
+          <label class="rg-label" for="regen-vae">VAE</label>
+          <input id="regen-vae" type="text" list="rg-vaes"
+                 placeholder="Automatic" autocomplete="off" spellcheck="false">
+          <datalist id="rg-vaes"></datalist>
+        </div>
+        <div>
+          <label class="rg-label" for="regen-lb">Precision</label>
+          <input id="regen-lb" type="text" list="rg-lbs"
+                 placeholder="Automatic" autocomplete="off" spellcheck="false">
+          <datalist id="rg-lbs"></datalist>
+          <div class="rg-note">float8 halves VRAM. Changing any of these reloads the model.</div>
+        </div>
+      </div>
+    </details>
 
     <div class="regen-actions">
       <button id="regen-cancel">Cancel</button>
@@ -540,6 +596,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=43"></script>
+<script src="/static/app.js?v=44"></script>
 </body>
 </html>
