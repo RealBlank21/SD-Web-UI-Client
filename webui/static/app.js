@@ -3695,6 +3695,83 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+/* ------------------------------------------------ Android back button ---
+ *
+ * In standalone PWA mode the hardware back button used to close the whole
+ * app: the page never pushes history entries, so there was nothing to pop.
+ * We park one guard entry on the history stack and spend each back press on
+ * the topmost overlay — the same chain the in-app back arrows use. On the
+ * home screen nothing is left to close, so the press arms an exit
+ * confirmation; the guard is then NOT re-pushed, so the next press really
+ * exits. Tapping anywhere (or letting the toast lapse) re-parks the guard.
+ */
+
+const BACK_GUARD = { sdBack: 1 };
+
+function backCloseOverlay() {          // true = a UI layer consumed the press
+  if (!ctxEl.hidden) { closeCtx(); return true; }
+  if (!els.lb.hidden) {
+    if (els.lbSheet.classList.contains("open")) toggleLbInfo(false);
+    else closeLightbox();
+    return true;
+  }
+  if (!regenEl.hidden) { regenEl.hidden = true; return true; }
+  if (!els.aiSheet.hidden) { els.aiSheet.hidden = true; return true; }
+  if (!els.foldSheet.hidden) { els.foldSheet.hidden = true; return true; }
+  if (!els.foldPick.hidden) { els.foldPick.hidden = true; return true; }
+  if (!els.pageSettings.hidden) { els.pageSettings.hidden = true; return true; }
+  if (!els.pagePersona.hidden) { els.pagePersona.hidden = true; return true; }
+  if (!els.pageScenario.hidden) { els.pageScenario.hidden = true; return true; }
+  if (!els.pageChform.hidden) { els.pageChform.hidden = true; return true; }
+  if (!els.pageHist.hidden) {
+    if (hsSelecting) setHsSelect(false);
+    else els.pageHist.hidden = true;
+    return true;
+  }
+  if (!els.pageGallery.hidden) { galleryBack(); return true; }
+  return false;
+}
+
+let backExitArmed = false;
+let backExitTimer = 0;
+
+function backRearm() {
+  // park a fresh guard entry so the next press pops instead of exiting
+  history.pushState(BACK_GUARD, "");
+}
+
+function backDisarm() {
+  backExitArmed = false;
+  clearTimeout(backExitTimer);
+  backRearm();
+}
+
+window.addEventListener("popstate", () => {
+  if (backExitArmed) {                 // confirmed exit — only reachable when
+    history.back();                    // deeper history exists (rare); the
+    return;                            // usual path exits at browser level
+  }
+  clearTimeout(backExitTimer);
+  if (backCloseOverlay()) { backRearm(); return; }
+  if (!els.viewChat.hidden) {          // back out of a chat to the list
+    switchView("chars");
+    backRearm();
+    return;
+  }
+  // home screen: ask before leaving — do not re-arm, so the next press exits
+  backExitArmed = true;
+  toast("Click back again to exit the app");
+  backExitTimer = setTimeout(backDisarm, 2600);   // matches the toast
+});
+
+// any tap while the exit confirmation shows cancels it (and re-parks the
+// guard, so a later back press asks again instead of exiting silently)
+document.addEventListener("pointerdown", () => {
+  if (backExitArmed) backDisarm();
+}, { capture: true });
+
+if (!history.state || !history.state.sdBack) backRearm();
+
 /* ------------------------------------------------------------------ init */
 
 let inited = false;
