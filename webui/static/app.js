@@ -56,16 +56,20 @@ const els = {
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
   chName: $("ch-name"),
   chAvatarImg: $("ch-avatar-img"), chAvatarBtn: $("ch-avatar-btn"),
-  chAvatarFile: $("ch-avatar-file"), chAvatarAi: $("ch-avatar-ai"),
+  chAvatarFile: $("ch-avatar-file"),
   chAvatarClear: $("ch-avatar-clear"),
   chCoverImg: $("ch-cover-img"), chCoverBtn: $("ch-cover-btn"),
-  chCoverFile: $("ch-cover-file"), chCoverAi: $("ch-cover-ai"),
+  chCoverFile: $("ch-cover-file"),
   chCoverClear: $("ch-cover-clear"), chAiFab: $("ch-aifab"),
   aiSheet: $("aisheet"), aiTitle: $("ai-title"), aiHint: $("ai-hint"),
   aiText: $("ai-text"), aiGo: $("ai-go"), aiCancel: $("ai-cancel"),
   scsCoverImg: $("scs-cover-img"), scsCoverBtn: $("scs-cover-btn"),
-  scsCoverFile: $("scs-cover-file"), scsCoverAi: $("scs-cover-ai"),
+  scsCoverFile: $("scs-cover-file"),
   scsCoverClear: $("scs-cover-clear"),
+  pageGalpick: $("page-galpick"), gpBack: $("gp-back"), gpTitle: $("gp-title"),
+  gpUpload: $("gp-upload"), gpCrumbs: $("gp-crumbs"),
+  gpFolders: $("gp-folders"), gpGrid: $("gp-grid"),
+  gpEmpty: $("gp-empty"), gpEmptyText: $("gp-empty-text"),
   chAppearance: $("ch-appearance"), chPersona: $("ch-persona"),
   chGreeting: $("ch-greeting"), chModel: $("ch-model"), chSize: $("ch-size"),
   chTemp: $("ch-temp"), chMaxtok: $("ch-maxtok"),
@@ -1976,25 +1980,28 @@ async function deleteCharById(id, name) {
 function pickAvatar(file) {
   if (!file || !file.type.startsWith("image/")) return;
   const reader = new FileReader();
-  reader.onload = () => {
-    const img = new Image();
-    img.onload = () => {
-      const S = 256;
-      const canvas = document.createElement("canvas");
-      canvas.width = canvas.height = S;
-      const ctx = canvas.getContext("2d");
-      const side = Math.min(img.width, img.height);
-      ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2,
-        side, side, 0, 0, S, S);
-      pendingAvatar = canvas.toDataURL("image/jpeg", 0.85);
-      clearAvatar = false;
-      els.chAvatarImg.src = pendingAvatar;
-      els.chAvatarImg.hidden = false;
-      els.chAvatarClear.hidden = false;
-    };
-    img.src = reader.result;
-  };
+  reader.onload = () => avatarFromDataUrl(reader.result);
   reader.readAsDataURL(file);
+}
+
+/* center-crop to a square 256 — same path for uploads and gallery picks */
+function avatarFromDataUrl(dataUrl) {
+  const img = new Image();
+  img.onload = () => {
+    const S = 256;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = S;
+    const ctx = canvas.getContext("2d");
+    const side = Math.min(img.width, img.height);
+    ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2,
+      side, side, 0, 0, S, S);
+    pendingAvatar = canvas.toDataURL("image/jpeg", 0.85);
+    clearAvatar = false;
+    els.chAvatarImg.src = pendingAvatar;
+    els.chAvatarImg.hidden = false;
+    els.chAvatarClear.hidden = false;
+  };
+  img.src = dataUrl;
 }
 
 /* cover (first image) picker — keep native resolution when it fits, else
@@ -2002,36 +2009,147 @@ function pickAvatar(file) {
 function pickCover(file, which) {
   if (!file || !file.type.startsWith("image/")) return;
   const reader = new FileReader();
-  reader.onload = () => {
-    const apply = (dataUrl) => {
-      if (which === "sc") {
-        pendingScCover = dataUrl; clearScCover = false;
-        setPreview(els.scsCoverImg, els.scsCoverClear, pendingScCover);
-      } else {
-        pendingCover = dataUrl; clearCover = false;
-        setPreview(els.chCoverImg, els.chCoverClear, pendingCover);
-      }
-    };
-    const img = new Image();
-    img.onload = () => {
-      const long = Math.max(img.width, img.height);
-      if (long <= 1216) { apply(reader.result); return; }
-      const k = 1216 / long;
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.width * k);
-      canvas.height = Math.round(img.height * k);
-      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      apply(canvas.toDataURL("image/jpeg", 0.9));
-    };
-    img.onerror = () => apply(reader.result);
-    img.src = reader.result;
-  };
+  reader.onload = () => coverFromDataUrl(reader.result, which);
   reader.readAsDataURL(file);
 }
 
-/* ------------------------------- AI generate sheet (character form) ----- */
+function coverFromDataUrl(dataUrl, which) {
+  const apply = (url) => {
+    if (which === "sc") {
+      pendingScCover = url; clearScCover = false;
+      setPreview(els.scsCoverImg, els.scsCoverClear, pendingScCover);
+    } else {
+      pendingCover = url; clearCover = false;
+      setPreview(els.chCoverImg, els.chCoverClear, pendingCover);
+    }
+  };
+  const img = new Image();
+  img.onload = () => {
+    const long = Math.max(img.width, img.height);
+    if (long <= 1216) { apply(dataUrl); return; }
+    const k = 1216 / long;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(img.width * k);
+    canvas.height = Math.round(img.height * k);
+    canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+    apply(canvas.toDataURL("image/jpeg", 0.9));
+  };
+  img.onerror = () => apply(dataUrl);
+  img.src = dataUrl;
+}
 
-let aiMode = null;
+/* ---------------- gallery picker (character form "Choose image…") ------- */
+
+let gpTarget = null;            // "avatar" | "cover" | "sccover"
+let gpFolder = "";
+let gpImages = [], gpFolderList = [];
+let gpSeq = 0;
+
+function openGalPick(target) {
+  gpTarget = target;
+  els.gpTitle.textContent =
+    target === "avatar" ? "Choose avatar" : "Choose first image";
+  els.pageGalpick.hidden = false;
+  gpNavigate("");
+}
+
+async function gpNavigate(folder) {
+  const seq = ++gpSeq;
+  gpFolder = folder;
+  els.gpCrumbs.textContent = "";
+  els.gpFolders.textContent = "";
+  els.gpGrid.textContent = "";
+  els.gpEmpty.hidden = true;
+  try {
+    const d = await api("/api/gallery?tree=1&folder=" + encodeURIComponent(folder));
+    if (seq !== gpSeq || els.pageGalpick.hidden) return;
+    gpImages = d.images || [];
+    gpFolderList = d.folders || [];
+    gpRender();
+  } catch (e) {
+    if (seq !== gpSeq) return;
+    if (e.message !== "locked") toast("Gallery failed: " + e.message, true);
+  }
+}
+
+function gpRender() {
+  const bar = els.gpCrumbs;
+  bar.textContent = "";
+  const segs = gpFolder ? gpFolder.split("/") : [];
+  const root = el("button", null, "Gallery");
+  root.classList.toggle("here", !segs.length);
+  root.addEventListener("click", () => gpNavigate(""));
+  bar.appendChild(root);
+  let acc = "";
+  segs.forEach((s) => {
+    acc = joinFolder(acc, s);
+    const b = el("button", null, s);
+    const to = acc;
+    b.addEventListener("click", () => gpNavigate(to));
+    bar.appendChild(el("span", "sep", "/"));
+    bar.appendChild(b);
+  });
+  els.gpFolders.textContent = "";
+  for (const f of gpFolderList) {
+    const rel = joinFolder(gpFolder, f.name);
+    const t = el("button", "gtile");
+    t.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+    const txt = el("div", "gt-text");
+    txt.appendChild(el("b", null, f.name));
+    txt.appendChild(el("span", null, f.count === 1 ? "1 image" : f.count + " images"));
+    t.appendChild(txt);
+    t.addEventListener("click", () => gpNavigate(rel));
+    els.gpFolders.appendChild(t);
+  }
+  els.gpGrid.textContent = "";
+  gpImages.forEach((im, i) => {
+    const cell = el("div", "gcell");
+    const img = document.createElement("img");
+    img.src = "/thumb/" + im.rel;
+    if (i >= 24) img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = im.name;
+    img.title = im.name;
+    cell.addEventListener("click", () => usePickedImage(im.rel));
+    cell.appendChild(img);
+    els.gpGrid.appendChild(cell);
+  });
+  const bare = !gpImages.length && !gpFolderList.length;
+  els.gpEmpty.hidden = !bare;
+  els.gpEmptyText.textContent = gpFolder
+    ? "This folder is empty."
+    : "No images yet — ask the agent to draw something, or tap ⤒ to upload.";
+}
+
+async function galleryImageDataUrl(rel) {
+  const r = await fetch("/outputs/" + rel);
+  if (!r.ok) throw new Error("image load failed");
+  const blob = await r.blob();
+  return await new Promise((ok, fail) => {
+    const fr = new FileReader();
+    fr.onload = () => ok(fr.result);
+    fr.onerror = () => fail(new Error("read failed"));
+    fr.readAsDataURL(blob);
+  });
+}
+
+async function usePickedImage(rel) {
+  try {
+    const dataUrl = await galleryImageDataUrl(rel);
+    if (els.pageGalpick.hidden) return;
+    if (gpTarget === "avatar") avatarFromDataUrl(dataUrl);
+    else coverFromDataUrl(dataUrl, gpTarget === "sccover" ? "sc" : "ch");
+    els.pageGalpick.hidden = true;
+    toast("Image set — save to keep it");
+  } catch (e) {
+    if (e.message !== "locked") toast("Failed to load image: " + e.message, true);
+  }
+}
+
+/* ------------------------------- AI generate sheet (character form) ----- */
 
 const AI_MODES = {
   character: {
@@ -2041,33 +2159,11 @@ const AI_MODES = {
     placeholder: "e.g. a dry-humored knight who secretly paints flowers",
     prefill: () => "",
   },
-  avatar: {
-    title: "Generate avatar",
-    hint: "Describe the portrait — the character's look tags are added "
-          + "automatically. The result is square.",
-    placeholder: "e.g. portrait, soft candlelight, slight smile",
-    prefill: () => els.chAppearance.value.trim(),
-  },
-  "char-cover": {
-    title: "Generate first image",
-    hint: "Describe the opening scene — this image opens every new chat "
-          + "with this character.",
-    placeholder: "e.g. leaning on a rainy window at night, glancing back",
-    prefill: () => els.chAppearance.value.trim(),
-  },
-  "scenario-cover": {
-    title: "Generate first image",
-    hint: "Describe the scene — this image shows when a chat with this "
-          + "scenario starts.",
-    placeholder: "e.g. a rooftop in heavy rain, city lights below",
-    prefill: () => els.scsDesc.value.trim().slice(0, 600),
-  },
 };
 
 function openAiSheet(mode) {
   const m = AI_MODES[mode];
   if (!m) return;
-  aiMode = mode;
   els.aiTitle.textContent = m.title;
   els.aiHint.textContent = m.hint;
   els.aiText.value = m.prefill();
@@ -2079,55 +2175,23 @@ function openAiSheet(mode) {
 }
 
 async function runAiGenerate() {
-  const mode = aiMode;
-  if (!mode) return;
   const text = els.aiText.value.trim();
   if (!text) { toast("Describe it first", true); return; }
   const btn = els.aiGo;
   btn.disabled = true;
   btn.textContent = "Generating…";
   try {
-    if (mode === "character") {
-      const d = await api("/api/char/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: text }),
-      });
-      els.chName.value = d.name || els.chName.value;
-      els.chAppearance.value = d.appearance || "";
-      els.chPersona.value = d.persona || "";
-      els.chGreeting.value = d.greeting || "";
-      els.aiSheet.hidden = true;
-      toast("Character drafted — review and save");
-      return;
-    }
-    const payload = {
-      purpose: mode === "avatar" ? "avatar"
-        : mode === "char-cover" ? "char_cover" : "scenario_cover",
-      prompt: text,
-      char_id: editCharId || "",
-      appearance: els.chAppearance.value.trim(),
-      size: els.chSize.value,
-    };
-    if (mode === "scenario-cover") payload.scenario_id = editScenarioId || "";
-    const d = await api("/api/image/generate", {
+    const d = await api("/api/char/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ prompt: text }),
     });
-    if (mode === "avatar") {
-      pendingAvatar = d.avatar || "";
-      setPreview(els.chAvatarImg, els.chAvatarClear, pendingAvatar);
-    } else if (mode === "char-cover") {
-      pendingCover = d.cover || "";
-      setPreview(els.chCoverImg, els.chCoverClear, pendingCover);
-    } else {
-      pendingScCover = d.cover || "";
-      setPreview(els.scsCoverImg, els.scsCoverClear, pendingScCover);
-    }
+    els.chName.value = d.name || els.chName.value;
+    els.chAppearance.value = d.appearance || "";
+    els.chPersona.value = d.persona || "";
+    els.chGreeting.value = d.greeting || "";
     els.aiSheet.hidden = true;
-    toast((pendingAvatar || pendingCover || pendingScCover)
-      ? "Generated — save to keep it" : "Image is in the gallery");
+    toast("Character drafted — review and save");
   } catch (e) {
     if (e.message !== "locked") toast("Generate failed: " + e.message, true);
   } finally {
@@ -2314,23 +2378,21 @@ async function toggleAutoImages() {
 els.cfSave.addEventListener("click", saveCharForm);
 els.chDelete.addEventListener("click", () =>
   deleteCharById(editCharId, els.chName.value.trim()));
-els.chAvatarBtn.addEventListener("click", () => els.chAvatarFile.click());
+els.chAvatarBtn.addEventListener("click", () => openGalPick("avatar"));
 els.chAvatarFile.addEventListener("change", () => {
   if (els.chAvatarFile.files[0]) pickAvatar(els.chAvatarFile.files[0]);
   els.chAvatarFile.value = "";
 });
-els.chAvatarAi.addEventListener("click", () => openAiSheet("avatar"));
 els.chAvatarClear.addEventListener("click", () => {
   pendingAvatar = "";
   clearAvatar = true;
   setPreview(els.chAvatarImg, els.chAvatarClear, "");
 });
-els.chCoverBtn.addEventListener("click", () => els.chCoverFile.click());
+els.chCoverBtn.addEventListener("click", () => openGalPick("cover"));
 els.chCoverFile.addEventListener("change", () => {
   if (els.chCoverFile.files[0]) pickCover(els.chCoverFile.files[0], "ch");
   els.chCoverFile.value = "";
 });
-els.chCoverAi.addEventListener("click", () => openAiSheet("char-cover"));
 els.chCoverClear.addEventListener("click", () => {
   pendingCover = "";
   clearCover = true;
@@ -3688,16 +3750,27 @@ $("scs-back").addEventListener("click", () => {
 $("scs-save").addEventListener("click", saveScenarioForm);
 $("scs-delete").addEventListener("click", () =>
   deleteScenarioById(editScenarioId));
-els.scsCoverBtn.addEventListener("click", () => els.scsCoverFile.click());
+els.scsCoverBtn.addEventListener("click", () => openGalPick("sccover"));
 els.scsCoverFile.addEventListener("change", () => {
   if (els.scsCoverFile.files[0]) pickCover(els.scsCoverFile.files[0], "sc");
   els.scsCoverFile.value = "";
 });
-els.scsCoverAi.addEventListener("click", () => openAiSheet("scenario-cover"));
 els.scsCoverClear.addEventListener("click", () => {
   pendingScCover = "";
   clearScCover = true;
   setPreview(els.scsCoverImg, els.scsCoverClear, "");
+});
+
+/* gallery picker page controls */
+els.gpBack.addEventListener("click", () => { els.pageGalpick.hidden = true; });
+els.gpUpload.addEventListener("click", () => {
+  // close the picker first so the form (and its new preview) is visible
+  // when the file dialog returns; the click stays inside this user gesture
+  const target = gpTarget;
+  els.pageGalpick.hidden = true;
+  if (target === "avatar") els.chAvatarFile.click();
+  else if (target === "sccover") els.scsCoverFile.click();
+  else els.chCoverFile.click();
 });
 els.scList.addEventListener("contextmenu", (e) => {
   const target = e.target.closest(".sc-row");
@@ -3769,6 +3842,8 @@ document.addEventListener("keydown", (e) => {
     els.pagePersona.hidden = true;
   } else if (e.key === "Escape" && !els.pageScenario.hidden) {
     els.pageScenario.hidden = true;
+  } else if (e.key === "Escape" && !els.pageGalpick.hidden) {
+    els.pageGalpick.hidden = true;
   } else if (e.key === "Escape" && !els.pageChform.hidden) {
     els.pageChform.hidden = true;
   } else if (e.key === "Escape" && !els.pageHist.hidden) {
@@ -3815,6 +3890,7 @@ function backCloseOverlay() {          // true = a UI layer consumed the press
   if (!els.pageSettings.hidden) { els.pageSettings.hidden = true; return true; }
   if (!els.pagePersona.hidden) { els.pagePersona.hidden = true; return true; }
   if (!els.pageScenario.hidden) { els.pageScenario.hidden = true; return true; }
+  if (!els.pageGalpick.hidden) { els.pageGalpick.hidden = true; return true; }
   if (!els.pageChform.hidden) { els.pageChform.hidden = true; return true; }
   if (!els.pageHist.hidden) {
     if (hsSelecting) setHsSelect(false);
