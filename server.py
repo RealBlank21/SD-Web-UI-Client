@@ -320,6 +320,7 @@ class Agent:
         self.char = None                 # active character card or None
         self.chat_id = ""                # active chat id (bound chats)
         self.scenario_id = ""            # scenario bound to the active chat
+        self.auto_images = True          # per-chat: may the model use image tools?
         self._title = ""                 # active chat's title
         self._home = DEFAULT_CHAT_FILE   # where the active chat persists
         self.messages = [self._sys_msg()]
@@ -371,10 +372,30 @@ class Agent:
             base += ("\n\nScenario Context:\nScenario: "
                      + (sc.get("name") or "").strip()[:80]
                      + "\n" + (sc.get("description") or "").strip()[:4000])
+        if not self.auto_images:
+            # the image tools are withheld for this chat, so say so up front —
+            # otherwise the model apologises for "having no tools" every turn
+            base += ("\n\nImage generation is currently OFF in this chat: you "
+                     "have no image tools. Never claim to have drawn, generated "
+                     "or attached anything, and never promise an image later — "
+                     "just roleplay in text.")
         return {"role": "system", "content": base}
 
     def char_tags(self) -> str:
         return (self.char or {}).get("appearance", "") or ""
+
+    def set_auto_images(self, on: bool) -> bool:
+        """Turn the model's image tools on/off for the active chat.
+
+        Per chat, so each archived chat remembers its own setting. Takes
+        effect on the next turn; the system message is rebuilt so the model
+        knows the tools are gone.
+        """
+        self.auto_images = bool(on)
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0] = self._sys_msg()
+        self._save_state()
+        return self.auto_images
 
     def apply_config(self, cfg: dict):
         """Hot-apply new settings (LLM chain / key / SD URL / system msg)."""
@@ -435,9 +456,14 @@ class Agent:
     def llm_complete(self, messages: list, temperature: float | None = None,
                      max_tokens: int | None = None) -> dict:
         """LLMRouter logic inline: try models in order, retry rate limits,
-        stick with whichever model last worked."""
+        stick with whichever model last worked.
+
+        When the chat's auto-images toggle is off the image tools are withheld
+        from the request, so the turn is plain text — the model has no way to
+        generate even if it decides to."""
         models = self.llm_models
         order = models + models[:1] * 0            # copy
+        tools: list = [] if not self.auto_images else None
         last_err: LLMError | None = None
         for model in order:
             for attempt in range(2):               # one retry per model
@@ -446,7 +472,8 @@ class Agent:
                     return chat_completion(self.cfg["openrouter_key"],
                                            model, messages,
                                            temperature=temperature,
-                                           max_tokens=max_tokens)
+                                           max_tokens=max_tokens,
+                                           tools=tools)
                 except LLMError as e:
                     last_err = e
                     if _is_auth_error(e):          # bad key: don't retry
@@ -500,6 +527,8 @@ class Agent:
     def _apply_chat_payload(self, d: dict):
         self._title = str(d.get("title", ""))
         self.scenario_id = str(d.get("scenario_id") or "")
+        # absent = written before the toggle existed -> default to on
+        self.auto_images = d.get("auto_images", True) is not False
         msgs = d.get("messages")
         self.messages = [self._sys_msg()] + \
             (msgs if isinstance(msgs, list) else [])
@@ -507,6 +536,7 @@ class Agent:
 
     def _fresh_chat(self, scenario_id: str = ""):
         self.scenario_id = scenario_id
+        self.auto_images = True          # a fresh chat starts with images on
         self.messages = [self._sys_msg()]
         self.timeline = []
         self._title = ""
@@ -581,6 +611,7 @@ class Agent:
         archived. The unbound free chat simply resets in place."""
         if not self.char:
             self.scenario_id = ""
+            self.auto_images = True
             self.messages = [self._sys_msg()]
             self.timeline = []
             self._title = ""
@@ -665,6 +696,7 @@ class Agent:
                 "character_id": self.char["id"] if self.char else "",
                 "chat_id": self.chat_id if self.char else "",
                 "scenario_id": self.scenario_id,
+                "auto_images": self.auto_images,
                 "messages": self.messages[1:],
                 "timeline": self.timeline,
             }
@@ -682,6 +714,7 @@ class Agent:
                         "title": self._title,
                         "updated": now,
                         "scenario_id": self.scenario_id,
+                        "auto_images": self.auto_images,
                         "messages": mirror["messages"],
                         "timeline": self.timeline,
                     }
@@ -690,6 +723,7 @@ class Agent:
                         encoding="utf-8")
             else:
                 payload = {"messages": mirror["messages"],
+                           "auto_images": self.auto_images,
                            "timeline": self.timeline}
                 CHATS_DIR.mkdir(parents=True, exist_ok=True)
                 DEFAULT_CHAT_FILE.write_text(
@@ -704,6 +738,7 @@ class Agent:
         """Startup: restore the active chat from the restart mirror."""
         self.chat_id = ""
         self._title = ""
+        self.auto_images = True
         if not STATE_FILE.exists():
             self._home = DEFAULT_CHAT_FILE
             return
@@ -713,6 +748,7 @@ class Agent:
             self.chat_id = d.get("chat_id", "")
             self._title = d.get("title", "")
             self.scenario_id = str(d.get("scenario_id") or "")
+            self.auto_images = d.get("auto_images", True) is not False
             if isinstance(d.get("messages"), list):
                 self.messages = [self._sys_msg()] + d["messages"]
             self.timeline = d.get("timeline") or []
@@ -894,6 +930,14 @@ class Agent:
     def _run_tool(self, name: str, args: dict, emit) -> dict:
         """Run one tool call in a worker thread; stream SD progress while
         generation tools run."""
+        if name in GEN_TOOLS and not self.auto_images:
+            # fail closed: the tools are withheld from the request when the
+            # chat's auto-images toggle is off, so this only trips if a model
+            # hallucinates a tool call anyway
+            result = {"error": "image generation is off for this chat"}
+            self.push({"type": "tool_error", "name": name,
+                       "error": result["error"]}, emit)
+            return result
         is_gen = name in GEN_TOOLS
         if is_gen and self.char:
             # identity tags are authoritative — add them if the model forgot
@@ -960,17 +1004,28 @@ class Agent:
 
 def chat_completion(api_key: str, llm: str, messages: list,
                     temperature: float | None = None,
-                    max_tokens: int | None = None) -> dict:
-    """One OpenRouter chat completion with tool definitions."""
+                    max_tokens: int | None = None,
+                    tools: list | None = None) -> dict:
+    """One OpenRouter chat completion with tool definitions.
+
+    `tools` defaults to the full tool set; pass an empty list to withhold the
+    image tools (the chat's auto-images toggle is off).
+    """
     from agent_core import TOOLS
+    if tools is None:
+        tools = TOOLS
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "X-Title": "SD Agent Web",
     }
-    body: dict = {"model": llm, "messages": messages, "tools": TOOLS,
+    body: dict = {"model": llm, "messages": messages,
                   "temperature": temperature if temperature is not None
                   else 0.7}
+    if tools:
+        # omitted entirely when empty — an empty array is rejected by some
+        # providers and tells the model nothing a missing key wouldn't
+        body["tools"] = tools
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
     try:
@@ -1967,11 +2022,14 @@ class Handler(BaseHTTPRequestHandler):
                 agent.new_chat()
             finally:
                 agent.lock.release()
-            self._json({"ok": True, "timeline": agent.timeline})
+            self._json({"ok": True, "timeline": agent.timeline,
+                        "auto_images": agent.auto_images})
         elif path == "/api/chat/select":
             self.api_chat_select()
         elif path == "/api/chat/delete":
             self.api_chat_delete()
+        elif path == "/api/chat/auto_images":
+            self.api_chat_auto_images()
         elif path == "/api/characters":
             self.api_characters_save()
         elif path == "/api/character/select":
@@ -2254,7 +2312,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             agent.select_chat(cid, chat_id)
-            self._json({"ok": True, "timeline": agent.timeline})
+            self._json({"ok": True, "timeline": agent.timeline,
+                        "auto_images": agent.auto_images})
         except ValueError as e:
             self._json({"error": str(e)}, 400)
         except Exception as e:                      # noqa: BLE001
@@ -2272,7 +2331,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             agent.delete_chat(cid, chat_id)
-            self._json({"ok": True, "timeline": agent.timeline})
+            self._json({"ok": True, "timeline": agent.timeline,
+                        "auto_images": agent.auto_images})
+        finally:
+            agent.lock.release()
+
+    def api_chat_auto_images(self):
+        """Chat top-bar toggle: may the model generate images on its own?
+
+        Stored per chat, so it survives restarts and each archived chat keeps
+        its own setting. Off means the image tools are withheld from the LLM
+        request entirely — regenerating from the UI still works.
+        """
+        body = self._body()
+        on = body.get("on")
+        if not isinstance(on, bool):
+            self._json({"error": "on must be true or false"}, 400)
+            return
+        agent = self.app.agent
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            agent.set_auto_images(on)
+            self._json({"ok": True, "auto_images": agent.auto_images})
         finally:
             agent.lock.release()
 
@@ -2316,6 +2398,7 @@ class Handler(BaseHTTPRequestHandler):
             "has_key": agent.has_key(),
             "gallery_count": gallery_total(),
             "busy": agent.lock.locked(),
+            "auto_images": agent.auto_images,
             "character": ({"id": char["id"],
                            "name": char.get("name", "")}
                           if char else None),
@@ -2493,7 +2576,8 @@ class Handler(BaseHTTPRequestHandler):
                 agent.set_character(card)
             else:
                 agent.set_character(None)
-            self._json({"ok": True, "timeline": agent.timeline})
+            self._json({"ok": True, "timeline": agent.timeline,
+                        "auto_images": agent.auto_images})
         finally:
             agent.lock.release()
 

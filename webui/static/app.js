@@ -12,6 +12,7 @@ const els = {
   charempty: $("charempty"),
   chatScroll: $("chat-scroll"), chatCharname: $("chat-charname"),
   btnHistory: $("btn-history"), pageHist: $("page-hist"),
+  btnAutoimg: $("btn-autoimg"),
   pageChform: $("page-chform"), chTitle: $("ch-title"),
   cfBack: $("cf-back"), cfSave: $("cf-save"),
   hsBack: $("hs-back"), hsNew: $("hs-new"), hsList: $("hs-list"),
@@ -1402,6 +1403,7 @@ function selectChar(id) {
     activeCharId = id;
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
+    applyAutoFlag(d);
     switchView("chat");
     refreshStatus();
   }).catch((e) => {
@@ -1826,6 +1828,47 @@ $("btn-gridtoggle").addEventListener("click", () => {
 updateGridBtn();
 $("btn-back").addEventListener("click", () => switchView("chars"));
 $("btn-newchat").addEventListener("click", newChat);
+els.btnAutoimg.addEventListener("click", toggleAutoImages);
+
+/* --------------------------------------------------- auto image toggle
+ *
+ * Per chat, persisted server-side. Off means the image tools are withheld
+ * from the model entirely, so the chat is plain text — regenerating an
+ * existing image from the UI still works. The button reflects
+ * aria-pressed; the server owns the value.
+ */
+
+function paintAutoImages(on) {
+  const b = els.btnAutoimg;
+  b.setAttribute("aria-pressed", on ? "true" : "false");
+  b.title = on ? "Auto images on — tap for text only" : "Auto images off";
+}
+
+/* chat-mutating endpoints (new / select / delete / character switch) carry the
+   active chat's flag, so the button follows the chat without a second fetch */
+function applyAutoFlag(d) {
+  if (d && typeof d.auto_images === "boolean") paintAutoImages(d.auto_images);
+}
+
+async function toggleAutoImages() {
+  const want = els.btnAutoimg.getAttribute("aria-pressed") !== "true";
+  const prev = els.btnAutoimg.getAttribute("aria-pressed");
+  paintAutoImages(want);                        // optimistic
+  try {
+    const d = await api("/api/chat/auto_images", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on: want }),
+    });
+    paintAutoImages(d.auto_images !== false);
+    toast(d.auto_images !== false
+      ? "Auto images on" : "Auto images off — text only");
+  } catch (e) {
+    paintAutoImages(prev === "true");           // server refused: revert
+    if (e.message !== "locked") toast("Failed: " + e.message, true);
+  }
+}
+
 els.cfSave.addEventListener("click", saveCharForm);
 els.chDelete.addEventListener("click", () =>
   deleteCharById(editCharId, els.chName.value.trim()));
@@ -1891,6 +1934,8 @@ async function refreshStatus() {
     activeCharId = s.character ? s.character.id : "";
     els.chatCharname.textContent = s.character ? s.character.name : "Free chat";
     els.btnHistory.hidden = !s.character;
+    // per-chat setting — pick it up on chat switch, new chat and restart
+    if (typeof s.auto_images === "boolean") paintAutoImages(s.auto_images);
     return s;
   } catch (e) {
     if (e.message === "locked") return;
@@ -1984,6 +2029,7 @@ async function newChat() {
     const d = await api("/api/chat/new", { method: "POST" });
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
+    applyAutoFlag(d);
     toast("New chat");
   } catch (e) {
     if (e.message !== "locked") toast("Failed: " + e.message, true);
@@ -2096,6 +2142,7 @@ async function deleteChatsBatch(ids) {
   if (last) {
     els.msgs.textContent = "";
     renderHistory(last.timeline || []);
+    applyAutoFlag(last);
     refreshStatus();
   }
   await openHistory();
@@ -2109,6 +2156,7 @@ function selectChat(chatId) {
   }).then((d) => {
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
+    applyAutoFlag(d);
     els.pageHist.hidden = true;
     switchView("chat");
   }).catch((e) => {
@@ -2126,6 +2174,7 @@ async function deleteChatById(chatId) {
     toast("Chat deleted");
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
+    applyAutoFlag(d);
     await openHistory();
   } catch (e) {
     if (e.message !== "locked") toast("Delete failed: " + e.message, true);

@@ -247,6 +247,17 @@ button:active { transform: scale(.97); }
 .iconbtn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .iconbtn:active, .iconbtn:hover { background: var(--panel2); color: var(--text); }
 
+/* auto-image toggle (chat top bar) — dimmed when off, lit accent when on.
+   aria-pressed is the single source of truth, mirrored from the server. */
+#btn-autoimg[aria-pressed="true"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+#btn-autoimg[aria-pressed="true"] svg {
+  fill: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+#btn-autoimg[aria-pressed="false"] { color: var(--line); }
+
 /* ------------------------------------------------------------------ chat */
 
 /* app shell: view / composer / tabbar stacked in flow —
