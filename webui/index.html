@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=47">
+<link rel="stylesheet" href="/static/style.css?v=49">
 </head>
 <body>
 
@@ -160,6 +160,7 @@
     <button id="lb-prev" class="lb-nav" aria-label="Previous">‹</button>
     <img id="lb-img" alt="">
     <button id="lb-next" class="lb-nav" aria-label="Next">›</button>
+    <div id="lb-scroll"></div>
   </div>
   <div class="lb-sheet" id="lb-sheet">
     <div id="lb-meta" class="lb-meta"></div>
@@ -349,6 +350,13 @@
         <button class="swatch" data-accent="#8ab4ff" style="--sw:#8ab4ff" aria-label="Sky"></button>
         <input type="color" id="accent-pick" value="#b18cff" aria-label="Custom accent color">
       </div>
+
+      <label>Lightbox <span class="dim">— image browsing</span></label>
+      <div class="seg" id="lbmode-seg">
+        <button data-lbmode="slideshow">Slideshow</button>
+        <button data-lbmode="scroll">Scroll</button>
+      </div>
+      <div class="hint">Slideshow pages one image at a time. Scroll stacks the view as a vertical feed — flick up or down to browse, and moving back never waits on a reload.</div>
     </section>
   </div>
   <div class="ps-foot">
@@ -575,6 +583,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=48"></script>
+<script src="/static/app.js?v=49"></script>
 </body>
 </html>

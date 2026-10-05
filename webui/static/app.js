@@ -39,6 +39,7 @@ const els = {
   lbParams: $("lb-params"),
   lbPromptWrap: $("lb-prompt-wrap"), lbNegWrap: $("lb-neg-wrap"),
   lbParamsWrap: $("lb-params-wrap"), lbStage: $("lb-stage"),
+  lbScroll: $("lb-scroll"),
   pageSettings: $("page-settings"), shModels: $("sh-models"), shLoad: $("sh-load"),
   psList: $("ps-list"), psCount: $("ps-count"),
   pagePersona: $("page-persona"), ppTitle: $("pp-title"),
@@ -1135,6 +1136,11 @@ let lbIndex = -1;
 let lbList = [];
 let lbToken = 0;                 // guards the async metadata fetch below
 
+// lightbox browsing mode — "slideshow" (one image + arrows) or "scroll"
+// (whole list stacked as a vertical feed). Persisted like the accent color.
+function lbMode() { return localStorage.getItem("lbmode") === "scroll" ? "scroll" : "slideshow"; }
+function lbIsScroll() { return els.lb.classList.contains("scroll"); }
+
 function openLightbox(rel, list) {
   const src = list || images;
   lbList = src.slice();
@@ -1144,27 +1150,67 @@ function openLightbox(rel, list) {
     lbIndex = 0;
   }
   toggleLbInfo(false);
-  showLightbox();
-  els.lb.hidden = false;
+  els.lb.classList.toggle("scroll", lbMode() === "scroll");
+  if (lbIsScroll()) lbBuildScroll(); else lbClearScroll();
+  els.lb.hidden = false;          // unhide first — the scroll position below
+  showLightbox();                 // needs the stage's real height
 }
 
-function closeLightbox() { els.lb.hidden = true; }
+function closeLightbox() {
+  els.lb.hidden = true;
+  lbToken++;                      // pending metadata fetches are moot now
+  if (lbIsScroll()) lbClearScroll();  // drop the feed's decoded images
+}
+
+// build the scroll feed: one full-height slide per image. `loading="lazy"`
+// keeps far-away images from loading until they approach the viewport.
+function lbBuildScroll() {
+  const wrap = els.lbScroll;
+  wrap.textContent = "";
+  for (const im of lbList) {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = "";
+    img.src = "/outputs/" + (im.rel || im.name);
+    wrap.appendChild(el("div", "lb-slide", "")).appendChild(img);
+  }
+}
+
+function lbClearScroll() { els.lbScroll.textContent = ""; }
+
+// position the feed on slide `idx` and sync the header/info to it
+function lbJump(idx) {
+  lbIndex = idx;
+  const st = els.lbStage;
+  st.scrollTop = idx * Math.max(1, st.clientHeight);
+  const im = lbList[idx];
+  els.lbName.textContent = baseName(im.rel || im.name);
+  if (els.lbSheet.classList.contains("open")) { lbResetInfo(); lbFetchInfo(im); }
+}
 
 function showLightbox() {
   const im = lbList[lbIndex];
   if (!im) return;
-  const rel = im.rel || im.name;
-  els.lbName.textContent = baseName(rel);
-  els.lbImg.src = "/outputs/" + rel;
+  els.lbName.textContent = baseName(im.rel || im.name);
+  lbResetInfo();
+  if (lbIsScroll()) { lbJump(lbIndex); return; }
+  els.lbImg.src = "/outputs/" + (im.rel || im.name);
   els.lbPrev.style.visibility = lbIndex > 0 ? "visible" : "hidden";
   els.lbNext.style.visibility = lbIndex < lbList.length - 1 ? "visible" : "hidden";
+  lbFetchInfo(im);
+}
 
+function lbResetInfo() {
   els.lbMeta.textContent = "";
   els.lbPrompt.textContent = "";
   els.lbNeg.textContent = "";
   els.lbParams.textContent = "";
   [els.lbPromptWrap, els.lbNegWrap, els.lbParamsWrap].forEach((w) => { w.hidden = true; });
+}
 
+function lbFetchInfo(im) {
+  const rel = im.rel || im.name;
   const token = ++lbToken;      // paging fast must not stack up chips
   api("/api/image_info?name=" + encodeURIComponent(rel)).then((info) => {
     if (token !== lbToken || els.lb.hidden) return;
@@ -1183,14 +1229,33 @@ function showLightbox() {
 
 function lbMove(d) {
   const ni = lbIndex + d;
-  if (ni >= 0 && ni < lbList.length) { lbIndex = ni; showLightbox(); }
+  if (ni < 0 || ni >= lbList.length) return;
+  if (lbIsScroll()) { lbJump(ni); return; }
+  lbIndex = ni;
+  showLightbox();
 }
 
-// the (i) button slides the info popup over the image
+// scroll-mode index tracking: the centered slide is the current image.
+// Scroll-snap makes slide height == stage height, so the math is exact.
+function lbOnScroll() {
+  if (els.lb.hidden || !lbIsScroll()) return;
+  const st = els.lbStage;
+  const idx = Math.max(0, Math.min(lbList.length - 1,
+    Math.round(st.scrollTop / Math.max(1, st.clientHeight))));
+  if (idx === lbIndex) return;
+  const im = lbList[idx];
+  els.lbName.textContent = baseName(im.rel || im.name);
+  if (els.lbSheet.classList.contains("open")) { lbResetInfo(); lbFetchInfo(im); }
+  lbIndex = idx;
+}
+
+// the (i) button slides the info popup over the image; in scroll mode the
+// popup loads metadata on demand (scrolling itself fires no requests)
 function toggleLbInfo(open) {
   const show = open === undefined ? !els.lbSheet.classList.contains("open") : !!open;
   els.lbSheet.classList.toggle("open", show);
   els.lbInfo.classList.toggle("on", show);
+  if (show && lbIsScroll() && lbList[lbIndex]) { lbResetInfo(); lbFetchInfo(lbList[lbIndex]); }
 }
 
 /* ---------------------------------------------- themed dropdown */
@@ -2387,6 +2452,24 @@ function applyAccent(hex) {
   }
   document.getElementById("accent-pick").addEventListener("input", (e) => {
     applyAccent(e.target.value);
+  });
+})();
+
+// lightbox mode — segmented control in Settings → Visuals, saved like accent
+(function initLbMode() {
+  const seg = document.getElementById("lbmode-seg");
+  const paint = () => {
+    const m = lbMode();
+    for (const b of seg.querySelectorAll("button")) {
+      b.classList.toggle("on", b.dataset.lbmode === m);
+    }
+  };
+  paint();
+  seg.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-lbmode]");
+    if (!b) return;
+    localStorage.setItem("lbmode", b.dataset.lbmode);
+    paint();
   });
 })();
 
@@ -3652,15 +3735,25 @@ for (const b of document.querySelectorAll(".copybtn")) {
   b.addEventListener("click", () => copyText($(b.dataset.copy).textContent));
 }
 
-// swipe between gallery images
+// swipe between gallery images (slideshow mode only — in scroll mode the
+// vertical flick owns the gesture and horizontal swipes mean nothing)
 let touchX = null;
 els.lbStage.addEventListener("touchstart", (e) => { touchX = e.touches[0].clientX; }, { passive: true });
 els.lbStage.addEventListener("touchend", (e) => {
   if (touchX == null) return;
   const dx = e.changedTouches[0].clientX - touchX;
-  if (Math.abs(dx) > 50) lbMove(dx < 0 ? 1 : -1);
+  if (!lbIsScroll() && Math.abs(dx) > 50) lbMove(dx < 0 ? 1 : -1);
   touchX = null;
 }, { passive: true });
+
+// scroll-mode tracking: which slide is centered right now
+els.lbStage.addEventListener("scroll", lbOnScroll, { passive: true });
+// rotation/keyboard snap: keep the current slide aligned after a resize
+window.addEventListener("resize", () => {
+  if (els.lb.hidden || !lbIsScroll() || !lbList[lbIndex]) return;
+  const st = els.lbStage;
+  st.scrollTop = lbIndex * Math.max(1, st.clientHeight);
+});
 
 document.addEventListener("keydown", (e) => {
   if (!els.lb.hidden) {
@@ -3668,8 +3761,8 @@ document.addEventListener("keydown", (e) => {
       if (els.lbSheet.classList.contains("open")) toggleLbInfo(false);
       else closeLightbox();
     }
-    if (e.key === "ArrowLeft") lbMove(-1);
-    if (e.key === "ArrowRight") lbMove(1);
+    if (e.key === "ArrowLeft" || (lbIsScroll() && e.key === "ArrowUp")) lbMove(-1);
+    if (e.key === "ArrowRight" || (lbIsScroll() && e.key === "ArrowDown")) lbMove(1);
   } else if (e.key === "Escape" && !els.pageSettings.hidden) {
     els.pageSettings.hidden = true;
   } else if (e.key === "Escape" && !els.pagePersona.hidden) {

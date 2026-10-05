@@ -572,12 +572,27 @@ button:active { transform: scale(.97); }
 }
 #lb-img { max-width: 100%; max-height: 100%; border-radius: 10px; }
 .lb-nav {
-  position: absolute; top: 50%; transform: translateY(-50%);
-  width: 42px; height: 60px; font-size: 30px; color: var(--dim);
+  position: absolute; top: 0; bottom: 0;
+  width: 84px; font-size: 30px; color: var(--dim);
   background: rgba(255,255,255,.06); border-radius: 10px;
   display: flex; align-items: center; justify-content: center;
 }
 #lb-prev { left: 6px; } #lb-next { right: 6px; }
+
+/* scroll mode — the folder as one vertical feed; scroll = navigate */
+#lb-scroll { display: none; }
+#lightbox.scroll .lb-stage {
+  display: block; padding: 0; overflow-y: auto;
+  -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain;
+  scroll-snap-type: y mandatory;
+}
+#lightbox.scroll #lb-img, #lightbox.scroll .lb-nav { display: none; }
+#lightbox.scroll #lb-scroll { display: contents; }
+.lb-slide {
+  height: 100%; scroll-snap-align: center;
+  display: flex; align-items: center; justify-content: center; padding: 6px;
+}
+.lb-slide img { max-width: 100%; max-height: 100%; border-radius: 10px; }
 
 /* info popup — hidden until the (i) button opens it */
 .lb-sheet {
@@ -617,6 +632,16 @@ button:active { transform: scale(.97); }
   flex: 1; padding: 9px 2px; border-radius: 9px; font-size: 13px; color: var(--dim);
 }
 .subtabs button.on { background: var(--panel2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+
+/* two-choice segmented control (Settings → Visuals: lightbox mode) */
+.seg {
+  display: flex; gap: 2px; padding: 4px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 12px;
+}
+.seg button {
+  flex: 1; padding: 9px 2px; border-radius: 9px; font-size: 13px; color: var(--dim);
+}
+.seg button.on { background: var(--panel2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
 .ps-body {
   flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
   padding: 0 16px;
