@@ -988,11 +988,11 @@ function folderCtx(rel) {
   const n = galFolders.find((f) => joinFolder(galFolder, f.name) === rel);
   const count = n ? n.count : 0;
   openCtx([
-    { label: "📂 Open", action: () => loadGallery(rel) },
-    { label: "＋ New folder inside", action: () => newFolderIn(rel) },
-    { label: "✎ Rename", action: () => openFoldSheet("rename", rel, baseName(rel)) },
-    { label: "⇄ Move to…", action: () => openFolderPicker(rel, true) },
-    { label: `🗑 Delete folder (${count} image${count === 1 ? "" : "s"})`,
+    { label: "Open", action: () => loadGallery(rel) },
+    { label: "New folder inside", action: () => newFolderIn(rel) },
+    { label: "Rename", action: () => openFoldSheet("rename", rel, baseName(rel)) },
+    { label: "Move to…", action: () => openFolderPicker(rel, true) },
+    { label: `Delete folder (${count} image${count === 1 ? "" : "s"})`,
       danger: true, action: () => deleteFolder(rel, count) },
   ], null);
 }
@@ -1011,10 +1011,10 @@ async function deleteFolder(rel, count) {
 
 function imageCtx(rel) {
   openCtx([
-    { label: "🔍 Open", action: () => openLightbox(rel) },
-    { label: "📁 Move to…", action: () => openFolderPicker([rel], false) },
-    { label: "⤓ Download", action: () => downloadImage(rel) },
-    { label: "🗑 Delete", danger: true, action: () => deleteImages([rel]) },
+    { label: "Open", action: () => openLightbox(rel) },
+    { label: "Move to…", action: () => openFolderPicker([rel], false) },
+    { label: "Download", action: () => downloadImage(rel) },
+    { label: "Delete", danger: true, action: () => deleteImages([rel]) },
   ], "/thumb/" + rel);
 }
 
@@ -1074,10 +1074,6 @@ function renderPickList() {
   const row = (rel, name, depth, opts) => {
     const b = el("button", "fp-row" + (opts.here ? " here" : ""));
     b.style.paddingLeft = 8 + depth * 16 + "px";
-    b.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
     b.appendChild(el("span", "fp-name", name));
     if (opts.tag) b.appendChild(el("span", "fp-lock", opts.tag));
     b.addEventListener("click", () => confirmMove(rel, opts));
@@ -1094,10 +1090,6 @@ function renderPickList() {
   }
   list.appendChild(el("div", "fp-sep", "or"));
   const nb = el("button", "fp-row");
-  nb.innerHTML =
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
-    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
-    '<path d="M12 5v14M5 12h14"/></svg>';
   nb.appendChild(el("span", "fp-name", "New folder…"));
   nb.addEventListener("click", () => {
     els.foldPick.hidden = true;
@@ -1201,6 +1193,216 @@ function toggleLbInfo(open) {
   els.lbInfo.classList.toggle("on", show);
 }
 
+/* ---------------------------------------------- themed dropdown */
+/* Native <select>/<datalist> popups draw with OS styling (a white list on
+   desktop, the system sheet on Android). These wrappers keep the host
+   element (hidden) as the single source of truth for .value and replace
+   only the popup with an anchored, themed panel. */
+
+const dd = { backdrop: null, panel: null, anchor: null, onKey: null, onScroll: null };
+
+function ddClose() {
+  if (!dd.backdrop) return;
+  dd.backdrop.remove();
+  document.removeEventListener("keydown", dd.onKey, true);
+  window.removeEventListener("scroll", dd.onScroll, true);
+  window.removeEventListener("resize", dd.onScroll);
+  dd.backdrop = dd.panel = dd.anchor = dd.onKey = dd.onScroll = null;
+}
+
+/** Open the themed panel under `anchor`. items: [{value, label, group?, dim?}]
+    — a group string renders as a non-interactive section header. */
+function ddOpen(anchor, items, current, onPick) {
+  ddClose();
+  const backdrop = document.createElement("div");
+  backdrop.className = "dd";
+  const panel = el("div", "dd-panel");
+  const list = el("div", "dd-list");
+  dd.onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); ddClose(); } };
+  // close on real scrolls only — the anchor moving is what matters, so
+  // programmatic scrolls that don't displace the field can't kill the panel
+  const r0 = anchor.getBoundingClientRect();
+  dd.onScroll = () => {
+    if (!dd.anchor) return;
+    const r1 = dd.anchor.getBoundingClientRect();
+    if (Math.abs(r1.top - r0.top) > 2 || Math.abs(r1.left - r0.left) > 2) ddClose();
+  };
+
+  const searchable = items.length > 8;
+  let query = "";
+  const render = () => {
+    list.textContent = "";
+    const q = query.trim().toLowerCase();
+    let lastGroup = null, shown = 0;
+    for (const it of items) {
+      if (q && !it.label.toLowerCase().includes(q)) continue;
+      if (it.group) {
+        if (it.group !== lastGroup) {
+          lastGroup = it.group;
+          list.appendChild(el("div", "dd-group", it.group));
+        }
+      } else lastGroup = null;
+      const b = el("button",
+        "dd-item" + (it.value === current ? " on" : "") + (it.dim ? " dim" : ""),
+        it.label);
+      b.type = "button";
+      b.title = it.label;
+      b.addEventListener("click", () => { ddClose(); onPick(it.value); });
+      list.appendChild(b);
+      shown++;
+    }
+    if (!shown) list.appendChild(el("div", "dd-none", "No match"));
+  };
+  render();
+
+  let search = null;
+  if (searchable) {
+    search = document.createElement("input");
+    search.className = "dd-search";
+    search.placeholder = "Filter…";
+    search.autocomplete = "off";
+    search.spellcheck = false;
+    search.setAttribute("inputmode", "search");
+    search.addEventListener("input", () => { query = search.value; render(); });
+    panel.appendChild(search);
+  }
+  panel.appendChild(list);
+  backdrop.appendChild(panel);
+  backdrop.addEventListener("pointerdown",
+    (e) => { if (e.target === backdrop) ddClose(); });
+  document.body.appendChild(backdrop);
+
+  // position under the anchor; flip above when there is no room below
+  const r = anchor.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth;
+  const w = Math.min(Math.max(r.width, 210), vw - 16);
+  panel.style.minWidth = w + "px";
+  panel.style.maxHeight = Math.round(window.innerHeight * 0.58) + "px";
+  panel.style.left = Math.min(Math.max(8, r.left), Math.max(8, vw - w - 8)) + "px";
+  requestAnimationFrame(() => {
+    if (dd.backdrop !== backdrop) return;      // closed again already
+    const ph = panel.offsetHeight;
+    let top = r.bottom + 6;
+    if (top + ph > window.innerHeight - 8) top = r.top - ph - 6;
+    panel.style.top = Math.max(8, top) + "px";
+    panel.classList.add("in");
+    // scroll the selected row into view WITHOUT touching ancestor scrollers
+    // (scrollIntoView would scroll the page behind and trip onScroll)
+    const cur = list.querySelector(".dd-item.on");
+    if (cur) {
+      list.scrollTop = cur.offsetTop - (list.clientHeight - cur.offsetHeight) / 2;
+    }
+    if (search && matchMedia("(pointer: fine)").matches) {
+      search.focus({ preventScroll: true });
+    }
+  });
+
+  dd.backdrop = backdrop;
+  dd.panel = panel;
+  dd.anchor = anchor;
+  document.addEventListener("keydown", dd.onKey, true);
+  window.addEventListener("scroll", dd.onScroll, true);
+  window.addEventListener("resize", dd.onScroll);
+}
+
+function ddOptions(sel) {
+  const out = [];
+  for (const o of sel.options) {
+    out.push({
+      value: o.value,
+      label: o.textContent,
+      group: o.parentNode.tagName === "OPTGROUP" ? o.parentNode.label : "",
+    });
+  }
+  return out;
+}
+
+/** Replace a <select>'s popup with the themed panel. The select stays in the
+    DOM (hidden) — .value and change events keep working as before. Call
+    sel._ddSync() after setting sel.value programmatically. */
+function ddWrapSelect(sel) {
+  sel.classList.add("dd-host");
+  const btn = el("button", "dd-btn");
+  btn.type = "button";
+  btn.setAttribute("aria-haspopup", "listbox");
+  sel.parentNode.insertBefore(btn, sel);
+  const sync = () => {
+    const o = sel.options[sel.selectedIndex];
+    btn.textContent = o ? o.textContent : "";
+  };
+  btn.addEventListener("click", () => {
+    ddOpen(btn, ddOptions(sel), sel.value, (v) => {
+      sel.value = v;
+      sync();
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  });
+  sel._ddSync = sync;
+  sync();
+}
+
+/** Replace a free-text+<datalist> field with a real dropdown. The input
+    stays (hidden) as the source of truth; getItems() supplies the choices
+    at open time, labelFor() maps a value to its display text. */
+function ddWrapInput(inp, getItems, labelFor) {
+  inp.classList.add("dd-host");
+  const btn = el("button", "dd-btn");
+  btn.type = "button";
+  btn.setAttribute("aria-haspopup", "listbox");
+  inp.parentNode.insertBefore(btn, inp);
+  const sync = () => {
+    const v = inp.value;
+    btn.textContent = v ? (labelFor ? labelFor(v) : v)
+      : (inp.placeholder || "");
+    btn.classList.toggle("dd-empty", !v);
+  };
+  btn.addEventListener("click", () => {
+    const items = (getItems() || []).slice();
+    if (!items.some((i) => i.value === "") && inp.placeholder
+        && !items.some((i) => i.label === inp.placeholder)) {
+      items.unshift({ value: "", label: inp.placeholder, dim: true });
+    }
+    if (inp.value && !items.some((i) => i.value === inp.value)) {
+      items.push({ value: inp.value,
+        label: labelFor ? labelFor(inp.value) : inp.value });
+    }
+    ddOpen(btn, items, inp.value, (v) => {
+      inp.value = v;
+      sync();
+      inp.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  });
+  inp._ddSync = sync;
+  sync();
+}
+
+/* dropdown option sources — read live at open time from the server
+   capability lists (sdCaps is refreshed by /api/status) */
+const ddProviders = {
+  samplers: () => (sdCaps.samplers || []).map((v) => ({ value: v, label: v })),
+  scheds: () => (sdCaps.schedulers || []).map((n) => (
+    { value: n, label: schedLabel(n) })),
+  models: () => regenModels.map((v) => ({ value: v, label: v })),
+  te: () => (sdCaps.text_encoders || []).map((v) => ({ value: v, label: v })),
+  vae: () => ["Automatic"]
+    .concat((sdCaps.vaes || []).filter((v) => v !== "Automatic"))
+    .map((v) => ({ value: v, label: v })),
+  lb: () => (sdCaps.low_bits || []).map((v) => ({ value: v, label: v })),
+};
+
+function ddInit() {
+  ddWrapSelect(els.chModel);
+  ddWrapSelect(els.chSize);
+  ddWrapSelect(els.shModels);
+  ddWrapSelect(regenF.mode);
+  ddWrapInput(regenF.sampler, ddProviders.samplers);
+  ddWrapInput(regenF.sched, ddProviders.scheds, schedLabel);
+  ddWrapInput(regenF.model, ddProviders.models);
+  ddWrapInput(regenF.te, ddProviders.te);
+  ddWrapInput(regenF.vae, ddProviders.vae);
+  ddWrapInput(regenF.lb, ddProviders.lb);
+}
+
 /* settings — full page with Chatterbox-style sub-tabs */
 
 function setPsTab(name) {
@@ -1267,6 +1469,7 @@ async function openSettings() {
       els.shModels.appendChild(el("option", null, s.sd_ok ? "(no models)" : "(server unreachable)"));
       els.shLoad.disabled = true;
     }
+    if (els.shModels._ddSync) els.shModels._ddSync();
     // masked key display (GET /api/settings)
     try {
       const cfg = await api("/api/settings");
@@ -1341,6 +1544,7 @@ function renderComps(activeArch) {
   }
   sel.addEventListener("change", () => renderComps(sel.value));
   card.appendChild(sel);
+  ddWrapSelect(sel);
 
   const head = el("div", "comp-head");
   const bits = [`CFG ${r.cfg}`, `${r.steps} steps`, `${r.sampler}/${r.scheduler}`];
@@ -1350,22 +1554,23 @@ function renderComps(activeArch) {
   card.appendChild(head);
 
   const fields = [
-    ["Text encoder", "dl-te", "text_encoder", "server default",
+    ["Text encoder", "text_encoder", "server default",
      saved.text_encoder || ""],
-    ["VAE", "dl-vae", "sd_vae", "Automatic", saved.sd_vae || ""],
-    ["Precision", "dl-lb", "low_bits", "Automatic",
+    ["VAE", "sd_vae", "Automatic", saved.sd_vae || ""],
+    ["Precision", "low_bits", "Automatic",
      saved.low_bits || r.low_bits || ""],
   ];
-  for (const [label, list, field, ph, val] of fields) {
+  for (const [label, field, ph, val] of fields) {
     const wrap = el("label", null, label);
     const inp = el("input");
     inp.type = "text";
-    inp.setAttribute("list", list);   // .list is read-only on the element
     inp.placeholder = ph;
     inp.value = val;
     inp.dataset.arch = r.arch;
     inp.dataset.field = field;
     wrap.appendChild(inp);
+    ddWrapInput(inp, field === "text_encoder" ? ddProviders.te
+      : field === "sd_vae" ? ddProviders.vae : ddProviders.lb);
     card.appendChild(wrap);
   }
 
@@ -1374,24 +1579,6 @@ function renderComps(activeArch) {
   if (r.checkpoint) cur.push("checkpoint: " + r.checkpoint);
   if (cur.length) card.appendChild(el("div", "hint", cur.join(" · ")));
   box.appendChild(card);
-
-  fillList("dl-te", sdCaps.text_encoders, true);
-  fillList("dl-vae", ["Automatic"].concat((sdCaps.vaes || [])
-    .filter((v) => v !== "Automatic")), true);
-  fillList("dl-lb", sdCaps.low_bits, false);
-}
-
-function fillList(id, values, placeholder) {
-  const dl = $(id);
-  if (!dl) return;
-  dl.textContent = "";
-  for (const v of values || []) {
-    if (!v) continue;
-    dl.appendChild(el("option", null, v));
-  }
-  if (placeholder) {
-    dl.appendChild(el("option", null, "— clear —"));
-  }
 }
 
 /** Read the component form into {arch: {field: value}}, blank = cleared. */
@@ -1573,7 +1760,9 @@ function renderCharList() {
 function fillModelSelect() {
   const sel = els.chModel;
   sel.textContent = "";
-  sel.appendChild(el("option", null, "(current checkpoint)"));
+  const cur = el("option", null, "(current checkpoint)");
+  cur.value = "";                      // else the value would be its text
+  sel.appendChild(cur);
   for (const m of statusModels) {
     const o = el("option", null, m);
     o.value = m;
@@ -1629,6 +1818,8 @@ function openCharForm(card) {
     els.chModel.appendChild(o);
     els.chModel.value = card.checkpoint;
   }
+  if (els.chModel._ddSync) els.chModel._ddSync();
+  if (els.chSize._ddSync) els.chSize._ddSync();
   if (card && card.avatar) {
     els.chAvatarImg.src = card.avatar;
     els.chAvatarImg.hidden = false;
@@ -1890,18 +2081,16 @@ function charCtx(row) {
   const c = chars.find((x) => x.id === id);
   if (!c) return;
   openCtx([
-    { label: "✎ Edit", action: () => openCharForm(c) },
-    { label: "🎬 Start scenario", action: () => startScenarioMenu(c) },
-    { label: "🗑 Delete", danger: true,
+    { label: "Edit", action: () => openCharForm(c) },
+    { label: "Start scenario", action: () => startScenarioMenu(c) },
+    { label: "Delete", danger: true,
       action: () => deleteCharById(id, c.name) },
   ], c.avatar || null);
 }
 
 els.cfBack.addEventListener("click", () => { els.pageChform.hidden = true; });
 $("btn-addchar").addEventListener("click", () => openCharForm(null));
-$("btn-overflow").addEventListener("click", () => {
-  openCtx([{ label: "⚙ Settings", action: openSettings }], null);
-});
+$("btn-settings").addEventListener("click", openSettings);
 $("btn-gallery").addEventListener("click", openGallery);
 $("pg-back").addEventListener("click", galleryBack);
 $("pg-refresh").addEventListener("click", () => loadGallery());
@@ -2401,7 +2590,7 @@ els.hsList.addEventListener("contextmenu", (e) => {
   const target = e.target.closest(".hist-row");
   if (!target) return;
   e.preventDefault();
-  openCtx([{ label: "🗑 Delete", danger: true,
+  openCtx([{ label: "Delete", danger: true,
     action: () => deleteChatById(target.dataset.chatid) }], null);
 });
 let hsLpTimer = null, hsLpStart = null;
@@ -2413,7 +2602,7 @@ els.hsList.addEventListener("touchstart", (e) => {
   hsLpTimer = setTimeout(() => {
     hsLpTimer = null;
     if (navigator.vibrate) navigator.vibrate(25);
-    openCtx([{ label: "🗑 Delete", danger: true,
+    openCtx([{ label: "Delete", danger: true,
       action: () => deleteChatById(target.dataset.chatid) }], null);
     hsLpStart = null;
   }, 550);
@@ -2467,19 +2656,19 @@ function ctxItemsFor(el) {
   if (el.classList.contains("gen")) {
     const rel = el.dataset.file;          // may live in a gallery folder
     const items = [];
-    if (rel) items.push({ label: "↻ Regenerate", action: () => openRegen(rel) });
-    if (rel) items.push({ label: "✎ Edit in chat", action: () => {
+    if (rel) items.push({ label: "Regenerate", action: () => openRegen(rel) });
+    if (rel) items.push({ label: "Edit in chat", action: () => {
       // a bare file name — edit_image resolves it anywhere in the tree
       switchView("chat");
       els.input.value = `Edit ${baseName(rel)} — `;
       autosize(); els.input.focus(); els.send.classList.add("ready");
     }});
-    if (rel) items.push({ label: "📁 Show in gallery", action: () => {
+    if (rel) items.push({ label: "Show in gallery", action: () => {
       els.pageGallery.hidden = false;
       setGalSelect(false);
       loadGallery(rel.includes("/") ? parentOf(rel) : "");
     }});
-    items.push({ label: "🗑 Delete from chat", danger: true, action: () => deleteChatEvent(el) });
+    items.push({ label: "Delete from chat", danger: true, action: () => deleteChatEvent(el) });
     return { items, previewSrc: rel ? "/thumb/" + rel : null };
   }
   if (el.classList.contains("msg")) {
@@ -2487,13 +2676,13 @@ function ctxItemsFor(el) {
     const editable = el.classList.contains("ai")
                      && el.dataset.idx != null;
     if (!el.classList.contains("error")) {
-      items.push({ label: "⧉ Copy",
+      items.push({ label: "Copy",
         action: () => copyText(el.dataset.raw || el.textContent) });
     }
     if (editable) {
-      items.push({ label: "✎ Edit message",
+      items.push({ label: "Edit message",
         action: () => startMsgEdit(el) });
-      items.push({ label: "↻ Regenerate reply",
+      items.push({ label: "Regenerate reply",
         action: () => regenReply(el) });
     }
     items.push({ label: "🗑 Delete", danger: true, action: () => deleteChatEvent(el) });
@@ -2740,7 +2929,7 @@ els.msgs.addEventListener("touchend", () => {
  */
 
 let regenRel = null;                 // rel path — may include folders
-let regenModels = [];                // checkpoints, for the datalist
+let regenModels = [];                // checkpoints, for the dropdown
 let regenArch = "";                  // architecture of the image's model
 let regenProfile = null;             // its CFG/step guidance, when known
 const regenEl = $("regen");
@@ -2766,6 +2955,15 @@ const regenF = {
   text: $("regen-text"),
   hint: $("regen-hint"),
 };
+
+/** Refresh the themed-dropdown buttons after recipe fields were filled
+    programmatically — the hidden inputs don't fire events on assignment. */
+function regenSyncDD() {
+  for (const k of ["mode", "sampler", "sched", "model", "te", "vae", "lb"]) {
+    const f = regenF[k];
+    if (f && f._ddSync) f._ddSync();
+  }
+}
 
 function regenSetMode() {
   const edit = regenF.mode.value === "img2img";
@@ -2800,26 +2998,17 @@ function regenSyncArch() {
   }
 }
 
-function regenFillLists() {
-  const caps = sdCaps || {};
-  fillList("rg-samplers", caps.samplers, false);
-  fillList("rg-scheds", schedLabels(caps.schedulers), false);
-  fillList("rg-tes", caps.text_encoders, true);
-  fillList("rg-vaes", ["Automatic"].concat((caps.vaes || [])
-    .filter((v) => v !== "Automatic")), true);
-  fillList("rg-lbs", caps.low_bits, false);
-}
-
-/** API schedule names -> the labels the WebUI shows. */
-function schedLabels(names) {
+/** API schedule name -> the label the WebUI shows. Idempotent: labels
+    round-trip ("Karras" -> "Karras"). */
+function schedLabel(n) {
   const special = {
     flow_match: "FlowMatchEulerDiscrete", flux2: "Flux2",
     sgm_uniform: "SGM Uniform", linear_quadratic: "Linear Quadratic",
     kl_optimal: "KL Optimal", align_your_steps: "Align Your Steps",
     bong_tangent: "Bong Tangent",
   };
-  return (names || []).map((n) => special[n]
-    || n.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()));
+  return special[n]
+    || n.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 async function openRegen(rel) {
@@ -2837,6 +3026,7 @@ async function openRegen(rel) {
   regenF.denoise.value = "0.65";
   regenF.hint.textContent = "Reading the original recipe…";
   regenSetMode();
+  regenSyncDD();
   regenSyncArch();
   regenEl.hidden = false;
   try {
@@ -2868,13 +3058,12 @@ async function openRegen(rel) {
       regenF.denoise.value = g.denoising_strength;
     }
     regenModels = d.models || [];
-    fillList("rg-models", regenModels, false);
     regenArch = d.arch || g.arch || archOfModel(regenF.model.value) || "";
     regenProfile = d.profile
       || (sdCaps.architectures || []).find((a) => a.arch === regenArch)
       || null;
     if (d.capabilities) sdCaps = d.capabilities;
-    regenFillLists();
+    regenSyncDD();
     regenSyncArch();
     const src = d.origin === "png"
       ? "Read from the image's own settings."
@@ -3238,7 +3427,7 @@ function personaCtx(row) {
   const p = personas.find((x) => x.id === row.dataset.personaid);
   if (!p) return;
   openCtx([
-    { label: "✎ Edit", action: () => openPersonaForm(p) },
+    { label: "Edit", action: () => openPersonaForm(p) },
     { label: "🗑 Delete", danger: true,
       action: () => deletePersonaById(p.id) },
   ], null);
@@ -3401,7 +3590,7 @@ function startScenarioMenu(c) {
     return;
   }
   openCtx(list.map((s) => ({
-    label: "🎬 " + (s.name || s.id),
+    label: (s.name || s.id),
     action: () => startScenarioChat(c.id, s.id),
   })), null);
 }
@@ -3436,7 +3625,7 @@ els.scList.addEventListener("contextmenu", (e) => {
     .find((x) => x.id === target.dataset.scenarioid);
   if (!s) return;
   openCtx([
-    { label: "✎ Edit", action: () => openScenarioForm(s) },
+    { label: "Edit", action: () => openScenarioForm(s) },
     { label: "🗑 Delete", danger: true,
       action: () => deleteScenarioById(s.id) },
   ], null);
@@ -3552,6 +3741,8 @@ function timelineImages(timeline) {
 }
 
 /* ------------------------------------------------------------ bootstrap */
+
+ddInit();                            // themed dropdowns over native popups
 
 (async function bootstrap() {
   try {

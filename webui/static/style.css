@@ -507,7 +507,6 @@ button:active { transform: scale(.97); }
   padding: 10px 8px; border-radius: 10px; text-align: left; font-size: 14px;
 }
 .fp-row:active { background: var(--panel2); }
-.fp-row svg { flex: none; width: 17px; height: 17px; color: var(--accent); }
 .fp-row .fp-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -643,9 +642,9 @@ button:active { transform: scale(.97); }
 }
 .row { display: flex; gap: 8px; }
 .row select { flex: 1; }
-#sh-load { padding: 0 16px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 13px; }
-#sh-load:disabled { opacity: .5; }
-.sh-body button.primary, #sh-save-llm, #sh-save-sd, #sh-save-sys {
+#sh-load, #sh-comp-save { padding: 0 16px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 13px; }
+#sh-load:disabled, #sh-comp-save:disabled { opacity: .5; }
+.sh-body button.primary, #sh-save-username, #sh-save-llm, #sh-save-sd, #sh-save-sys {
   padding: 10px; border-radius: 10px; font-size: 13.5px;
   background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #14101f;
 }
@@ -708,7 +707,7 @@ button:active { transform: scale(.97); }
 /* character form (sheet) */
 .ch-avatar { width: 56px; height: 56px; border-radius: 14px; object-fit: cover; flex: none; }
 .row-avatar { align-items: center; flex-wrap: wrap; }
-#ch-avatar-btn, .imgrow-btn { padding: 0 16px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 13px; height: 40px; flex: none; }
+#ch-avatar-btn, #ch-cover-btn, #scs-cover-btn, .imgrow-btn { padding: 0 16px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 13px; height: 40px; flex: none; }
 .aibtn {
   padding: 0 13px; height: 40px; border-radius: 10px; flex: none;
   font-size: 13px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
@@ -902,3 +901,62 @@ button:active { transform: scale(.97); }
   color: #14101f; border: 0;
 }
 .msg-edit-row button:disabled { opacity: .55; }
+
+/* ---------------------------------------------- themed dropdown */
+
+/* the closed control — looks like the other fields */
+.dd-btn {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; width: 100%; text-align: left;
+  font: inherit; font-size: 14px; min-height: 42px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px 12px; outline: none;
+}
+.dd-btn::after { content: "▾"; color: var(--dim); font-size: 12px; flex: none; }
+.dd-btn.dd-empty { color: var(--dim); }
+.dd-btn:focus { border-color: #4a3f78; }
+.row .dd-btn { flex: 1; min-width: 0; }
+.regen-full .dd-btn { font-size: 14px; padding: 9px 11px; border-radius: 11px; min-height: 0; }
+.comp-card .dd-btn { padding: 8px 10px; border-radius: 10px; min-height: 0; }
+/* the hidden host element keeps .value / change semantics */
+.dd-host { display: none !important; }
+
+/* the popup — anchored, themed, scrollable */
+.dd {
+  position: fixed; inset: 0; z-index: 96;
+  background: rgba(5, 7, 12, .45);
+}
+.dd-panel {
+  position: absolute; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, .55);
+  opacity: 0; transform: translateY(5px) scale(.99);
+  transition: opacity .14s ease, transform .14s ease;
+}
+.dd-panel.in { opacity: 1; transform: none; }
+.dd-search {
+  flex: none; margin: 8px 8px 4px; padding: 9px 11px; font-size: 15px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px; outline: none;
+}
+.dd-search:focus { border-color: #4a3f78; }
+.dd-list {
+  position: relative;              // offsetParent for .dd-item scrolling
+  flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain; padding: 6px;
+}
+.dd-group {
+  padding: 9px 10px 4px; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--dim);
+}
+.dd-item {
+  display: block; width: 100%; text-align: left;
+  padding: 11px 12px; font-size: 14.5px; border-radius: 9px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dd-item:active, .dd-item:hover { background: var(--panel2); }
+.dd-item.on { color: var(--accent); font-weight: 600; }
+.dd-item.dim { color: var(--dim); }
+.dd-none { padding: 12px; font-size: 13px; color: var(--dim); }
