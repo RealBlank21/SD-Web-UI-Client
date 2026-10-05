@@ -211,10 +211,11 @@ else, because the wrong CFG ruins a modern model:
 Modular models (Forge Neo):
 - Newer architectures (Flux, Qwen, Anima, Krea, Wan, Z-Image, Lumina, ERNIE)
   are not single files: the checkpoint is a diffusion model that needs a
-  companion TEXT ENCODER and often a companion VAE. The server already has the
-  right ones attached for each architecture, so you normally do nothing.
+  companion TEXT ENCODER and often a companion VAE. The app detects each
+  checkpoint's family from its own bytes and attaches the right companions
+  automatically, so you normally do nothing.
 - Only pass 'text_encoder' / 'sd_vae' / 'low_bits' when the user asks to change
-  them, or when a tool error says the model needs a companion. Use an exact
+  them, or when a tool error says a component is missing. Use an exact
   file name from list_sd_models. 'sd_vae': 'Automatic' keeps the default.
 - 'low_bits' controls diffusion precision: 'Automatic', 'float8-e4m3fn',
   'float8-e5m2' (or the '(fp16 LoRA)' variants). float8 roughly halves VRAM,
@@ -428,7 +429,19 @@ def _resolve_output_image(name: str, out_dir: Path) -> Path:
 
 def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
     """Run a tool call; wraps sd_client methods. Returns a JSON-able dict."""
-    from sd_client import save_images
+    from sd_client import SDWebUIError, save_images
+
+    def _human(e: SDWebUIError) -> SDWebUIError:
+        """Translate raw WebUI load failures into something actionable."""
+        msg = str(e)
+        if "VAE state dict" in msg or "text encoder" in msg.lower() \
+                or "Failed to recognize model" in msg:
+            return SDWebUIError(
+                msg + " — the checkpoint could not run: its model family is "
+                "missing companion files (text encoder / VAE) or it is filed "
+                "under the wrong one. Fix in Settings -> Image: pick the "
+                "family, attach the components, load the checkpoint again.")
+        return e
 
     args = {k: v for k, v in args.items() if v is not None}
 
@@ -439,20 +452,26 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
         model = args.pop("model", None)
         components = {k: args.pop(k) for k in
                       ("text_encoder", "sd_vae", "low_bits") if k in args}
-        if model:
-            client.set_model(model, **components)
-        elif components:
-            client.configure(**components)
-        t0 = time.perf_counter()
-        prepared = client.prepare_args(args, model=model, kind="txt2img")
-        result = client.submit(prepared["payload"])
+        switched = None
+        try:
+            if model:
+                switched = client.set_model(model, **components)
+            elif components:
+                client.configure(**components)
+            t0 = time.perf_counter()
+            prepared = client.prepare_args(args, model=model, kind="txt2img")
+            result = client.submit(prepared["payload"])
+        except SDWebUIError as e:
+            raise _human(e) from None
         elapsed = time.perf_counter() - t0
         saved = save_images(result, out_dir=out_dir, name_prefix="ai")
+        gen = _gen_info(client, args, elapsed, _seed_of(result), prepared)
+        if switched and switched.get("notes"):
+            gen["notes"] = (gen.get("notes") or []) + switched["notes"]
         return {"saved_files": [str(p) for p in saved],
                 "count": len(saved),
                 "seed_used": _seed_of(result),
-                "gen": _gen_info(client, args, elapsed, _seed_of(result),
-                                 prepared)}
+                "gen": gen}
 
     if name == "edit_image":
         # accept both 'image' and the legacy 'image_path' key
@@ -466,13 +485,19 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
                 "gallery or a generation in this chat")
         model = args.pop("model", None)
         if model:
-            client.set_model(model)
+            try:
+                client.set_model(model)
+            except SDWebUIError as e:
+                raise _human(e) from None
         t0 = time.perf_counter()
-        prepared = client.prepare_args(
-            {**args, "init_images": [base64.b64encode(src.read_bytes())
-                                     .decode()]},
-            model=model, kind="img2img")
-        result = client.submit(prepared["payload"], img2img=True)
+        try:
+            prepared = client.prepare_args(
+                {**args, "init_images": [base64.b64encode(src.read_bytes())
+                                         .decode()]},
+                model=model, kind="img2img")
+            result = client.submit(prepared["payload"], img2img=True)
+        except SDWebUIError as e:
+            raise _human(e) from None
         elapsed = time.perf_counter() - t0
         saved = save_images(result, out_dir=out_dir, name_prefix="ai_edit")
         return {"saved_files": [str(p) for p in saved],

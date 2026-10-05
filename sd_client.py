@@ -60,9 +60,9 @@ NEO_ARCHES = ("sd", "xl", "flux", "klein", "qwen", "lumina", "zit", "wan",
 
 ARCH_LABELS = {
     "sd": "SD 1.5 / 2.1", "xl": "SDXL / Illustrious", "flux": "Flux",
-    "klein": "Klein", "qwen": "Qwen Image", "lumina": "Lumina",
+    "klein": "Klein (Flux.2)", "qwen": "Qwen Image", "lumina": "Lumina 2",
     "zit": "Z-Image", "wan": "Wan (video)", "anima": "Anima",
-    "ernie": "ERNIE", "pid": "PID", "krea": "Krea",
+    "ernie": "ERNIE", "pid": "PID", "krea": "Krea 2",
 }
 
 ARCH_PROFILES = {
@@ -77,19 +77,20 @@ ARCH_PROFILES = {
     "qwen":   dict(sampler="LCM", scheduler="normal", cfg=1.0, steps=8,
                    dcfg=None, distilled=True, video=False, size=1328),
     "lumina": dict(sampler="Res Multistep", scheduler="simple", cfg=4.0,
-                   steps=32, dcfg=6.0, distilled=False, video=False, size=1024),
+                   steps=32, dcfg=None, distilled=False, video=False,
+                   size=1024),
     "zit":    dict(sampler="Euler", scheduler="beta", cfg=1.0, steps=9,
-                   dcfg=9.0, distilled=True, video=False, size=1024),
+                   dcfg=None, distilled=True, video=False, size=1024),
     "wan":    dict(sampler="Euler", scheduler="simple", cfg=1.0, steps=4,
-                   dcfg=5.0, distilled=True, video=True, size=832),
+                   dcfg=None, distilled=True, video=True, size=832),
     "anima":  dict(sampler="ER SDE", scheduler="beta", cfg=4.0, steps=32,
-                   dcfg=3.0, distilled=False, video=False, size=1024),
+                   dcfg=None, distilled=False, video=False, size=1024),
     "ernie":  dict(sampler="Euler", scheduler="simple", cfg=1.0, steps=8,
-                   dcfg=3.0, distilled=True, video=False, size=1024),
+                   dcfg=None, distilled=True, video=False, size=1024),
     "pid":    dict(sampler="LCM", scheduler="simple", cfg=1.0, steps=4,
-                   dcfg=1.5, distilled=True, video=False, size=1024),
+                   dcfg=None, distilled=True, video=False, size=1024),
     "krea":   dict(sampler="Euler", scheduler="simple", cfg=1.0, steps=8,
-                   dcfg=1.15, distilled=False, video=False, size=1024),
+                   dcfg=None, distilled=False, video=False, size=1024),
 }
 
 # CFG / step bands. Low-guidance (distilled) flow models are ruined by ordinary
@@ -105,6 +106,12 @@ STEP_BANDS = {"distilled": (4, 15), "standard": (20, 35)}
 ENFORCE_BANDS = {"flux", "klein", "qwen", "zit", "wan", "ernie", "pid"}
 #: legacy families — no distilled_cfg_scale, no bands
 LEGACY_ARCHES = ("sd", "xl")
+
+#: families whose distilled guidance is real (Neo presets.py: DISTILL) — the
+#: `<arch>_t2i_dcfg` option of every OTHER family is the Shift slider under a
+#: confusing option name, and sending its value as distilled_cfg_scale would
+#: be meaningless. Mirrors neo_detect.DISTILLED_ARCHES.
+DISTILLED_ARCHES = {"flux"}
 
 #: `forge_unet_storage_dtype_<arch>` values, as advertised by the Neo UI's
 #: "Diffusion in Low Bits" dropdown. Newer builds add more (nvfp4, int4, …);
@@ -217,35 +224,15 @@ def _slug_map(names) -> dict:
 def guess_arch(title: str) -> str:
     """Best-effort architecture for a checkpoint title / file name.
 
-    Modular DiTs are recognised by their family name; SDXL-lineage models by
-    the usual tags. Anything unrecognised falls back to `sd`, which is what
-    the shared checkpoint dropdown held before Neo.
+    Byte-level detection (neo_detect.guess_file) is the authoritative route
+    and is tried first wherever the caller has the file; this name-based
+    fallback exists for the case where it doesn't (a remote WebUI, an
+    unloadable header, GGUF). Modular DiTs are recognised by family-name
+    patterns — including the ones that hide it, like Nova's "AM" suffix for
+    Anima fine-tunes.
     """
-    t = _slug(title)
-    if not t:
-        return "sd"
-    # order matters: the more specific families first
-    for arch, pats in (
-            ("qwen", ("qwenimage", "qwen", "qwenimageedit")),
-            ("flux", ("flux2", "flux1", "flux")),
-            ("klein", ("klein",)),
-            ("anima", ("anima",)),
-            ("krea", ("krea",)),
-            ("zit", ("zimage", "zit", "zimageedit")),
-            ("wan", ("wan22", "wan2", "wan14b", "wan")),
-            ("lumina", ("lumina",)),
-            ("ernie", ("ernie",)),
-            ("pid", ("pidnext", "pimage", "pid")),
-            ("xl", ("xl", "sdxl", "illustrious", "pony", "noob", "realvis",
-                    "hyper", "juggernaut", "animediff", "anythingv5")),
-    ):
-        if any(p in t for p in pats):
-            return arch
-    return "sd"
-
-
-DISTILLED_HINTS = ("turbo", "schnell", "lightning", "lcm", "ddistill",
-                   "distilled", "1step", "fewstep")
+    from neo_detect import guess_from_name
+    return guess_from_name(title)
 
 
 def is_distilled(title: str) -> bool:
@@ -254,8 +241,8 @@ def is_distilled(title: str) -> bool:
     Flux.1 *dev* is not distilled, so the architecture alone is never enough —
     the name has to say so (schnell, turbo, lightning, lcm, …).
     """
-    t = _slug(title)
-    return any(h in t for h in DISTILLED_HINTS)
+    from neo_detect import name_is_distilled
+    return name_is_distilled(title)
 
 
 def split_sampler(name: str) -> tuple[str, str | None]:
@@ -372,6 +359,7 @@ class SDClient:
         self._opts: dict = {}
         self._models_ts = 0.0
         self._models: list[dict] = []
+        self.known_arches: dict[str, str] = {}   # user-pinned title -> arch
 
     # ------------------------------------------------------------- plumbing
 
@@ -523,9 +511,11 @@ class SDClient:
     def list_models(self, force: bool = False) -> list[dict]:
         """Installed checkpoints, annotated with their architecture.
 
-        /sdapi/v1/sd-models only covers the legacy Stable-diffusion folder, so
-        the per-architecture dropdowns (`forge_checkpoint_<arch>`) are merged in
-        — that is where Neo's modular models show up.
+        Architecture comes from the file's own bytes when the WebUI runs on
+        the same machine (neo_detect reads the safetensors header and applies
+        Neo's own classifier — the name is not trustworthy: Nova's "AM"
+        fine-tunes are Anima models), else from name patterns. Anything the
+        user pinned in `known_arches` wins over both.
         """
         if not force and self._models and time.time() - self._models_ts < 60:
             return self._models
@@ -537,12 +527,11 @@ class SDClient:
             title = str(m.get("title") or "").strip()
             if not title:
                 continue
-            arch = guess_arch(title)
-            cfg = m.get("config")
-            if isinstance(cfg, dict) and cfg.get("arch"):
-                arch = str(cfg["arch"]).lower()
+            path = str(m.get("filename") or "")
+            arch = self._detect_arch(title, path)
             row = {"title": title, "arch": arch,
-                   "hash": m.get("hash") or m.get("sha256") or ""}
+                   "hash": m.get("hash") or m.get("sha256") or "",
+                   "path": path}
             by_key[_model_key(title)] = row
             out.append(row)
         # the per-architecture dropdowns are where modular models live; merge
@@ -557,7 +546,8 @@ class SDClient:
                 if hit["arch"] == "sd" and arch != "sd":
                     hit["arch"] = arch        # it lives in a modular slot
                 continue
-            row = {"title": title, "arch": arch, "hash": "",
+            row = {"title": title, "arch": self._detect_arch(title, ""),
+                   "hash": "",
                    "from": f"forge_checkpoint_{arch}"}
             by_key[_model_key(title)] = row
             out.append(row)
@@ -565,6 +555,26 @@ class SDClient:
             self._models = out
             self._models_ts = time.time()
         return out
+
+    def _detect_arch(self, title: str, path: str) -> str:
+        """User pin > file bytes (Neo's own classifier) > name patterns."""
+        pinned = (self.known_arches or {}).get(_model_key(title))
+        if pinned:
+            return str(pinned).lower()
+        if path:
+            from neo_detect import guess_file
+            hit = guess_file(path)
+            if hit:
+                return hit
+        return guess_arch(title)
+
+    def set_known_arches(self, mapping: dict | None):
+        """Pin title -> architecture overrides (user-confirmed mappings)."""
+        self.known_arches = {
+            _model_key(k): str(v).lower()
+            for k, v in (mapping or {}).items() if k and v
+        }
+        self._models_ts = 0.0
 
     def list_samplers(self) -> list[str]:
         return list(self.capabilities().samplers)
@@ -603,21 +613,23 @@ class SDClient:
     def current_arch(self) -> str:
         """Architecture of the loaded checkpoint.
 
-        The file name wins when it says something: a Neo dropdown only records
-        which slot a model was picked from, and plenty of SDXL checkpoints sit
-        in the legacy `sd` slot (forge_preset / forge_checkpoint_sd can both
-        point at an XL file). The dropdowns are consulted only for names that
-        carry no architecture at all.
+        The file's own bytes win (Neo's classifier via neo_detect); the
+        per-architecture slot that holds the title is the next best hint, and
+        the name patterns come last.
         """
         title = self.current_model() or ""
-        arch = guess_arch(title)
-        if arch != "sd" or not title:
+        row = next((m for m in self.list_models()
+                    if _model_key(m.get("title") or "") == _model_key(title)),
+                   None)
+        arch = self._detect_arch(title, (row or {}).get("path", ""))
+        if arch != "sd":
             return arch
         opts = self.options()
         for a in self.capabilities().arches:
             if a == "sd":
                 continue
-            if str(opts.get(f"forge_checkpoint_{a}") or "").strip() == title:
+            slot = str(opts.get(f"forge_checkpoint_{a}") or "").strip()
+            if slot and _model_key(slot) == _model_key(title):
                 return a
         preset = str(opts.get("forge_preset") or "").lower()
         if preset in self.capabilities().arches and preset != "sd":
@@ -659,9 +671,14 @@ class SDClient:
         prof["label"] = ARCH_LABELS.get(arch, arch)
         opts = self.options()
         got = False
-        for key, field in (("sampler", "sampler"), ("scheduler", "scheduler"),
-                           ("cfg", "cfg"), ("steps", "steps"),
-                           ("dcfg", "dcfg")):
+        live_keys = (("sampler", "sampler"), ("scheduler", "scheduler"),
+                     ("cfg", "cfg"), ("steps", "steps"))
+        if arch in DISTILLED_ARCHES:
+            # only a real distilled family has a distilled CFG slider; the
+            # other families' `<arch>_t2i_dcfg` option is the Shift slider
+            # under a confusing key name — never send it
+            live_keys += (("dcfg", "dcfg"),)
+        for key, field in live_keys:
             val = opts.get(f"{arch}_t2i_{key}")
             if val is not None and val != "":
                 if field in ("cfg", "dcfg"):
@@ -678,8 +695,6 @@ class SDClient:
                     prof[field] = str(val)
                 got = True
         prof["from_server"] = got
-        if prof["dcfg"] is None and f"{arch}_t2i_dcfg" not in opts:
-            prof["dcfg"] = ARCH_PROFILES.get(arch, {}).get("dcfg")
         lo, hi = CFG_BANDS["distilled" if prof["distilled"] else "standard"]
         prof["cfg_range"] = [lo, hi]
         slo, shi = STEP_BANDS["distilled" if prof["distilled"] else "standard"]
@@ -693,20 +708,18 @@ class SDClient:
         A caller that is about to generate with a specific checkpoint must get
         *that* file's architecture, not whatever happens to be loaded — which
         is the normal case, because a model switch and the generation that
-        follows it are one step in the same tool call.
+        follows it are one step in the same tool call. Resolution order:
+        explicit argument > user pin > the file's own bytes > name patterns.
         """
         if arch:
             return str(arch).lower()
         if not model:
             return self.current_arch()
-        guess = guess_arch(model)
-        if guess != "sd":
-            return guess
-        # the name carries no architecture — only the server knows which
-        # family slot it is loaded under
-        if model == self.current_model():
-            return self.current_arch()
-        return "sd"
+        title = str(model)
+        row = next((m for m in self.list_models()
+                    if _model_key(m.get("title") or "") == _model_key(title)),
+                   None)
+        return self._detect_arch(title, (row or {}).get("path", ""))
 
     def architecture_summary(self) -> list[dict]:
         """One row per architecture the server knows — for the UI."""
@@ -735,107 +748,168 @@ class SDClient:
                   wait: bool = True) -> dict:
         """Switch checkpoint, attaching the companion files it needs.
 
-        Forge Neo keeps one dropdown per architecture plus a shared
-        `sd_model_checkpoint`; writing all of them in a single options POST
-        mirrors what the UI does when you pick a model, and means the model is
-        loaded once. `text_encoder` and a .safetensors `sd_vae` become
-        companion modules; a legacy .ckpt/.pt VAE goes to `sd_vae`; `low_bits`
-        sets the diffusion precision for that architecture.
+        The architecture is detected from the checkpoint's own bytes (Neo's
+        classifier, applied to the safetensors header) — not from its name,
+        which lies (Nova's "AM" fine-tunes are Anima models).
+
+        Companion modules go out as ONE options write together with the
+        checkpoint: Neo reads the *generic* `forge_additional_modules` when it
+        builds the loading parameters, and mirrors it into the per-arch slot,
+        so both are written — writing only the per-arch key (an earlier
+        version's mistake) leaves the active slot empty and the model loads
+        without its text encoder / VAE.
+
+        Auto-attach: for a modular family whose slot is empty, the required
+        companions (FAMILY_MODULES) are matched against the installed files
+        and attached automatically, so "generate with the Anima model" just
+        works. `text_encoder`/`sd_vae`/`low_bits` override that.
         """
         title = str(model_title or "").strip()
         if not title:
             raise SDWebUIError("no model given")
-        arch = (arch or guess_arch(title)).lower()
+        # resolve to the row list_models knows (gives us the file to detect)
+        row = next((m for m in self.list_models()
+                    if _model_key(m["title"]) == _model_key(title)), None)
+        arch = (arch or "").lower() \
+            or self._detect_arch(title, (row or {}).get("path", ""))
         caps = self.capabilities()
         if arch not in caps.arches:
             raise SDWebUIError(
                 f"this server has no {arch!r} architecture "
                 f"(known: {', '.join(caps.arches)})")
         opts = self.options()
+
         updates: dict = {"forge_preset": arch}
+        # slot keys hold the short name (what the Neo UI writes there);
+        # sd_model_checkpoint takes the full tile, which the loader matches
+        short = _model_key(title)
         if f"forge_checkpoint_{arch}" in opts:
-            updates[f"forge_checkpoint_{arch}"] = title
+            updates[f"forge_checkpoint_{arch}"] = short
         updates["sd_model_checkpoint"] = title
 
-        modules, mod_note = self._plan_modules(
-            opts, arch, text_encoder=text_encoder, sd_vae=sd_vae)
-        if mod_note:
+        modules, notes = self._plan_modules(
+            opts, arch, row=row, text_encoder=text_encoder, sd_vae=sd_vae)
+        if notes:
             updates["forge_additional_modules_" + arch] = modules
+            updates["forge_additional_modules"] = modules
+        else:
+            updates["forge_additional_modules"] = \
+                list(opts.get("forge_additional_modules_" + arch) or [])
         if low_bits is not None:
             value = norm_low_bits(low_bits)
-            if f"forge_unet_storage_dtype_{arch}" in opts:
-                updates[f"forge_unet_storage_dtype_{arch}"] = value
-            elif "forge_unet_storage_dtype" in opts:
-                updates["forge_unet_storage_dtype"] = value
+        else:
+            value = str(opts.get(f"forge_unet_storage_dtype_{arch}")
+                        or "Automatic")
+        if f"forge_unet_storage_dtype_{arch}" in opts:
+            updates[f"forge_unet_storage_dtype_{arch}"] = value
+        updates["forge_unet_storage_dtype"] = value
         if sd_vae is not None and _is_legacy_vae(sd_vae):
             updates["sd_vae"] = sd_vae
 
-        self.set_options(updates)
+        # modules first, checkpoint last: the loading parameters snapshot must
+        # already contain the companions when the checkpoint change lands
+        ordered = {k: updates[k] for k in sorted(updates, key=lambda k: (
+            0 if k.startswith("forge_additional_modules")
+            or k.startswith("forge_unet_storage_dtype")
+            or k == "forge_preset" else
+            1 if k.startswith("forge_checkpoint_") else 2))}
+        self.set_options(ordered)
         self._models_ts = 0.0
         if wait:
             self.wait_for_model(title)
         return {"model": self.current_model() or title, "arch": arch,
-                "modules": modules, "low_bits": norm_low_bits(low_bits)
-                if low_bits is not None else ""}
+                "modules": modules, "low_bits": value,
+                "notes": notes}
 
-    def _plan_modules(self, opts: dict, arch: str, *, text_encoder,
-                      sd_vae) -> tuple[list, str]:
-        """Work out the new companion list for an architecture.
+    def _plan_modules(self, opts: dict, arch: str, *, row: dict | None = None,
+                      text_encoder=None, sd_vae=None) -> tuple[list, list]:
+        """Work out the companion list for an architecture.
 
-        Returns (list, note) and the note is non-empty when something changed
-        — an empty note means the caller's request matched what was already
-        loaded, so the caller can skip the write and the reload it triggers.
+        Returns (modules, notes). Priority: explicit request > the arch's
+        saved slot > auto-attach from the family spec > keep whatever is
+        already there. Auto-attach is all-or-nothing: a partial set would load
+        and then fail deep inside the pipeline.
         """
-        key = f"forge_additional_modules_{arch}"
-        if key not in opts:
-            return [], ""
-        current = [str(m) for m in (opts.get(key) or [])]
+        current = [str(m) for m in (opts.get(
+            f"forge_additional_modules_{arch}") or [])]
         caps = self.capabilities()
-        te_files = set(caps.text_encoders)
-        vae_files = set(caps.vaes) | set(caps.other_modules)
+        installed: dict[str, str] = {}
+        for n in caps.text_encoders:
+            installed[n] = "text_encoder"
+        for n in caps.vaes + caps.other_modules:
+            installed.setdefault(n, "vae")
 
-        mods = list(current)
-        note = ""
-        if text_encoder is not None:
-            wanted = str(text_encoder).strip()
-            mods = [m for m in mods
-                    if m not in te_files and m.lower() not in
-                    ("none", "automatic", "built in")]
-            if wanted and wanted.lower() not in ("none", "automatic", "none"):
-                if wanted not in te_files:
-                    raise SDWebUIError(
-                        f"text encoder {wanted!r} was not found in the "
-                        f"server's text_encoder folder"
-                        + (f" (found: {', '.join(sorted(te_files))})"
-                           if te_files else " (that folder looks empty)"))
-                mods = [wanted] + mods
-            note = "text_encoder"
-        if sd_vae is not None and not _is_legacy_vae(sd_vae):
-            wanted = str(sd_vae).strip()
-            mods = [m for m in mods
-                    if m not in vae_files or m.lower() in
-                    ("none", "automatic", "built in")]
-            if wanted and wanted.lower() not in ("none", "automatic"):
-                if wanted not in vae_files:
-                    raise SDWebUIError(
-                        f"VAE {wanted!r} was not found in the server's VAE "
-                        f"folder"
-                        + (f" (found: {', '.join(sorted(vae_files))})"
-                           if vae_files else " (that folder looks empty)"))
-                mods = [wanted] + mods
-            note = note or "sd_vae"
-        # keep the server's own order convention: text encoders first
-        out, seen = [], set()
-        for m in mods:
-            if m and m not in seen:
-                seen.add(m)
-                out.append(m)
-        return out, note
+        if text_encoder is not None or (sd_vae is not None
+                                        and not _is_legacy_vae(sd_vae)):
+            mods = list(current)
+            notes = []
+            if text_encoder is not None:
+                wanted = str(text_encoder).strip()
+                mods = [m for m in mods if installed.get(m) != "text_encoder"]
+                if wanted and wanted.lower() not in ("none", "automatic"):
+                    if wanted not in installed:
+                        tes = sorted(n for n, k in installed.items()
+                                     if k == "text_encoder")
+                        raise SDWebUIError(
+                            f"text encoder {wanted!r} is not installed on "
+                            f"this server (found: "
+                            f"{', '.join(tes) if tes else 'nothing'})")
+                    mods.insert(0, wanted)
+                notes.append(f"text encoder: {wanted or 'cleared'}")
+            if sd_vae is not None and not _is_legacy_vae(sd_vae):
+                wanted = str(sd_vae).strip()
+                mods = [m for m in mods if installed.get(m) != "vae"]
+                if wanted and wanted.lower() not in ("none", "automatic"):
+                    if wanted not in installed:
+                        vaes = sorted(n for n, k in installed.items()
+                                      if k == "vae")
+                        raise SDWebUIError(
+                            f"VAE {wanted!r} is not installed on this server "
+                            f"(found: {', '.join(vaes) if vaes else 'nothing'})")
+                    mods.insert(0, wanted)
+                notes.append(f"VAE: {wanted or 'cleared'}")
+            out, seen = [], set()
+            for m in mods:
+                if m and m not in seen:
+                    seen.add(m)
+                    out.append(m)
+            return out, notes
+
+        # no explicit request: the arch's own slot if it has one, else the
+        # family spec (auto-attach), else nothing
+        if current:
+            return current, []
+        from neo_detect import FAMILY_MODULES
+        spec = FAMILY_MODULES.get(arch) or {}
+        if not spec:
+            return [], []
+        modules, missing = [], []
+        for kind, patterns in (("text_encoder", spec.get("text_encoder", [])),
+                               ("vae", spec.get("vae", []))):
+            got = sorted(n for n, k in installed.items() if k == kind
+                         and any(p in n.lower() for p in patterns))
+            if not got:
+                missing.append(f"{kind} matching "
+                               f"{' or '.join(patterns)}*")
+            else:
+                modules.append(got[0])
+        if missing:
+            raise SDWebUIError(
+                f"the {arch} architecture needs companion files this server "
+                f"does not have: {', '.join(missing)}. Install them into the "
+                f"WebUI's models/text_encoder and models/VAE folders, or "
+                f"pick them in Settings -> Image.")
+        return modules, [f"auto-attached {', '.join(modules)}"]
 
     def configure(self, arch: str | None = None, *, text_encoder=None,
                   sd_vae=None, low_bits=None, wait: bool = True) -> dict:
         """Assign companion files / precision for an architecture without
-        switching the checkpoint (this is the Settings > Image hook)."""
+        switching the checkpoint (this is the Settings > Image hook).
+
+        Like set_model, the result is written to BOTH the generic
+        forge_additional_modules / forge_unet_storage_dtype (what the loader
+        reads) and the per-arch keys (what the UI remembers).
+        """
         arch = (arch or self.current_arch()).lower()
         caps = self.capabilities()
         if arch not in caps.arches:
@@ -844,23 +918,26 @@ class SDClient:
                 f"(known: {', '.join(caps.arches)})")
         opts = self.options()
         updates: dict = {}
-        modules, note = self._plan_modules(opts, arch,
-                                           text_encoder=text_encoder,
-                                           sd_vae=sd_vae)
-        if note:
+        explicit = text_encoder is not None or (
+            sd_vae is not None and not _is_legacy_vae(sd_vae))
+        modules, notes = self._plan_modules(opts, arch,
+                                            text_encoder=text_encoder,
+                                            sd_vae=sd_vae)
+        if explicit or notes:
             updates[f"forge_additional_modules_{arch}"] = modules
+            updates["forge_additional_modules"] = modules
         if sd_vae is not None and _is_legacy_vae(sd_vae):
             updates["sd_vae"] = sd_vae
         if low_bits is not None:
             value = norm_low_bits(low_bits)
             if f"forge_unet_storage_dtype_{arch}" in opts:
                 updates[f"forge_unet_storage_dtype_{arch}"] = value
-            elif "forge_unet_storage_dtype" in opts:
-                updates["forge_unet_storage_dtype"] = value
+            updates["forge_unet_storage_dtype"] = value
         self.set_options(updates)
         if wait and updates:
             self.wait_until_ready(max_wait=180)
         return {"arch": arch, "modules": modules, "changed": sorted(updates),
+                "notes": notes,
                 "low_bits": str(opts.get(f"forge_unet_storage_dtype_{arch}")
                                 or "")}
 

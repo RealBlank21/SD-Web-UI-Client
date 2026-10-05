@@ -1227,11 +1227,40 @@ async function openSettings() {
     els.shLlm.value = (s.llm || []).join(", ");
     els.shModels.textContent = "";
     if (s.models.length) {
-      for (const m of s.models) {
-        const o = el("option", null, m);
-        o.value = m;
-        if (m === s.current_model) o.selected = true;
-        els.shModels.appendChild(o);
+      // group by detected architecture — the bytes decide the family (a
+      // Nova "AM" file is an Anima model even though the name hides it), and
+      // seeing the groups makes a wrong guess obvious
+      const detail = s.model_detail || [];
+      const groups = new Map();
+      const seen = new Set();
+      for (const m of detail) {
+        if (!groups.has(m.arch)) groups.set(m.arch, []);
+        groups.get(m.arch).push(m.title);
+        seen.add(m.title);
+      }
+      const other = s.models.filter((t) => !seen.has(t));
+      const label = (a) => (((sdCaps.architectures || [])
+        .find((r) => r.arch === a) || {}).label) || a;
+      const addOpt = (parent, t) => {
+        const o = el("option", null, t);
+        o.value = t;
+        if (t === s.current_model
+            || (s.current_model && t.startsWith(s.current_model))) {
+          o.selected = true;
+        }
+        parent.appendChild(o);
+      };
+      if (other.length) {
+        const g = document.createElement("optgroup");
+        g.label = "Other";
+        for (const t of other) addOpt(g, t);
+        els.shModels.appendChild(g);
+      }
+      for (const [arch, titles] of groups) {
+        const g = document.createElement("optgroup");
+        g.label = label(arch);
+        for (const t of titles) addOpt(g, t);
+        els.shModels.appendChild(g);
       }
       els.shLoad.disabled = false;
     } else {
