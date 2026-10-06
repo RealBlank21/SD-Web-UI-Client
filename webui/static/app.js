@@ -1268,15 +1268,22 @@ function toggleLbInfo(open) {
    element (hidden) as the single source of truth for .value and replace
    only the popup with an anchored, themed panel. */
 
-const dd = { backdrop: null, panel: null, anchor: null, onKey: null, onScroll: null };
+const dd = { backdrop: null, panel: null, anchor: null, onKey: null, onView: null, raf: 0 };
 
 function ddClose() {
   if (!dd.backdrop) return;
   dd.backdrop.remove();
   document.removeEventListener("keydown", dd.onKey, true);
-  window.removeEventListener("scroll", dd.onScroll, true);
-  window.removeEventListener("resize", dd.onScroll);
-  dd.backdrop = dd.panel = dd.anchor = dd.onKey = dd.onScroll = null;
+  window.removeEventListener("scroll", dd.onView, true);
+  window.removeEventListener("resize", dd.onView);
+  const vv = window.visualViewport;
+  if (vv) {
+    vv.removeEventListener("resize", dd.onView);
+    vv.removeEventListener("scroll", dd.onView);
+  }
+  if (dd.raf) cancelAnimationFrame(dd.raf);
+  dd.backdrop = dd.panel = dd.anchor = dd.onKey = dd.onView = null;
+  dd.raf = 0;
 }
 
 /** Open the themed panel under `anchor`. items: [{value, label, group?, dim?}]
@@ -1288,14 +1295,6 @@ function ddOpen(anchor, items, current, onPick) {
   const panel = el("div", "dd-panel");
   const list = el("div", "dd-list");
   dd.onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); ddClose(); } };
-  // close on real scrolls only — the anchor moving is what matters, so
-  // programmatic scrolls that don't displace the field can't kill the panel
-  const r0 = anchor.getBoundingClientRect();
-  dd.onScroll = () => {
-    if (!dd.anchor) return;
-    const r1 = dd.anchor.getBoundingClientRect();
-    if (Math.abs(r1.top - r0.top) > 2 || Math.abs(r1.left - r0.left) > 2) ddClose();
-  };
 
   const searchable = items.length > 8;
   let query = "";
@@ -1341,22 +1340,73 @@ function ddOpen(anchor, items, current, onPick) {
     (e) => { if (e.target === backdrop) ddClose(); });
   document.body.appendChild(backdrop);
 
-  // position under the anchor; flip above when there is no room below
-  const r = anchor.getBoundingClientRect();
-  const vw = document.documentElement.clientWidth;
-  const w = Math.min(Math.max(r.width, 210), vw - 16);
-  panel.style.minWidth = w + "px";
-  panel.style.maxHeight = Math.round(window.innerHeight * 0.58) + "px";
-  panel.style.left = Math.min(Math.max(8, r.left), Math.max(8, vw - w - 8)) + "px";
-  requestAnimationFrame(() => {
-    if (dd.backdrop !== backdrop) return;      // closed again already
+  // position under the anchor; flip above when there is no room below.
+  //
+  // The panel FOLLOWS the anchor instead of closing when it moves. On a phone
+  // the anchor shifts for reasons the user never asked for — momentum left
+  // over from the tap that opened the menu, the soft keyboard, the collapsing
+  // URL bar, scroll chaining from the list — and the old 2px tolerance closed
+  // the menu on every one of them, so the options and the filter box were
+  // unreachable. Worst of all the tap itself was the trigger: the button is
+  // pressed with scale(.97) while click() runs, so the anchor was measured
+  // ~1.5% of its width off and the next scroll event dismissed the menu the
+  // instant it appeared. Only a field that has actually left the visible area
+  // closes it now.
+  let seen = "";                        // anchor + visible area; skip no-op frames
+  const place = () => {
+    const r = anchor.getBoundingClientRect();
+    const vv = window.visualViewport;
+    // the keyboard shrinks the visual viewport, not the window: measure
+    // against what the user can actually see so the filter stays reachable
+    const vTop = vv ? vv.offsetTop : 0;
+    const vLeft = vv ? vv.offsetLeft : 0;
+    const vH = vv ? vv.height : window.innerHeight;
+    const vW = vv ? vv.width : document.documentElement.clientWidth;
+    // scrolling the list moves neither the field nor the visible area — skip
+    // the reflow rather than re-measure it on every frame of a drag
+    const sig = [r.left, r.top, r.width, vTop, vLeft, vH, vW].map(Math.round).join();
+    if (sig === seen) return;
+    seen = sig;
+    if (r.bottom < vTop + 4 || r.top > vTop + vH - 4
+        || r.right < vLeft + 4 || r.left > vLeft + vW - 4) { ddClose(); return; }
+    const w = Math.min(Math.max(r.width, 210), vW - 16);
+    panel.style.minWidth = w + "px";
+    panel.style.maxHeight = Math.round(vH * 0.58) + "px";
+    panel.style.left = Math.round(
+      Math.min(Math.max(8, r.left), Math.max(8, vLeft + vW - w - 8))) + "px";
+    // park at the top edge first so offsetHeight is measured at the real width
+    panel.style.top = Math.round(
+      Math.min(Math.max(vTop + 8, r.top), Math.max(vTop + 8, vTop + vH - 8))) + "px";
     const ph = panel.offsetHeight;
     let top = r.bottom + 6;
-    if (top + ph > window.innerHeight - 8) top = r.top - ph - 6;
-    panel.style.top = Math.max(8, top) + "px";
+    if (top + ph > vTop + vH - 8) top = r.top - ph - 6;      // flip above
+    panel.style.top = Math.round(
+      Math.max(vTop + 8, Math.min(top, vTop + vH - 8 - ph))) + "px";
+  };
+
+  const onView = () => {                                    // one frame per burst
+    if (!dd.backdrop || dd.raf) return;
+    dd.raf = requestAnimationFrame(() => { dd.raf = 0; place(); });
+  };
+
+  dd.backdrop = backdrop;
+  dd.panel = panel;
+  dd.anchor = anchor;
+  dd.onView = onView;
+  document.addEventListener("keydown", dd.onKey, true);
+  window.addEventListener("scroll", onView, true);
+  window.addEventListener("resize", onView);
+  const vv = window.visualViewport;
+  if (vv) {
+    vv.addEventListener("resize", onView);
+    vv.addEventListener("scroll", onView);
+  }
+  place();                                    // no unpositioned first frame
+  requestAnimationFrame(() => {
+    if (dd.backdrop !== backdrop) return;      // closed again already
     panel.classList.add("in");
     // scroll the selected row into view WITHOUT touching ancestor scrollers
-    // (scrollIntoView would scroll the page behind and trip onScroll)
+    // (scrollIntoView would scroll the page behind and re-place the panel)
     const cur = list.querySelector(".dd-item.on");
     if (cur) {
       list.scrollTop = cur.offsetTop - (list.clientHeight - cur.offsetHeight) / 2;
@@ -1365,13 +1415,6 @@ function ddOpen(anchor, items, current, onPick) {
       search.focus({ preventScroll: true });
     }
   });
-
-  dd.backdrop = backdrop;
-  dd.panel = panel;
-  dd.anchor = anchor;
-  document.addEventListener("keydown", dd.onKey, true);
-  window.addEventListener("scroll", dd.onScroll, true);
-  window.addEventListener("resize", dd.onScroll);
 }
 
 function ddOptions(sel) {

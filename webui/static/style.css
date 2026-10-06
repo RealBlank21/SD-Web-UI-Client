@@ -937,6 +937,10 @@ button:active { transform: scale(.97); }
 }
 .dd-btn::after { content: "▾"; color: var(--dim); font-size: 12px; flex: none; }
 .dd-btn.dd-empty { color: var(--dim); }
+/* the popup anchors itself to this box, and the tap that opens it is still
+   held when the box is measured — the global button:active scale would move
+   the anchor ~1.5% of its width mid-measure, so press with a tint instead */
+.dd-btn:active { transform: none; background: var(--panel2); }
 .dd-btn:focus { border-color: #4a3f78; }
 .row .dd-btn { flex: 1; min-width: 0; }
 .regen-full .dd-btn { font-size: 14px; padding: 9px 11px; border-radius: 11px; min-height: 0; }
@@ -968,6 +972,7 @@ button:active { transform: scale(.97); }
   position: relative;              // offsetParent for .dd-item scrolling
   flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain; padding: 6px;
+  touch-action: pan-y;             // no sideways drag: it would swipe the page back
 }
 .dd-group {
   padding: 9px 10px 4px; font-size: 10.5px; text-transform: uppercase;
