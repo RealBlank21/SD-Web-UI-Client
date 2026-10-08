@@ -1,7 +1,56 @@
 /* SD Agent — frontend logic (PWA) */
 "use strict";
 
+/* ------------------------------------------------- version-skew guard (FIRST)
+   index.html and app.js are versioned independently, so a tab can end up
+   holding an index.html that asks for a script the server has already moved
+   on from — after a deploy, mid-refresh, or when the service worker falls back
+   to a cached shell. The old HTML then lacks elements this script wires up,
+   and a top-level `null.addEventListener` throws: every later line is dead,
+   including the service-worker reload further down, so the app never recovers
+   on its own. It looked like "the character list won't load".
+
+   So: notice the skew before anything else can throw, and reload once onto
+   matching assets. `on()` below keeps a missing element from being fatal even
+   if this guard is itself out of date. */
+(function guardSkew() {
+  // one id added by each version since the wiring went null-safe; if the newest
+  // one is missing, this DOM predates this script
+  const probe = ["llm-chain", "sh-llm-pick"];
+  if (probe.some((id) => document.getElementById(id))) return;
+  const tries = Number(sessionStorage.getItem("skew-reload") || 0);
+  if (tries >= 2) return;                  // give up rather than reload forever
+  sessionStorage.setItem("skew-reload", String(tries + 1));
+  // cache-bust the shell so the reload cannot be answered from the same cache
+  location.replace(location.pathname + "?r=" + Date.now());
+})();
+
 const $ = (id) => document.getElementById(id);
+
+/** addEventListener that tolerates a missing element. Returns the element (or
+    null) so callers can still chain when they need to. */
+function on(id, event, fn, opts) {
+  const el = typeof id === "string" ? $(id) : id;
+  if (el) el.addEventListener(event, fn, opts);
+  return el;
+}
+
+/* Register the service worker FIRST too: the skew guard above and the takeover
+   reload are the app's only self-repair, so nothing above may throw before
+   them. (Moved out of the bottom of the file, where a single bad listener
+   above could take them down with it.) */
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data && e.data.type === "sw-takeover" &&
+        !sessionStorage.getItem("sw-reloaded")) {
+      sessionStorage.setItem("sw-reloaded", "1");
+      location.reload();
+    }
+  });
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => { /* optional */ });
+  });
+}
 
 const els = {
   gate: $("gate"), gatePw: $("gate-pw"), gateBtn: $("gate-btn"),
@@ -3637,15 +3686,15 @@ $("sh-save-llm").addEventListener("click", () => {
   }
   saveSettings({ llm: v }, $("sh-save-llm"), "LLM chain saved");
 });
-els.shLlmPick.addEventListener("click", openLlmPicker);
-els.shLlmRefresh.addEventListener("click", () => loadLlmModels(true));
-els.shLlmAddGo.addEventListener("click", () => {
+on("sh-llm-pick", "click", openLlmPicker);
+on("sh-llm-refresh", "click", () => loadLlmModels(true));
+on("sh-llm-addgo", "click", () => {
   const v = els.shLlmAdd.value.trim();
   if (!v) return;
   addLlmModel(v);
   els.shLlmAdd.value = "";
 });
-els.shLlmAdd.addEventListener("keydown", (e) => {
+on("sh-llm-add", "keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); els.shLlmAddGo.click(); }
 });
 $("sh-save-sd").addEventListener("click", async () => {
@@ -4291,18 +4340,6 @@ ddInit();                            // themed dropdowns over native popups
 
 /* --------------------------------------------------------------- PWA SW */
 
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => { /* optional */ });
-
-    // When a new service worker takes over (e.g. right after an update),
-    // this page was rendered with possibly-stale assets — reload once.
-    navigator.serviceWorker.addEventListener("message", (e) => {
-      if (e.data && e.data.type === "sw-takeover" &&
-          !sessionStorage.getItem("sw-reloaded")) {
-        sessionStorage.setItem("sw-reloaded", "1");
-        location.reload();
-      }
-    });
-  });
-}
+/* registration and the takeover-reload live at the top of this file, next to
+   the version-skew guard: they are the app's self-repair and must not sit
+   below code that can throw. */
