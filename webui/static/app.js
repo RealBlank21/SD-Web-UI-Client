@@ -50,6 +50,10 @@ const els = {
   scsDelete: $("scs-delete"),
   shCur: $("sh-cur"), shSd: $("sh-sd"), shLlm: $("sh-llm"), shKey: $("sh-key"),
   shKeymask: $("sh-keymask"), shSdok: $("sh-sdok"),
+  llmChain: $("llm-chain"), shLlmState: $("sh-llm-state"),
+  shLlmPick: $("sh-llm-pick"), shLlmRefresh: $("sh-llm-refresh"),
+  shLlmAdd: $("sh-llm-add"), shLlmAddGo: $("sh-llm-addgo"),
+  shModelhint: $("sh-modelhint"),
   shArch: $("sh-arch"), shComps: $("sh-comps"),
   shCompActions: $("sh-comp-actions"),
   shUsername: $("sh-username"),
@@ -1525,7 +1529,148 @@ function setPsTab(name) {
     s.hidden = s.dataset.pane !== name;
   }
   document.querySelector(".ps-body").scrollTop = 0;
+  if (name === "llm") loadLlmModels(false);     // the picker needs the list
 }
+
+/* ------------------------------------- LLM chain (OpenRouter model picker) */
+
+/** OpenRouter's catalogue: [{id, name, ctx, tools, in, out}], tools-capable
+ *  first (the agent drives images through function calling). */
+let llmModels = [];
+let llmModelsAsked = false;
+
+async function loadLlmModels(force) {
+  if (!force && llmModelsAsked && llmModels.length) return;
+  llmModelsAsked = true;
+  els.shLlmState.textContent = llmModels.length ? "· refreshing…" : "· loading…";
+  try {
+    const d = await api("/api/llm/models" + (force ? "?refresh=1" : ""));
+    llmModels = d.models || [];
+    els.shLlmState.textContent = llmModels.length
+      ? `· ${llmModels.length} models` : "· list unavailable";
+    renderLlmChain();          // names/prices only resolve once we have the list
+    if (d.error) toast(d.error, true);
+  } catch (e) {
+    if (e.message === "locked") return;
+    els.shLlmState.textContent = llmModels.length
+      ? `· ${llmModels.length} models (cached)` : "· list unavailable";
+    toast("Could not load the model list: " + e.message, true);
+  }
+}
+
+function llmModelById(id) {
+  return llmModels.find((m) => m.id === id) || null;
+}
+
+/** "USD per million tokens", which is how OpenRouter itself quotes. */
+function llmPrice(m) {
+  const one = (n) => `$${(n >= 0.1 ? n.toFixed(2) : n.toFixed(3))}/M`;
+  const a = m.in ? one(m.in) : "free";
+  return m.out ? `${a} in · ${one(m.out)} out` : a;
+}
+
+function llmCtx(n) {
+  if (!n) return "";
+  return n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M ctx`
+    : `${Math.round(n / 1000)}k ctx`;
+}
+
+/** One dropdown row: name · id · price · context · tool-calling warning. */
+function llmLabel(m) {
+  const bits = [m.name];
+  if (m.id !== m.name) bits.push(m.id);
+  if (m.in || m.out) bits.push(llmPrice(m));
+  if (m.ctx) bits.push(llmCtx(m.ctx));
+  if (!m.tools) bits.push("no tools");
+  return bits.join(" · ");
+}
+
+function llmChain() {
+  return els.shLlm.value.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function setLlmChain(list) {
+  els.shLlm.value = list.join(", ");
+  renderLlmChain();
+}
+
+function addLlmModel(id) {
+  const chain = llmChain();
+  if (!id || chain.includes(id)) return;
+  chain.push(id);
+  setLlmChain(chain);
+}
+
+function renderLlmChain() {
+  const box = els.llmChain;
+  const chain = llmChain();
+  box.textContent = "";
+  if (!chain.length) {
+    box.appendChild(el("div", "hint", "No models yet — the chain needs at "
+      + "least one, and it has to be a model id like vendor/model."));
+    return;
+  }
+  chain.forEach((id, i) => {
+    const m = llmModelById(id);
+    const row = el("div", "llm-row");
+    const main = el("div", "llm-row-main");
+    // the chain is stored as ids, so an id the catalogue does not know is
+    // legal (a private or brand-new model) — just not annotated
+    main.appendChild(el("b", null, m ? m.name : id));
+    main.appendChild(el("span", "mono dim llm-id", m ? m.id
+      : (llmModels.length ? "not in the OpenRouter list" : "checking…")));
+    if (m) {
+      main.appendChild(el("span", "dim", llmPrice(m) + (m.ctx ? " · " + llmCtx(m.ctx) : "")));
+      if (!m.tools) main.appendChild(el("span", "dim llm-warn", "· no tools"));
+    }
+    row.appendChild(main);
+    const btns = el("div", "llm-row-btns");
+    const mk = (glyph, title, fn) => {
+      const b = el("button", "iconbtn", glyph);
+      b.type = "button";
+      b.title = title;
+      b.setAttribute("aria-label", title);
+      if (!fn) b.disabled = true;
+      else b.addEventListener("click", fn);
+      btns.appendChild(b);
+      return b;
+    };
+    mk("↑", "move up", i > 0 ? (() => {
+      const c = llmChain();
+      [c[i - 1], c[i]] = [c[i], c[i - 1]];
+      setLlmChain(c);
+    }) : null);
+    mk("↓", "move down", i < chain.length - 1 ? (() => {
+      const c = llmChain();
+      [c[i + 1], c[i]] = [c[i], c[i + 1]];
+      setLlmChain(c);
+    }) : null);
+    mk("✕", "remove from the chain", () => {
+      setLlmChain(llmChain().filter((x) => x !== id));
+    });
+    row.appendChild(btns);
+    box.appendChild(row);
+  });
+}
+
+function openLlmPicker() {
+  if (!llmModels.length) {
+    loadLlmModels(false);
+    toast("Fetching the OpenRouter list…");
+    return;
+  }
+  const chain = llmChain();
+  const items = llmModels.map((m) => ({
+    value: m.id,
+    label: llmLabel(m) + (chain.includes(m.id) ? "  ✓" : ""),
+    dim: chain.includes(m.id),
+  }));
+  ddOpen(els.shLlmPick, items, "", (id) => addLlmModel(id));
+}
+
+/** The image-server URL the server is actually using — kept so a refused save
+ *  can put the working address back in the box. */
+let lastSdUrl = "";
 
 async function openSettings() {
   els.pageSettings.hidden = false;
@@ -1534,60 +1679,20 @@ async function openSettings() {
   try {
     // refresh=1 → server asks SD to rescan its models dir, fresh list
     const s = await api("/api/status?refresh=1");
-    sdCaps = s.capabilities || {};
-    els.shSdok.textContent = s.sd_ok ? "· connected" : "· unreachable";
-    els.shCur.textContent = s.current_model ? `· now: ${s.current_model}` : "";
-    els.shArch.textContent = s.current_arch ? `· loaded: ${s.current_arch}` : "";
     els.shLlm.value = (s.llm || []).join(", ");
-    els.shModels.textContent = "";
-    if (s.models.length) {
-      // group by detected architecture — the bytes decide the family (a
-      // Nova "AM" file is an Anima model even though the name hides it), and
-      // seeing the groups makes a wrong guess obvious
-      const detail = s.model_detail || [];
-      const groups = new Map();
-      const seen = new Set();
-      for (const m of detail) {
-        if (!groups.has(m.arch)) groups.set(m.arch, []);
-        groups.get(m.arch).push(m.title);
-        seen.add(m.title);
-      }
-      const other = s.models.filter((t) => !seen.has(t));
-      const label = (a) => (((sdCaps.architectures || [])
-        .find((r) => r.arch === a) || {}).label) || a;
-      const addOpt = (parent, t) => {
-        const o = el("option", null, t);
-        o.value = t;
-        if (t === s.current_model
-            || (s.current_model && t.startsWith(s.current_model))) {
-          o.selected = true;
-        }
-        parent.appendChild(o);
-      };
-      if (other.length) {
-        const g = document.createElement("optgroup");
-        g.label = "Other";
-        for (const t of other) addOpt(g, t);
-        els.shModels.appendChild(g);
-      }
-      for (const [arch, titles] of groups) {
-        const g = document.createElement("optgroup");
-        g.label = label(arch);
-        for (const t of titles) addOpt(g, t);
-        els.shModels.appendChild(g);
-      }
-      els.shLoad.disabled = false;
-    } else {
-      els.shModels.appendChild(el("option", null, s.sd_ok ? "(no models)" : "(server unreachable)"));
-      els.shLoad.disabled = true;
-    }
-    if (els.shModels._ddSync) els.shModels._ddSync();
+    renderLlmChain();
+    paintImageTab(s);
+    onSdSettled(paintImageTab);
     // masked key display (GET /api/settings)
     try {
       const cfg = await api("/api/settings");
       els.shKeymask.textContent = cfg.key_masked ? `· ${cfg.key_masked}` : "· not set";
       els.shSd.value = cfg.sd_url || "";
-      if (!els.shLlm.value) els.shLlm.value = (cfg.llm || []).join(", ");
+      lastSdUrl = els.shSd.value;
+      if (!els.shLlm.value) {
+        els.shLlm.value = (cfg.llm || []).join(", ");
+        renderLlmChain();
+      }
       els.shSys.value = cfg.system_prompt || "";
       els.shSysState.textContent = cfg.system_prompt_custom ? "· custom" : "· default";
       els.shUsername.value = cfg.username || "";
@@ -1601,6 +1706,103 @@ async function openSettings() {
   } catch (e) {
     if (e.message !== "locked") toast("Status failed: " + e.message, true);
   }
+}
+
+/** Paint Settings → Image from a /api/status snapshot. Split out of
+ *  openSettings because the server now resolves the image server off-thread:
+ *  the first status after a URL change says "connecting", and this has to be
+ *  repaintable when the real answer lands. */
+function paintImageTab(s) {
+  sdCaps = s.capabilities || {};
+  els.shSdok.textContent = s.sd_ok ? "· connected"
+    : (s.sd_pending ? "· connecting…" : "· unreachable");
+  els.shSdok.title = s.sd_error || "";
+  els.shCur.textContent = s.current_model ? `· now: ${s.current_model}` : "";
+  els.shArch.textContent = s.current_arch ? `· loaded: ${s.current_arch}` : "";
+  els.shModelhint.textContent = s.sd_ok
+    ? "Loading a checkpoint takes 10-30 s."
+    : (s.sd_error || (s.sd_pending ? "Contacting the image server…"
+      : "No image server answering."));
+  els.shModels.textContent = "";
+  if (s.models.length) {
+    // group by detected architecture — the bytes decide the family (a
+    // Nova "AM" file is an Anima model even though the name hides it), and
+    // seeing the groups makes a wrong guess obvious
+    const detail = s.model_detail || [];
+    const groups = new Map();
+    const seen = new Set();
+    for (const m of detail) {
+      if (!groups.has(m.arch)) groups.set(m.arch, []);
+      groups.get(m.arch).push(m.title);
+      seen.add(m.title);
+    }
+    const other = s.models.filter((t) => !seen.has(t));
+    const label = (a) => (((sdCaps.architectures || [])
+      .find((r) => r.arch === a) || {}).label) || a;
+    const addOpt = (parent, t) => {
+      const o = el("option", null, t);
+      o.value = t;
+      if (t === s.current_model
+          || (s.current_model && t.startsWith(s.current_model))) {
+        o.selected = true;
+      }
+      parent.appendChild(o);
+    };
+    if (other.length) {
+      const g = document.createElement("optgroup");
+      g.label = "Other";
+      for (const t of other) addOpt(g, t);
+      els.shModels.appendChild(g);
+    }
+    for (const [arch, titles] of groups) {
+      const g = document.createElement("optgroup");
+      g.label = label(arch);
+      for (const t of titles) addOpt(g, t);
+      els.shModels.appendChild(g);
+    }
+    els.shLoad.disabled = false;
+  } else {
+    els.shModels.appendChild(el("option", null,
+      s.sd_pending ? "(connecting…)"
+        : (s.sd_ok ? "(no models)" : "(server unreachable)")));
+    els.shLoad.disabled = true;
+  }
+  if (els.shModels._ddSync) els.shModels._ddSync();
+  // the companion card is built from the same capability lists, and those land
+  // with the checkpoint list — without this it kept claiming "no modular
+  // architectures" until the Settings page was reopened
+  renderComps(s.current_arch || compArch);
+}
+
+/** Re-run `fn(status)` once the server's background image-server probe settles.
+ *
+ * The server answers /api/status from a cache and resolves the WebUI in a
+ * worker thread, so a status can legitimately arrive while the answer is
+ * still "connecting" — right after a server switch, or on a cold app start.
+ * Anything that renders checkpoint lists registers here instead of showing an
+ * empty picker and hoping the user comes back later.
+ */
+let sdWaiters = [];
+let sdPumpTimer = null;
+
+function onSdSettled(fn) {
+  sdWaiters.push(fn);
+  pumpSdSettled();
+}
+
+function pumpSdSettled() {
+  if (sdPumpTimer) return;
+  sdPumpTimer = setTimeout(async () => {
+    sdPumpTimer = null;
+    const s = await refreshStatus();
+    if (!s) return;                           // locked or offline — drop it
+    if (s.sd_pending) { pumpSdSettled(); return; }
+    const waiters = sdWaiters;
+    sdWaiters = [];
+    for (const fn of waiters) {
+      try { fn(s); } catch (e) { console.warn(e); }
+    }
+  }, 1200);
 }
 
 /* ------------------------------------------- model components (Forge Neo) */
@@ -1787,7 +1989,7 @@ let pendingCover = "";        // character's first image, dataURL while editing
 let pendingScCover = "";      // scenario's first image, dataURL while editing
 let clearAvatar = false, clearCover = false, clearScCover = false;
 
-async function refreshChars() {
+async function refreshChars(watched) {
   try {
     const [d, s] = await Promise.all([
       api("/api/characters"),
@@ -1798,6 +2000,9 @@ async function refreshChars() {
     statusModels = s.models || [];
     sdModelDetail = s.model_detail || [];
     sdCaps = s.capabilities || sdCaps;
+    // the checkpoint list arrives empty while the server is still resolving
+    // the image server — repaint when it does
+    if (s.sd_pending && !watched) onSdSettled(() => refreshChars(true));
   } catch (e) {
     if (e.message !== "locked") toast("Characters failed: " + e.message, true);
   }
@@ -3426,11 +3631,52 @@ $("sh-save-key").addEventListener("click", () => {
 });
 $("sh-save-llm").addEventListener("click", () => {
   const v = els.shLlm.value.trim();
-  if (v) saveSettings({ llm: v }, $("sh-save-llm"), "LLM chain saved");
+  if (!v) {
+    toast("Add at least one model to the chain", true);
+    return;
+  }
+  saveSettings({ llm: v }, $("sh-save-llm"), "LLM chain saved");
 });
-$("sh-save-sd").addEventListener("click", () => {
+els.shLlmPick.addEventListener("click", openLlmPicker);
+els.shLlmRefresh.addEventListener("click", () => loadLlmModels(true));
+els.shLlmAddGo.addEventListener("click", () => {
+  const v = els.shLlmAdd.value.trim();
+  if (!v) return;
+  addLlmModel(v);
+  els.shLlmAdd.value = "";
+});
+els.shLlmAdd.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); els.shLlmAddGo.click(); }
+});
+$("sh-save-sd").addEventListener("click", async () => {
   const v = els.shSd.value.trim();
-  if (v) saveSettings({ sd_url: v }, $("sh-save-sd"), "SD URL saved");
+  if (!v) return;
+  const btn = $("sh-save-sd"), orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  try {
+    // the server probes the address before saving it, so this either switches
+    // to a live image server or fails with the old one still running
+    const d = await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sd_url: v }),
+    });
+    lastSdUrl = v;
+    toast(d.sd_model ? `Connected — running ${d.sd_model}`
+      : "Image server connected");
+  } catch (e) {
+    if (e.message !== "locked") {
+      toast(e.message, true);
+      els.shSd.value = lastSdUrl || els.shSd.value;   // put the good one back
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+    refreshStatus().then((s) => {
+      if (s) { paintImageTab(s); onSdSettled(paintImageTab); }
+    });
+  }
 });
 $("sh-save-sys").addEventListener("click", () => {
   const v = els.shSys.value.trim();

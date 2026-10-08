@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=51">
+<link rel="stylesheet" href="/static/style.css?v=52">
 </head>
 <body>
 
@@ -325,9 +325,20 @@
       <button id="sh-save-key" class="primary">Save API key</button>
       <div class="hint">Create a key at openrouter.ai/keys — it stays on this server.</div>
 
-      <label>LLM models — comma-separated fallback chain</label>
-      <input id="sh-llm" class="mono" spellcheck="false" autocomplete="off" autocapitalize="off">
+      <label>LLM models <span class="dim" id="sh-llm-state"></span></label>
+      <input id="sh-llm" class="dd-host">
+      <div id="llm-chain" class="llm-chain"></div>
+      <div class="row llm-pick">
+        <button id="sh-llm-pick">Choose from OpenRouter…</button>
+        <button id="sh-llm-refresh" aria-label="Refresh the model list" title="Refresh the model list">↻</button>
+      </div>
+      <div class="row llm-pick">
+        <input id="sh-llm-add" class="mono" spellcheck="false" autocomplete="off"
+               autocapitalize="off" placeholder="…or paste an id: vendor/model">
+        <button id="sh-llm-addgo">Add</button>
+      </div>
       <button id="sh-save-llm">Save LLM chain</button>
+      <div class="hint">Tried top to bottom — the first model that answers takes the turn. A model marked <span class="mono">no tools</span> can talk, but cannot call generate_image.</div>
 
       <label>System message <span class="dim" id="sh-sysstate"></span></label>
       <textarea id="sh-sysprompt" class="mono" rows="8" spellcheck="false"
@@ -344,6 +355,7 @@
       <input id="sh-sd" class="mono" spellcheck="false" autocomplete="off" autocapitalize="off"
              placeholder="http://100.93.220.68:7860">
       <button id="sh-save-sd">Save SD URL</button>
+      <div class="hint">Checked before it is saved — a server that does not answer is refused, so the one you have keeps running.</div>
 
       <label>Checkpoint <span class="dim" id="sh-cur"></span></label>
       <div class="row">
@@ -602,6 +614,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=51"></script>
+<script src="/static/app.js?v=52"></script>
 </body>
 </html>

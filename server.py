@@ -145,6 +145,100 @@ def load_session_secret() -> bytes:
     return secret
 
 
+# ------------------------------------------------- OpenRouter model catalogue
+
+OR_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OR_MODELS_FILE = DATA_DIR / "or_models.json"
+OR_TTL = 24 * 3600         # the catalogue moves slowly; a day is plenty
+OR_FETCH_TIMEOUT = 12
+
+
+def _usd_per_million(value) -> float:
+    """OpenRouter quotes USD per token; the picker shows USD per million."""
+    try:
+        return round(float(value) * 1e6, 4)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def fetch_openrouter_models(key: str = "", force: bool = False) -> dict:
+    """OpenRouter's model catalogue for the Settings picker, cached on disk.
+
+    Typing "vendor/model-slug" from memory is how a fallback chain ends up
+    pointing at something that does not exist, so the list is queried instead
+    and refreshed at most once a day. A failed refresh keeps serving the last
+    good list (with an `error` to show): openrouter.ai having a bad minute must
+    not empty the picker.
+    """
+    try:
+        cache = json.loads(OR_MODELS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(cache, dict):
+            cache = {}
+    except Exception:                                    # noqa: BLE001
+        cache = {}
+    ts = float(cache.get("ts") or 0)
+    cached = cache.get("models") or []
+    if cached and not force and time.time() - ts < OR_TTL:
+        return {"models": cached, "ts": ts, "error": ""}
+
+    headers = {"Accept": "application/json"}
+    if key:
+        # with the user's key, so the list reflects what their account may use
+        headers["Authorization"] = "Bearer " + key
+    try:
+        resp = requests.get(OR_MODELS_URL, headers=headers,
+                            timeout=OR_FETCH_TIMEOUT)
+        resp.raise_for_status()
+        raw = (resp.json() or {}).get("data") or []
+    except Exception as e:                               # noqa: BLE001
+        return {"models": cached, "ts": ts,
+                "error": f"could not reach OpenRouter ({type(e).__name__}) — "
+                         f"showing the last known list"}
+    if not raw:
+        # an empty catalogue would silently empty the picker; treat it as a
+        # failed refresh and keep what we have
+        return {"models": cached, "ts": ts,
+                "error": "OpenRouter returned no models — "
+                         "showing the last known list"}
+
+    models = []
+    for m in raw:
+        if not isinstance(m, dict):
+            continue
+        mid = str(m.get("id") or "").strip()
+        if not mid:
+            continue
+        price = m.get("pricing") if isinstance(m.get("pricing"), dict) else {}
+        try:
+            ctx = int(m.get("context_length") or 0)
+        except (TypeError, ValueError):
+            ctx = 0
+        models.append({
+            "id": mid,
+            "name": str(m.get("name") or mid),
+            "ctx": ctx,
+            # the agent drives images through function calling, so a model
+            # without "tools" is a plain-text-only member of the chain
+            "tools": "tools" in (m.get("supported_parameters") or []),
+            "in": _usd_per_million(price.get("prompt")),
+            "out": _usd_per_million(price.get("completion")),
+        })
+    if not models:
+        return {"models": cached, "ts": ts,
+                "error": "no usable models in the OpenRouter response"}
+    models.sort(key=lambda m: (not m["tools"], m["name"].lower()))
+    ts = time.time()
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = OR_MODELS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"ts": ts, "models": models}),
+                       encoding="utf-8")
+        tmp.replace(OR_MODELS_FILE)
+    except OSError:
+        pass
+    return {"models": models, "ts": ts, "error": ""}
+
+
 # -------------------------------------------------------------- characters
 
 CHARS_FILE = DATA_DIR / "characters.json"
@@ -423,6 +517,13 @@ class Agent:
         self.cfg = cfg
         if self.client.base_url != cfg["sd_url"]:
             self.client = SDClient(base_url=cfg["sd_url"])
+            # the cached checkpoint list, architecture and capability lists
+            # describe the server we just left — keeping them would show this
+            # one checkpoints it does not have, which is why a switch used to
+            # look like the model list had simply stopped working
+            state = getattr(self, "sd_state", None)
+            if state:
+                state.reset()
         # keep the running conversation on the new system message
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0] = self._sys_msg()
@@ -1175,33 +1276,134 @@ _REGEN_DEFAULTS = {"width": 1024, "height": 1024, "steps": 25,
                    "scheduler": "automatic", "batch_size": 1}
 
 
-def _safe_arch(agent: Agent) -> str:
-    try:
-        return agent.client.current_arch()
-    except Exception:                                 # noqa: BLE001
-        return ""
-
-
-def _sd_capabilities(client) -> dict:
+def _sd_capabilities(client, force: bool = False) -> dict:
     """Samplers, schedule types, companion files and precision options.
 
     Every list comes from the WebUI itself, so the pickers never offer a value
-    the server would reject.
+    the server would reject. Called from SDState's worker thread only — never
+    from a request handler, because this is the slow part (it reads
+    openapi.json plus six other endpoints).
     """
     try:
         if not client.options():
             return {}
-        client.capabilities()
+        client.capabilities(force=force)
         files = client.companion_files()
-        return {"samplers": client.list_samplers(),
+        return {"arch": client.current_arch(),
+                "samplers": client.list_samplers(),
                 "schedulers": client.list_schedulers(),
                 "low_bits": client.list_low_bits(),
                 "text_encoders": files["text_encoder"],
                 "vaes": client.list_vaes(),
                 "architectures": client.architecture_summary(),
-                "video": client.video_supported()}
+                "video": client.video_supported(),
+                "video_endpoint": client.video_endpoint() or ""}
     except Exception:                                 # noqa: BLE001
         return {}
+
+
+# ------------------------------------------------------ image server state
+
+SD_TTL = 60.0             # how long a healthy snapshot stays fresh
+SD_RETRY = 15.0           # re-probe this soon after a failure
+SD_PROBE_TIMEOUT = 6      # budget for checking a URL the user just typed
+SD_POLL_TIMEOUT = 15      # patient enough to ride out a checkpoint load
+
+
+class SDState:
+    """Cached, off-thread view of the connected image server.
+
+    Everything the UI shows about the WebUI comes from here, and /api/status
+    only ever *reads* it. That matters because every client polls status every
+    30 s and asking the WebUI inline was the source of the "switching the image
+    server breaks the app" behaviour: a server that has just been pointed at a
+    cold start — or one busy loading a checkpoint — answers nothing at all, so
+    one status request held a thread for the sum of every probe timeouts
+    (options 20 s + models 25 s + the whole capability sweep, up to ~2 min).
+    The browser's per-host connection pool then filled with those stuck
+    requests and *every* other call the app makes stalled behind them: models,
+    components and settings all looked broken, and only recovered when the
+    requests finally timed out.
+
+    So: one worker refreshes the snapshot in the background, readers never
+    wait, and a failure is cached with its reason too — an unreachable server
+    costs one short probe per SD_RETRY, not a chain of long ones per poll.
+    """
+
+    def __init__(self, agent: "Agent"):
+        self.agent = agent
+        self.lock = threading.Lock()
+        self.worker: threading.Thread | None = None
+        self.data: dict = {
+            "url": agent.client.base_url, "ts": 0.0, "sd_ok": False,
+            "current_model": "", "current_arch": "",
+            "models": [], "detail": [], "caps": {}, "error": "",
+        }
+
+    # ---------------------------------------------------------- read side
+
+    def snapshot(self, force: bool = False) -> dict:
+        """Cached state, plus a kick to refresh it in the background."""
+        with self.lock:
+            d = self.data
+            age = time.time() - d["ts"]
+            stale = force or d["url"] != self.agent.client.base_url \
+                or not d["ts"] or age > (SD_TTL if d["sd_ok"] else SD_RETRY)
+            if stale and not self.worker:
+                self.worker = threading.Thread(
+                    target=self._refresh, args=(force,), daemon=True)
+                self.worker.start()
+            out = dict(d)
+            out["pending"] = stale or bool(self.worker)
+        return out
+
+    def invalidate(self):
+        """Refetch on the next read, keeping the current lists visible."""
+        with self.lock:
+            self.data["ts"] = 0.0
+
+    def reset(self):
+        """Forget everything — those lists belong to a server we just left."""
+        with self.lock:
+            d = self.data
+            d.update({"url": self.agent.client.base_url, "ts": 0.0,
+                      "sd_ok": False, "current_model": "", "current_arch": "",
+                      "models": [], "detail": [], "caps": {}, "error": ""})
+
+    # --------------------------------------------------------- write side
+
+    def _refresh(self, force: bool = False):
+        client = self.agent.client
+        d = {"url": client.base_url, "ts": time.time(), "sd_ok": False,
+             "current_model": "", "current_arch": "", "models": [],
+             "detail": [], "caps": {}, "error": ""}
+        try:
+            # probe() gives a reason worth showing ("connection refused…",
+            # "busy loading a checkpoint") and warms the options cache, so the
+            # reads below cost nothing extra
+            ok, detail = client.probe(timeout=SD_POLL_TIMEOUT)
+            if not ok:
+                raise SDWebUIError(detail)
+            d["sd_ok"] = True
+            if force:                                 # ask SD to rescan its dir
+                try:
+                    client.refresh_models()
+                except Exception:                    # noqa: BLE001
+                    pass
+            models = client.list_models(force=force)
+            d["models"] = [m["title"] for m in models]
+            d["detail"] = models
+            d["current_model"] = client.current_model()
+            d["current_arch"] = client.current_arch()
+            d["caps"] = _sd_capabilities(client, force=force)
+        except Exception as e:                           # noqa: BLE001
+            d["error"] = (str(e) or type(e).__name__)[:200]
+        with self.lock:
+            # a URL switch that landed mid-fetch wins: this data describes a
+            # server we are no longer talking to, and the snapshot will refetch
+            if d["url"] == self.agent.client.base_url:
+                self.data = d
+            self.worker = None
 
 
 def _public_profile(client, arch: str) -> dict:
@@ -2134,6 +2336,8 @@ class Handler(BaseHTTPRequestHandler):
                        mime="image/jpeg" if t else None)
         elif path == "/api/status":
             self.api_status()
+        elif path == "/api/llm/models":
+            self.api_llm_models()
         elif path == "/api/gallery":
             qs = parse_qs(urlparse(self.path).query)
             folder = _safe_rel((qs.get("folder") or [""])[0])
@@ -2182,12 +2386,13 @@ class Handler(BaseHTTPRequestHandler):
             if not model:
                 arch = agent.client.current_arch()
                 model = agent.client.current_model()
+            sd = self.app.sd_state.snapshot()
             self._json({"gen": args, "origin": origin.get("source", "png"),
                         "arch": arch, "model": model,
                         "profile": _public_profile(agent.client, arch),
                         "defaults": regen_defaults(agent.client, model),
-                        "models": self.app.models_cache["models"],
-                        "capabilities": _sd_capabilities(agent.client)})
+                        "models": sd["models"],
+                        "capabilities": sd["caps"]})
         else:
             self.send_error(404)
 
@@ -2578,61 +2783,25 @@ class Handler(BaseHTTPRequestHandler):
             agent.lock.release()
 
     def api_status(self):
+        """Cheap read of everything the UI polls for.
+
+        The image-server half comes from the cached SDState snapshot, so this
+        never waits on the WebUI — see SDState for why that matters.
+        """
         agent = self.app.agent
-        client = agent.client
-        sd_ok, cur, arch = False, "", ""
-        try:
-            opts = client.options()
-            if opts:
-                sd_ok = True
-                cur = str(opts.get("sd_model_checkpoint") or "")
-                arch = client.current_arch()
-        except Exception:
-            pass
-        now = time.time()
         force = "refresh" in (parse_qs(urlparse(self.path).query) or {})
-        if force or now - self.app.models_cache["ts"] > 300:
-            if force:                                     # ask SD to rescan
-                try:
-                    client.refresh_models()
-                except Exception:
-                    pass
-            try:
-                models = client.list_models()
-                self.app.models_cache["models"] = [m["title"] for m in models]
-                self.app.models_cache["detail"] = models
-                self.app.models_cache["ts"] = now
-            except Exception:
-                pass
-        caps = {}
-        if sd_ok:
-            # what this Forge Neo build can actually do — the frontend builds
-            # its sampler/schedule/component pickers from this
-            try:
-                c = client.capabilities(force=force)
-                files = client.companion_files()
-                caps = {
-                    "arch": arch,
-                    "samplers": client.list_samplers(),
-                    "schedulers": client.list_schedulers(),
-                    "low_bits": client.list_low_bits(),
-                    "text_encoders": files["text_encoder"],
-                    "vaes": client.list_vaes(),
-                    "architectures": client.architecture_summary(),
-                    "video": client.video_supported(),
-                    "video_endpoint": client.video_endpoint() or "",
-                }
-            except Exception:
-                caps = {}
+        sd = self.app.sd_state.snapshot(force=force)
         char = agent.char
         self._json({
-            "sd_url": client.base_url,
-            "sd_ok": sd_ok,
-            "current_model": cur,
-            "current_arch": arch,
-            "models": self.app.models_cache["models"],
-            "model_detail": self.app.models_cache.get("detail") or [],
-            "capabilities": caps,
+            "sd_url": agent.client.base_url,
+            "sd_ok": sd["sd_ok"],
+            "sd_error": sd["error"],
+            "sd_pending": sd["pending"],
+            "current_model": sd["current_model"],
+            "current_arch": sd["current_arch"],
+            "models": sd["models"],
+            "model_detail": sd["detail"],
+            "capabilities": sd["caps"],
             "llm": agent.llm_models,
             "has_key": agent.has_key(),
             "gallery_count": gallery_total(),
@@ -2642,6 +2811,17 @@ class Handler(BaseHTTPRequestHandler):
                            "name": char.get("name", "")}
                           if char else None),
         })
+
+    def api_llm_models(self):
+        """OpenRouter's catalogue for the Settings model picker.
+
+        Served from the day-old disk cache after the first call; `refresh=1`
+        re-queries. A fetch failure returns the last good list plus an error
+        string rather than an empty picker.
+        """
+        force = "refresh" in (parse_qs(urlparse(self.path).query) or {})
+        self._json(fetch_openrouter_models(
+            self.app.agent.cfg.get("openrouter_key", ""), force=force))
 
     # ------------------------------------------------------- characters
 
@@ -3136,6 +3316,40 @@ class Handler(BaseHTTPRequestHandler):
 
         self._json({"error": "unknown action"}, 400)
 
+    def _switch_sd_url(self, url: str):
+        """Check a new image-server address *before* it is saved and live.
+
+        Returns (True, loaded_checkpoint) when the switch is good, or
+        (False, reason) when it is not — in which case nothing is written to
+        the config and the current, working client keeps serving the app.
+
+        This is the fix for "switching the image server breaks the app": the URL
+        used to be saved on faith, so a typo (or a WebUI that was not started
+        with --api --listen) left the agent pointed at a dead server with no
+        way back from the UI — the only recovery was editing config.json on the
+        server and restarting the unit.
+        """
+        agent = self.app.agent
+        if not agent.lock.acquire(blocking=False):
+            return False, ("a turn is running — stop it before switching the "
+                           "image server")
+        try:
+            try:
+                probe = SDClient(base_url=url)
+                ok, detail = probe.probe(timeout=SD_PROBE_TIMEOUT)
+            except Exception as e:                       # noqa: BLE001
+                return False, f"{type(e).__name__}: {e}"[:200]
+            if not ok:
+                return False, f"{url} did not answer: {detail}"
+            # only now is the address trusted: swap the client, which drops the
+            # old server's cached model/capability lists on the way
+            cfg = dict(agent.cfg)
+            cfg["sd_url"] = url
+            agent.apply_config(cfg)
+            return True, detail
+        finally:
+            agent.lock.release()
+
     def api_settings(self):
         """GET returns masked settings; POST applies and persists them."""
         agent = self.app.agent
@@ -3145,18 +3359,24 @@ class Handler(BaseHTTPRequestHandler):
             masked = (key[:7] + "…" + key[-4:]) if len(key) > 14 \
                 else ("set" if key else "")
             override = cfg.get("system_prompt") or ""
+            # from the snapshot, not from a live probe: this is the request the
+            # Settings page waits on before it will paint anything at all
+            sd = self.app.sd_state.snapshot()
             self._json({"sd_url": cfg["sd_url"], "llm": cfg["llm_models"],
                         "key_masked": masked, "has_key": bool(key),
                         "system_prompt": override or DEFAULT_BASE_PROMPT,
                         "system_prompt_custom": bool(override),
                         "username": cfg.get("username", ""),
                         "sd_components": cfg.get("sd_components") or {},
-                        "current_arch": _safe_arch(agent),
-                        "capabilities": _sd_capabilities(agent.client)})
+                        "current_arch": sd["current_arch"],
+                        "sd_ok": sd["sd_ok"], "sd_error": sd["error"],
+                        "sd_pending": sd["pending"],
+                        "capabilities": sd["caps"]})
             return
         body = self._body()
         cfg = dict(agent.cfg)
         sys_touched = False
+        switched = None
         if "sd_url" in body:
             url = str(body["sd_url"]).strip().rstrip("/")
             if url and not url.startswith(("http://", "https://")):
@@ -3164,7 +3384,17 @@ class Handler(BaseHTTPRequestHandler):
             if not re.match(r"^https?://[\w.\-]+(:\d+)?(/[\w./\-]*)?$", url):
                 self._json({"error": "invalid URL"}, 400)
                 return
+            if url != agent.client.base_url:
+                switched = self._switch_sd_url(url)
+                if not switched[0]:                  # refused — keep the old
+                    self._json({"error": switched[1]}, 502)
+                    return
             cfg["sd_url"] = url
+            if switched:
+                # persist the switch on its own: a later field in this same
+                # body could still be rejected, and the file must never
+                # disagree with the client that is already live
+                save_config(cfg)
         if "llm" in body:
             models = [m.strip() for m in str(body["llm"]).split(",")
                       if m.strip()]
@@ -3207,14 +3437,19 @@ class Handler(BaseHTTPRequestHandler):
                     clean[str(arch).strip()[:16].lower()] = entry
             cfg["sd_components"] = clean
         save_config(cfg)
+        if switched is not None:
+            # already applied live in _switch_sd_url; apply_config below is a
+            # no-op for the client and keeps the system message in step
+            out = {"ok": True, "sd_switched": True, "sd_url": cfg["sd_url"],
+                   "sd_model": switched[1]}
+        else:
+            out = {"ok": True}
         agent.apply_config(cfg)
         if sys_touched:
-            self._json({"ok": True,
-                        "system_prompt": cfg["system_prompt"]
+            out.update({"system_prompt": cfg["system_prompt"]
                         or DEFAULT_BASE_PROMPT,
                         "system_prompt_custom": bool(cfg["system_prompt"])})
-        else:
-            self._json({"ok": True})
+        self._json(out)
 
     def api_personas_list(self):
         self._json({"personas": load_personas(),
@@ -3572,7 +3807,7 @@ class Handler(BaseHTTPRequestHandler):
             components = {k: str(body[k]).strip()
                           for k in _COMPONENT_KEYS if k in body}
             info = agent.client.configure(arch, **components)
-            self.app.models_cache["ts"] = 0.0
+            self.app.sd_state.invalidate()
             self._json({"ok": True, **info,
                         "profile": _public_profile(agent.client, arch)})
         except SDWebUIError as e:
@@ -3589,9 +3824,10 @@ class App:
     def __init__(self, password: str):
         self.password = password
         self.session_secret = load_session_secret()
-        self.models_cache = {"ts": 0.0, "models": [], "detail": []}
         migrate_flat_chats()                 # Phase A → B chat layout
         self.agent = Agent(load_config())    # loads chat + character too
+        self.sd_state = SDState(self.agent)  # off-thread WebUI snapshot
+        self.agent.sd_state = self.sd_state  # so a URL switch can drop it
 
 
 # ------------------------------------------------------------------- main

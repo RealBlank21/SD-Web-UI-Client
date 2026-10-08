@@ -394,6 +394,50 @@ class SDClient:
 
     # ----------------------------------------------------------------- info
 
+    # any A1111/Forge build reports these; their absence means something else
+    # answered (a proxy, another app on that port, a login page's JSON)
+    _WEBUI_KEYS = ("sd_model_checkpoint", "forge_additional_modules",
+                   "forge_checkpoint_sd", "VERSION_UID")
+
+    def probe(self, timeout: int = 6) -> tuple[bool, str]:
+        """Is there a WebUI at this address, and what is it running?
+
+        Two returns, never raises, and deliberately short-budgeted: this is the
+        check that runs when the image-server URL is saved. A server that is
+        mid-load answers nothing at all, so the caller needs a verdict fast —
+        the full request budget would just turn a wrong address into a hang.
+
+        The second value is the reason on failure (already phrased for a user)
+        and the loaded checkpoint's title on success.
+        """
+        try:
+            opts = self._get("/sdapi/v1/options", timeout=timeout)
+        except requests.exceptions.ConnectTimeout:
+            return False, ("timed out connecting — check the port, and that "
+                           "nothing between us and it is dropping the packet")
+        except requests.exceptions.ReadTimeout:
+            return False, ("the server accepted the connection but did not "
+                           "answer in time — it is probably busy loading a "
+                           "checkpoint")
+        except requests.exceptions.ConnectionError:
+            return False, ("connection refused — is the WebUI running there, "
+                           "started with --api --listen?")
+        except requests.exceptions.RequestException as e:
+            return False, f"{type(e).__name__}: {e}"[:180]
+        except SDWebUIError as e:
+            # answered, but not with options — a proxy 404, a login wall, the
+            # wrong port. Must not escape: the caller shows this to a user
+            return False, str(e)[:200]
+        if not isinstance(opts, dict) or not opts:
+            return False, ("something answered, but /sdapi/v1/options came "
+                           "back empty")
+        if not any(k in opts for k in self._WEBUI_KEYS):
+            return False, ("something answered, but it is not a Forge WebUI — "
+                           "no model settings in its options")
+        return True, str(opts.get("sd_model_checkpoint") or "")
+
+    # ----------------------------------------------------------------- info
+
     def capabilities(self, force: bool = False) -> _Caps:
         """What this server supports: payload schema, samplers, schedules,
         companion files, architecture list. Cached; never raises."""
