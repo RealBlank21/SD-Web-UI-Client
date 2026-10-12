@@ -101,7 +101,7 @@ def scrub_paths(text: str) -> str:
 DEFAULT_CONFIG = {
     "openrouter_key": "",
     "llm_models": [DEFAULT_LLM],
-    "sd_url": "http://100.93.220.68:7860",
+    "sd_url": "http://0.0.0.0:7860",
     "system_prompt": "",   # custom system message; "" = built-in default
     "username": "",          # how the AI knows the user
     "persona_id": "",        # active user persona (data/personas.json)
