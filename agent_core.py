@@ -324,10 +324,29 @@ def effective_system_prompt(override: str | None = None) -> str:
     return build_system_prompt(base) if base else DEFAULT_SYSTEM_PROMPT
 
 
+# The leading run of quality/scaffolding tags every guide entry opens with.
+# A character's look tags belong at the front of the SUBJECT tags, not ahead of
+# these: prepending put 'Scaramouche from (genshin impact), big manly cock' in
+# front of 'masterpiece, best quality', which inverts the order model_guide.txt
+# is written in and re-adds a look tag the model had just been told to cut as
+# redundant — the server then put it back on every later image of the scene.
+_QUALITY_TAGS = {
+    "masterpiece", "best quality", "amazing quality", "high quality",
+    "very aesthetic", "esthetic", "scenery", "4k", "8k", "hd",
+    "ultra-detailed", "ultra detailed", "high resolution", "absurdres",
+    "newest", "official art", "nsfw",
+}
+
+
 def ensure_tags(prompt: str, tags: str) -> str:
-    """Prepend identity tags missing from an SD prompt (no duplicates).
-    Matching ignores backslash-escapes and parentheses so guide-style
-    tags like 'arlecchino \\(genshin impact\\)' still count as present."""
+    """Add identity tags missing from an SD prompt (no duplicates).
+
+    They are inserted after the leading quality scaffolding — i.e. at the
+    front of the subject tags, which is where the model guide expects a
+    character's look to sit. Matching ignores backslash-escapes and
+    parentheses so guide-style tags like 'arlecchino \\(genshin impact\\)'
+    still count as present.
+    """
     prompt = (prompt or "").strip()
     tags = (tags or "").strip()
     if not tags:
@@ -345,7 +364,10 @@ def ensure_tags(prompt: str, tags: str) -> str:
             missing.append(t)
     if not missing:
         return prompt
-    return ", ".join(missing + have)
+    cut = 0
+    while cut < len(have) and norm(have[cut]) in _QUALITY_TAGS:
+        cut += 1
+    return ", ".join(have[:cut] + missing + have[cut:])
 
 
 # ------------------------------------------------------------------- tools
