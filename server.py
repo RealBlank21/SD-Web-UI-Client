@@ -437,21 +437,36 @@ class Agent:
 
     # ------------------------------------------------------------ config
 
+    def persona(self) -> dict:
+        """The active user persona entity, or {} when none is selected."""
+        pid = (self.cfg.get("persona_id") or "").strip()
+        if not pid:
+            return {}
+        return next((p for p in load_personas() if p.get("id") == pid), {})
+
+    def persona_appearance(self) -> str:
+        """The user's booru-tag look, auto-injected when a shot draws them."""
+        return str(self.persona().get("appearance") or "")
+
     def _sys_msg(self) -> dict:
         """Opening system message: global override (or default) + user
         persona (or plain username) + the active character's block."""
         base = effective_system_prompt(self.cfg.get("system_prompt"))
-        pid = (self.cfg.get("persona_id") or "").strip()
-        persona = next((p for p in load_personas() if p.get("id") == pid),
-                       None) if pid else None
+        persona = self.persona()
         if persona:
             nm = str(persona.get("name") or "").strip()[:80]
             ds = str(persona.get("description") or "").strip()[:4000]
+            ap = str(persona.get("appearance") or "").strip()[:4000]
             block = "\n\nUser Persona:"
             if nm:
                 block += f"\nName: {nm}"
             if ds:
                 block += f"\nDescription: {ds}"
+            if ap:
+                block += ("\nAppearance — these tags are authoritative and the "
+                          "app injects them automatically into every image that "
+                          "draws the user, so you do not need to write them "
+                          "yourself:\n" + ap)
             base += block
         else:
             user = (self.cfg.get("username") or "").strip()
@@ -1062,9 +1077,13 @@ class Agent:
             return result
         is_gen = name in GEN_TOOLS
         if is_gen and self.char:
-            # identity tags are authoritative — add them if the model forgot
+            # identity tags are authoritative — add them if the model forgot.
+            # The persona's look only joins a shot that actually draws the
+            # user; a lone "another's hand" or a "thighs framing viewer" tag
+            # must not pull their whole body into frame.
             args["prompt"] = ensure_tags(args.get("prompt", ""),
-                                         self.char_tags())
+                                         self.char_tags(),
+                                         self.persona_appearance())
             # preferred checkpoint applies when the model didn't pick one
             cp = (self.char.get("checkpoint") or "").strip()
             if cp and not args.get("model"):
@@ -3473,6 +3492,14 @@ class Handler(BaseHTTPRequestHandler):
         p = dict(existing) if existing else {"id": pid}
         p["name"] = name[:80]
         p["description"] = str(body.get("description", "")).strip()[:4000]
+        # Optional. Personas written before this field keep working: an empty
+        # appearance simply means nothing extra is auto-injected.
+        ap = str(body.get("appearance", existing.get("appearance", "")
+                          if existing else "")).strip()[:4000]
+        if ap:
+            p["appearance"] = ap
+        else:
+            p.pop("appearance", None)
         if existing:
             lst = [p if x.get("id") == pid else x for x in lst]
         else:

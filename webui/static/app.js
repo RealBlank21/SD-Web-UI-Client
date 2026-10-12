@@ -16,7 +16,7 @@
 (function guardSkew() {
   // one id added by each version since the wiring went null-safe; if the newest
   // one is missing, this DOM predates this script
-  const probe = ["llm-chain", "sh-llm-pick"];
+  const probe = ["llm-chain", "sh-llm-pick", "pp-appearance"];
   if (probe.some((id) => document.getElementById(id))) return;
   const tries = Number(sessionStorage.getItem("skew-reload") || 0);
   if (tries >= 2) return;                  // give up rather than reload forever
@@ -93,6 +93,7 @@ const els = {
   psList: $("ps-list"), psCount: $("ps-count"),
   pagePersona: $("page-persona"), ppTitle: $("pp-title"),
   ppName: $("pp-name"), ppDesc: $("pp-desc"), ppDelete: $("pp-delete"),
+  ppAppearance: $("pp-appearance"),
   scList: $("sc-list"), scCount: $("sc-count"),
   pageScenario: $("page-scenario"), scsTitle: $("scs-title"),
   scsName: $("scs-name"), scsDesc: $("scs-desc"), scsFirst: $("scs-first"),
@@ -3860,6 +3861,7 @@ function openPersonaForm(p) {
   els.ppTitle.textContent = p ? "Edit persona" : "New persona";
   els.ppName.value = p ? (p.name || "") : "";
   els.ppDesc.value = p ? (p.description || "") : "";
+  els.ppAppearance.value = p ? (p.appearance || "") : "";
   els.ppDelete.hidden = !p;
   els.pagePersona.hidden = false;
   setTimeout(() => els.ppName.focus(), 60);
@@ -3874,7 +3876,8 @@ async function savePersonaForm() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: editPersonaId || "",
                              name,
-                             description: els.ppDesc.value.trim() }),
+                             description: els.ppDesc.value.trim(),
+                             appearance: els.ppAppearance.value.trim() }),
     });
     personas = d.personas || [];
     if (activePersonaId === (d.id)) {

@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=53">
+<link rel="stylesheet" href="/static/style.css?v=54">
 </head>
 <body>
 
@@ -436,10 +436,13 @@
     <label>Name</label>
     <input id="pp-name" spellcheck="false" autocomplete="off" autocapitalize="off"
            placeholder="e.g. Alex" maxlength="80">
+    <label>Look — booru tags <span class="dim">— added automatically to any image that draws you</span></label>
+    <textarea id="pp-appearance" class="mono" rows="4" spellcheck="false" autocapitalize="off"
+              placeholder="1boy, short black hair, glasses, slender build, oversized beige hoodie…"></textarea>
     <label>Description <span class="dim">— who you are in the roleplay</span></label>
-    <textarea id="pp-desc" rows="9" placeholder="Appearance, background, occupation, how you speak and act…&#10;&#10;e.g. A tall bounty hunter in a worn duster coat. Speaks quietly and rarely asks questions twice."></textarea>
+    <textarea id="pp-desc" rows="9" placeholder="Background, occupation, how you speak and act…&#10;&#10;e.g. A university student who reads more than he admits. Speaks quietly and rarely asks the same question twice."></textarea>
     <button id="pp-delete" class="danger-btn" hidden>Delete persona</button>
-    <div class="hint">The selected persona is sent to the AI with every chat. Leave unselected to use just your plain name.</div>
+    <div class="hint">The selected persona is sent to the AI with every chat. Leave unselected to use just your plain name. Describe yourself here rather than giving the AI instructions — those belong in the system message.</div>
   </div>
 </div>
 
@@ -614,6 +617,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=53"></script>
+<script src="/static/app.js?v=54"></script>
 </body>
 </html>

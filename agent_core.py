@@ -338,19 +338,62 @@ _QUALITY_TAGS = {
 }
 
 
-def ensure_tags(prompt: str, tags: str) -> str:
+# Subject counts come in two spellings: a number of a person word
+# ("2boys", "1girl 1boy", "3girls 1boy"), or a word ("duo", "trio").
+_COUNT_NUM = re.compile(r"(\d+)\s*(?:boys?|girls?|others?)", re.I)
+_COUNT_WORD = re.compile(r"\b(?:duo|trio)\b", re.I)
+
+# The one unambiguous "the viewer is a body in frame" tag.
+_VIEWER_BODY = re.compile(r"\bviewer'?s\s+body\b", re.I)
+
+
+def viewer_in_frame(prompt: str) -> bool:
+    """True when the prompt actually DRAWS the user, rather than only
+    implying where they are standing.
+
+    This distinction is the whole point. The framing rules in the system
+    prompt let a shot say "thighs framing viewer" or "close to camera"
+    without drawing the viewer at all, and those tags must NOT pull in a
+    body description — that would undo them. For the same reason a lone
+    "another's hand" contact is a hand, not a torso: injecting a full body
+    description there is exactly how a body part nobody asked for ends up
+    in frame. So only a subject count above one, or an explicit
+    "viewer's body", counts as drawing the user.
+
+    Counted per comma-separated tag, because "1girl 1boy" is a single tag
+    holding two counts — a per-tag regex that expected the tag to end after
+    the number missed it.
+    """
+    for tag in (prompt or "").split(","):
+        t = tag.strip()
+        if not t:
+            continue
+        if _COUNT_WORD.search(t) or _VIEWER_BODY.search(t):
+            return True
+        if sum(int(n) for n in _COUNT_NUM.findall(t)) > 1:
+            return True
+    return False
+
+
+def ensure_tags(prompt: str, tags: str, viewer_tags: str = "") -> str:
     """Add identity tags missing from an SD prompt (no duplicates).
 
-    They are inserted after the leading quality scaffolding — i.e. at the
+    Character tags are always injected. Viewer tags — the active user
+    persona's appearance — are injected only when `viewer_in_frame` says
+    the prompt draws that person, so proximity expressed with relational
+    tags keeps working without summoning their anatomy.
+
+    Both are inserted after the leading quality scaffolding — i.e. at the
     front of the subject tags, which is where the model guide expects a
     character's look to sit. Matching ignores backslash-escapes and
     parentheses so guide-style tags like 'arlecchino \\(genshin impact\\)'
     still count as present.
     """
     prompt = (prompt or "").strip()
-    tags = (tags or "").strip()
-    if not tags:
-        return prompt
+    viewer_tags = (viewer_tags or "").strip()
+    wanted = [t.strip() for t in (tags or "").split(",") if t.strip()]
+    if viewer_tags and viewer_in_frame(prompt):
+        wanted += [t.strip() for t in viewer_tags.split(",") if t.strip()]
     have = [t.strip() for t in prompt.split(",") if t.strip()]
 
     def norm(t: str) -> str:
@@ -358,10 +401,10 @@ def ensure_tags(prompt: str, tags: str) -> str:
 
     have_norm = {norm(t) for t in have}
     missing = []
-    for t in tags.split(","):
-        t = t.strip()
-        if t and norm(t) not in have_norm:
+    for t in wanted:
+        if norm(t) not in have_norm:
             missing.append(t)
+            have_norm.add(norm(t))     # dedupe across character + viewer
     if not missing:
         return prompt
     cut = 0
