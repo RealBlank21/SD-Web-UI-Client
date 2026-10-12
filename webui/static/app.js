@@ -688,9 +688,24 @@ function handleEvent(evt) {
     case "done":
       stopProgressPolling();
       pillHide();
+      scheduleTitleRefresh();
       break;
   }
   if (evt.type !== "progress") scrollDown(true);
+}
+
+let titleRefreshTimer = 0;
+/** The server names a chat in the background after its first reply, so the
+ *  history list can lag by a second or two. Re-fetch it only if it is
+ *  actually on screen — this never waits on, or delays, the turn itself. */
+function scheduleTitleRefresh() {
+  clearTimeout(titleRefreshTimer);
+  if (!activeCharId) return;
+  titleRefreshTimer = setTimeout(() => {
+    titleRefreshTimer = 0;
+    if (els.pageHist.hidden || hsSelecting) return;
+    openHistory().catch(() => {});
+  }, 2200);
 }
 
 /* --------------------------------------------------------------- gallery

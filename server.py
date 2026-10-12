@@ -268,6 +268,47 @@ def derive_title(timeline: list) -> str:
     return "New chat"
 
 
+_TITLE_SYSTEM = (
+    "You name roleplay conversations. Reply with ONLY a title: two to five "
+    "words, no quotes, no trailing punctuation, no explanation, no emoji. "
+    "Name the place, the moment or the situation - not just a character's "
+    "name."
+)
+
+
+def generate_title(agent: "Agent") -> str:
+    """Ask the LLM for a short title for the active chat.
+
+    Best-effort and cheap — one small non-streaming call with no tools, from
+    a worker thread so the turn is never waiting on it. Any failure returns
+    "" and the derived title simply stays.
+    """
+    ctx = [{"role": m["role"], "content": str(m["content"])[:600]}
+           for m in agent.messages[1:7]
+           if m.get("role") in ("user", "assistant") and m.get("content")]
+    if not ctx:
+        return ""
+    # tools=[] matters: chat_completion defaults to the full tool set, and
+    # this call has no business generating an image.
+    try:
+        data = chat_completion(agent.cfg["openrouter_key"],
+                               agent.llm_models[0],
+                               [{"role": "system",
+                                 "content": _TITLE_SYSTEM}] + ctx,
+                               temperature=0.2, max_tokens=24, tools=[])
+    except Exception:                       # noqa: BLE001 — cosmetic only
+        return ""
+    try:
+        raw = str(data["choices"][0]["message"].get("content") or "")
+    except (KeyError, IndexError, TypeError):
+        return ""
+    line = raw.strip().splitlines()[0] if raw.strip() else ""
+    t = re.sub(r"\s+", " ", line).strip().strip("\"'").strip()
+    t = t.rstrip(" .,:;!-")
+    t = " ".join(t.split()[:6])
+    return t[:48].strip()
+
+
 def load_characters() -> list:
     if not CHARS_FILE.exists():
         return []
@@ -432,6 +473,8 @@ class Agent:
         self.lock = threading.Lock()     # one turn at a time
         self.stop_flag = threading.Event()  # set by /api/abort
         self.status_cb = None            # set while a turn streams
+        self._save_lock = threading.Lock()   # chat-file writes; also taken by
+        self._titled = set()              # the async title worker, see below
         self._load_state()
         self._rehydrate_char()
 
@@ -828,47 +871,96 @@ class Agent:
     def _save_state(self):
         """Persist the active chat to its home file + the restart mirror."""
         try:
-            now = int(time.time())
-            mirror = {
-                "character_id": self.char["id"] if self.char else "",
-                "chat_id": self.chat_id if self.char else "",
-                "scenario_id": self.scenario_id,
-                "auto_images": self.auto_images,
-                "messages": self.messages[1:],
-                "timeline": self.timeline,
-            }
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-            if self.char:
-                cid = self.char["id"]
-                if CHAT_ID_RE.match(self.chat_id):
-                    self._char_dir(cid).mkdir(parents=True, exist_ok=True)
-                    if self._title in ("", "New chat"):
-                        # re-derive until the first real user message lands
-                        self._title = derive_title(self.timeline)[:60]
-                    payload = {
-                        "id": self.chat_id,
-                        "character_id": cid,
-                        "title": self._title,
-                        "updated": now,
-                        "scenario_id": self.scenario_id,
-                        "auto_images": self.auto_images,
-                        "messages": mirror["messages"],
-                        "timeline": self.timeline,
-                    }
-                    self._home.write_text(
-                        json.dumps(payload, ensure_ascii=False),
-                        encoding="utf-8")
-            else:
-                payload = {"messages": mirror["messages"],
-                           "auto_images": self.auto_images,
-                           "timeline": self.timeline}
-                CHATS_DIR.mkdir(parents=True, exist_ok=True)
-                DEFAULT_CHAT_FILE.write_text(
+            with self._save_lock:
+                self._save_state_locked()
+        except Exception:
+            pass
+
+    def _save_state_locked(self):
+        """_save_state's body. Callers must already hold _save_lock — the
+        async title worker writes from outside any turn and has to land its
+        title in the same file without tearing a concurrent save."""
+        now = int(time.time())
+        mirror = {
+            "character_id": self.char["id"] if self.char else "",
+            "chat_id": self.chat_id if self.char else "",
+            "scenario_id": self.scenario_id,
+            "auto_images": self.auto_images,
+            "messages": self.messages[1:],
+            "timeline": self.timeline,
+        }
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if self.char:
+            cid = self.char["id"]
+            if CHAT_ID_RE.match(self.chat_id):
+                self._char_dir(cid).mkdir(parents=True, exist_ok=True)
+                if self._title in ("", "New chat"):
+                    # re-derive until the first real user message lands
+                    self._title = derive_title(self.timeline)[:60]
+                payload = {
+                    "id": self.chat_id,
+                    "character_id": cid,
+                    "title": self._title,
+                    "updated": now,
+                    "scenario_id": self.scenario_id,
+                    "auto_images": self.auto_images,
+                    "messages": mirror["messages"],
+                    "timeline": self.timeline,
+                }
+                self._home.write_text(
                     json.dumps(payload, ensure_ascii=False),
                     encoding="utf-8")
-            STATE_FILE.write_text(
-                json.dumps(mirror, ensure_ascii=False), encoding="utf-8")
-        except Exception:
+        else:
+            payload = {"messages": mirror["messages"],
+                       "auto_images": self.auto_images,
+                       "timeline": self.timeline}
+            CHATS_DIR.mkdir(parents=True, exist_ok=True)
+            DEFAULT_CHAT_FILE.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8")
+        STATE_FILE.write_text(
+            json.dumps(mirror, ensure_ascii=False), encoding="utf-8")
+
+    # --------------------------------------------------------- async title
+
+    def maybe_generate_title(self) -> None:
+        """Kick off a background title for a chat still carrying the derived
+        one. Returns immediately — a turn never waits for this.
+
+        derive_title takes the first user message verbatim, and that message
+        is very often a raw SD prompt or a parenthetical aside, so chats end
+        up listed as "Naked, modern bedroom background, night time, slight
+        sweat, ". A model reads the exchange and does better.
+        """
+        if not (self.char and self.chat_id and self.has_key()
+                and self.llm_models):
+            return
+        if not CHAT_ID_RE.match(self.chat_id):
+            return          # the unbound free chat has nowhere to store one
+        if self.chat_id in self._titled:
+            return
+        if not any(e.get("type") == "reply" for e in self.timeline):
+            return          # nothing to summarise yet
+        threading.Thread(target=self._title_worker, daemon=True).start()
+
+    def _title_worker(self) -> None:
+        chat_id, home = self.chat_id, self._home
+        try:
+            title = generate_title(self)
+        except Exception:                           # noqa: BLE001 — cosmetic
+            title = ""
+        try:
+            with self._save_lock:
+                # the user may have switched or deleted the chat while the
+                # model was thinking; never write into a different one
+                if self.chat_id != chat_id or self._home != home:
+                    return
+                self._titled.add(chat_id)           # one attempt per chat
+                if not title:
+                    return
+                self._title = title
+                self._save_state_locked()
+        except Exception:                           # noqa: BLE001
             pass
 
     def _load_state(self):
@@ -990,6 +1082,7 @@ class Agent:
             # so a later edit/regenerate can rewind the context exactly
             evt = {"type": "reply", "text": reply, "mi": len(messages)}
             self.push(evt, emit)
+            self.maybe_generate_title()
             return True
         return False
 
@@ -1737,7 +1830,7 @@ def run_regeneration(agent: Agent, rel: str, instruction: str, emit,
     # architecture fills in and clamps values, and the recipe must replay
     gen = {k: args.get(k) for k in
            ("prompt", "negative_prompt", "width", "height", "steps",
-            "cfg_scale", "sampler_name", "clip_skip", "batch_size", "seed",
+            "cfg_scale", "sampler_name", "clip_skip", "batch_size",
             "denoising_strength")}
     gen.update({
         "model": model or "(unknown)",
@@ -1749,6 +1842,12 @@ def run_regeneration(agent: Agent, rel: str, instruction: str, emit,
         "cfg_scale": prepared["cfg_scale"],
         "clip_skip": prepared["clip_skip"],
         "distilled_cfg_scale": prepared["distilled_cfg_scale"],
+        # the seed the generator ACTUALLY used, not args["seed"]: a rolled
+        # seed was popped from args, so recording from there left every
+        # regenerated variant with seed null and its recipe unreplayable —
+        # long-pressing one again rolled another seed and the composition
+        # drifted further on every pass
+        "seed": seed,
     })
     if prepared.get("notes"):
         gen["notes"] = prepared["notes"]
