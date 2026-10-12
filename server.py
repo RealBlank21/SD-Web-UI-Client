@@ -270,10 +270,34 @@ def derive_title(timeline: list) -> str:
 
 _TITLE_SYSTEM = (
     "You name roleplay conversations. Reply with ONLY a title: two to five "
-    "words, no quotes, no trailing punctuation, no explanation, no emoji. "
-    "Name the place, the moment or the situation - not just a character's "
-    "name."
+    "words, plain text. No markdown, no headings, no numbering, no quotes, no "
+    "trailing punctuation, no explanation, no emoji. Name the place, the "
+    "moment or the situation - not just a character's name."
 )
+
+
+def clean_title(raw: str) -> str:
+    """One LLM line -> a title, or "" when it plainly isn't one.
+
+    A "name this" brief reliably draws markdown back, and occasionally draws
+    a date or a numbered heading instead of a title. The first chat this ran
+    on came back as "# 2026-05-13" and went straight into the history list,
+    so anything that is not plainly words is rejected and the derived title
+    is left in place instead.
+    """
+    line = (raw or "").strip().splitlines()[0] if (raw or "").strip() else ""
+    t = re.sub(r"^[\s#>*\-+`~]+", "", line)   # heading / bullet / quote marks
+    t = re.sub(r"[*`~_]+", "", t)             # emphasis markers anywhere
+    t = re.sub(r"\s+", " ", t).strip()
+    t = t.strip("\"'").strip()
+    t = t.strip("[](){}<>").strip()
+    t = t.rstrip(" .,:;!-")
+    if not t:
+        return ""
+    # digits, dates, times, bare punctuation -> not a title
+    if not re.search(r"[^\W\d_]", t):
+        return ""
+    return " ".join(t.split()[:6])[:48].strip()
 
 
 def generate_title(agent: "Agent") -> str:
@@ -302,11 +326,7 @@ def generate_title(agent: "Agent") -> str:
         raw = str(data["choices"][0]["message"].get("content") or "")
     except (KeyError, IndexError, TypeError):
         return ""
-    line = raw.strip().splitlines()[0] if raw.strip() else ""
-    t = re.sub(r"\s+", " ", line).strip().strip("\"'").strip()
-    t = t.rstrip(" .,:;!-")
-    t = " ".join(t.split()[:6])
-    return t[:48].strip()
+    return clean_title(raw)
 
 
 def load_characters() -> list:
