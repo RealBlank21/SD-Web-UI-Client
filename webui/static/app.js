@@ -3672,20 +3672,38 @@ async function runRegen(name, instr, overrides) {
           break;
         }
         case "regen_done": {
+          // a batch regen saves more than one file under a single event
+          const files = (evt.files && evt.files.length) ? evt.files : [evt.file];
           const rec = variantIndex.get(evt.src);
+          // the server appended an event, so anything streamed after this
+          // has to index past it
+          evtCounter = Math.max(evtCounter, (evt.idx ?? -1) + 1);
           if (rec) {
-            if (!rec.files.includes(evt.file)) rec.files.push(evt.file);
+            for (const f of files) if (!rec.files.includes(f)) rec.files.push(f);
             if (evt.idx != null) rec.evtIdxs.push(evt.idx);
+            // the variant we just made is itself regeneratable, so it has to
+            // be findable as a src. Without this, regenerating a regenerated
+            // image looks up a path no record points at, falls through to the
+            // branch below, and the new picture never appears — the server
+            // has already written it and pushed the event, so it only shows
+            // up after a reload, when the whole timeline is walked in order.
+            for (const f of files) variantIndex.set(f, rec);
             rec.pos = rec.files.length - 1;      // show the new variant
             renderCarousel(rec);
             rec.card.scrollIntoView({ behavior: "smooth", block: "center" });
           } else {
-            evtCounter = Math.max(evtCounter, (evt.idx ?? -1) + 1);
+            // nothing to extend (its card is gone but the file wasn't) —
+            // draw the new image on its own rather than dropping it, which
+            // is what re-rendering the timeline would have given us anyway
+            addGeneration({ files: files.map((f) => "/outputs/" + f) },
+                          evt.idx);
           }
-          if (parentOf(evt.file) === galFolder
-              && !images.some((x) => x.rel === evt.file)) {
-            images.unshift({ rel: evt.file, name: baseName(evt.file),
-                             seed: evt.seed });
+          // the lightbox list is newest-first, and unshift puts each one in
+          // front — so walking the batch in order leaves the last file on top
+          for (const f of files) {
+            if (parentOf(f) === galFolder && !images.some((x) => x.rel === f)) {
+              images.unshift({ rel: f, name: baseName(f), seed: evt.seed });
+            }
           }
           if (!els.pageGallery.hidden) loadGallery();
           toast("Image regenerated");

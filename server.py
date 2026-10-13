@@ -2811,13 +2811,17 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     evt = out["evt"]
                     agent.push(evt)
-                    new_rel = rel_from_url(evt["files"][0])
+                    saved = [rel_from_url(f) for f in evt["files"]]
+                    new_rel = saved[0]
                     # the picture changed — the conversation must follow it,
                     # or the next turn keeps describing the old one
                     agent.sync_gen_context(rel, new_rel, evt.get("gen"))
                     agent._save_state()
                     q.put({"type": "regen_done",
                            "file": new_rel,
+                           # a batch saved every file under one event — the
+                           # carousel needs all of them, not just the first
+                           "files": saved,
                            "src": rel,
                            "seed": evt.get("seed"),
                            "idx": len(agent.timeline) - 1})
