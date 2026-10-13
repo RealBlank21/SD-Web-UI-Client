@@ -1300,14 +1300,12 @@ function lbFetchInfo(im) {
   }).catch(() => { /* metadata is optional */ });
 }
 
-/* Guide entry = "### <checkpoint>", the prompt, the negative, then the
-   parameters blob — the same shape the entries in model_guide.txt take. The
-   checkpoint only ever appears inside that blob (output files are named
-   ai_<stamp>_<seed>_<n>, with no model in them), so lift it out of there. */
+/* Guide entry = the prompt, the negative, then the parameters blob — the shape
+   the entries in model_guide.txt take. No "### <checkpoint>" header: the model
+   already rides along inside the parameters as "Model: ...", so a header would
+   only repeat it. */
 function lbEntryText() {
-  const m = /(?:^|,)\s*Model:\s*([^,]+)/.exec(els.lbParams.textContent || "");
   const out = [];
-  if (m) out.push("### " + m[1].trim());
   const prompt = els.lbPrompt.textContent.trim();
   if (prompt) out.push(prompt);
   const neg = els.lbNeg.textContent.trim();
@@ -3095,10 +3093,31 @@ els.hsList.addEventListener("touchend", () => {
   if (hsLpTimer) { clearTimeout(hsLpTimer); hsLpTimer = null; hsLpStart = null; }
 }, { passive: true });
 
+/* Copy via a throwaway textarea when the async clipboard is unusable.
+   Reached over plain http on a LAN address — how the phone gets to this —
+   the page is not a secure context, so navigator.clipboard is undefined and
+   calling it throws synchronously, before .catch() is ever attached. That
+   silent throw is why the buttons appeared to do nothing at all. */
+function legacyCopy(text) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+
 function copyText(text) {
-  navigator.clipboard.writeText(text)
-    .then(() => toast("Copied"))
-    .catch(() => toast("Copy failed", true));
+  const done = (ok) => toast(ok ? "Copied" : "Copy failed", !ok);
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => done(true), () => done(legacyCopy(text)));
+  } else {
+    done(legacyCopy(text));
+  }
 }
 
 /* --------------------------------------------- context menu (hold / right-click) */
