@@ -188,14 +188,16 @@ Prompt craft:
 - Sizes: SDXL/Illustrious checkpoints -> 1024x1024, 832x1216 (portrait), 1216x832.
   SD1.5 checkpoints -> 512-1024. Flux/Qwen/Anima/Krea/Z-Image -> 1024ish.
   Default 1024x1024 unless the user says otherwise.
-  If a model-guide entry below matches, follow its size/steps/cfg instead.
+  If a model-guide entry below matches, follow its size and cfg — not its
+  steps or sampler, those come from the server default.
 - seed -1 (random). Reuse a reported seed to iterate.
 - batch_size > 1 only when the user asks for several images/variations.
 
 Settings depend on the model architecture — this matters more than anything
 else, because the wrong CFG ruins a modern model:
-- SD 1.5 / SDXL: steps 20-30, cfg_scale ~7 (SDXL is fine at 4.5-7).
-  clip_skip 2 for most anime SDXL checkpoints.
+- SD 1.5 / SDXL: cfg_scale ~7 (SDXL is fine at 4.5-7), clip_skip 2 for most
+  anime SDXL checkpoints. Leave steps and sampler unset: the server defaults
+  SDXL to 12 steps, which measures identical to 20 for a third less time.
 - Distilled / Turbo DiTs (Flux.1 dev+schnell, Anima Turbo, Z-Image Turbo,
   Qwen, Wan, Lightning/LCM variants): cfg_scale MUST be 1.0-2.0 and steps
   4-15. Never send cfg 7 here — it produces grey, washed-out garbage.
@@ -278,13 +280,14 @@ def _guide_tail() -> str:
             "- Keep its quality-tag scaffolding and negative prompt; swap the\n"
             "  subject, character, composition and camera tags for what the\n"
             "  user asked for.\n"
-            "- Use its steps, CFG scale, sampler, width/height and clip_skip\n"
-            "  as-is.\n"
-            "- Its sampler names may be legacy combined ones. In Forge Neo,\n"
-            "  'DPM++ 2M Karras' means sampler 'DPM++ 2M' + scheduler 'Karras'\n"
-            "  and 'DPM++ SDE Karras' means 'DPM++ SDE' + 'Karras'. Either pass\n"
-            "  the split pair, or just pass the sampler alone — the server\n"
-            "  keeps the schedule type itself.\n"
+            "- Use its CFG scale, width/height and clip_skip as-is.\n"
+            "- Do NOT pass steps, sampler_name or scheduler. Leave them out\n"
+            "  and the server applies a measured default per architecture\n"
+            "  (SDXL: DPM++ 2M + Karras at 12 steps — output stops improving\n"
+            "  past 12, and the SDE samplers cost twice as much per step).\n"
+            "  The Steps and Sampler fields in an entry describe the old\n"
+            "  recipe that produced that reference image; they are not\n"
+            "  advice for new ones. Only pass them if the user asks.\n"
             "- Entry titles are informal names; match them to installed\n"
             "  checkpoints by similarity. Tip: an entry's 'Model hash' appears\n"
             "  in the server's checkpoint title, e.g.\n"
