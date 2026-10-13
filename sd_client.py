@@ -68,7 +68,10 @@ ARCH_LABELS = {
 ARCH_PROFILES = {
     "sd":     dict(sampler="Euler a", scheduler="automatic", cfg=6.0, steps=32,
                    dcfg=None, distilled=False, video=False, size=512),
-    "xl":     dict(sampler="Euler a", scheduler="automatic", cfg=4.5, steps=24,
+    # SDXL knee, measured on this box: 12 steps renders the same as 20, and 8
+    # is visibly broken. DPM++ 2M costs exactly what Euler / UniPC / Res
+    # Multistep cost per step, so this is free; the SDE family is 2x per step.
+    "xl":     dict(sampler="DPM++ 2M", scheduler="karras", cfg=4.5, steps=12,
                    dcfg=None, distilled=False, video=False, size=1024),
     "flux":   dict(sampler="Euler", scheduler="beta", cfg=1.0, steps=20,
                    dcfg=3.0, distilled=True, video=False, size=1024),

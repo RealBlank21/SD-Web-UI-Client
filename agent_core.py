@@ -55,11 +55,14 @@ TOOLS = [
                                              "1216x832. SD1.5: 512-1024."},
                     "height": {"type": "integer", "description": "px, see width."},
                     "steps": {"type": "integer",
-                              "description": "Sampling steps. Depends on the "
-                                             "model: 20-35 for SDXL/Anima/Krea, "
-                                             "4-15 for distilled Turbo/LCM/LCM-"
-                                             "Schnell models, 20 for Flux.1 "
-                                             "dev."},
+                              "description": "Sampling steps. Best left out — "
+                                             "the server already defaults to a "
+                                             "tuned value per architecture. If "
+                                             "you do pass one: 12 for SDXL "
+                                             "(output is flat past that), "
+                                             "20-35 for Anima/Krea, 4-15 for "
+                                             "distilled Turbo/LCM/LCM-Schnell "
+                                             "models, 20 for Flux.1 dev."},
                     "cfg_scale": {"type": "number",
                                   "description": "Prompt adherence. 4-6 for "
                                                  "SDXL/Anima/Krea, 1-2 for "
