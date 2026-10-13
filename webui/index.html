@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=55">
+<link rel="stylesheet" href="/static/style.css?v=56">
 </head>
 <body>
 
@@ -165,11 +165,11 @@
   <div class="lb-sheet" id="lb-sheet">
     <div id="lb-meta" class="lb-meta"></div>
     <div class="lb-sect" id="lb-prompt-wrap">
-      <div class="lb-label">Prompt <button class="copybtn" data-copy="lb-prompt">copy</button></div>
+      <div class="lb-label">Prompt <button class="copybtn" id="lb-copy-entry" title="Copy the prompt plus every generation setting, formatted as a model_guide.txt entry">copy</button></div>
       <p id="lb-prompt"></p>
     </div>
     <div class="lb-sect" id="lb-neg-wrap">
-      <div class="lb-label">Negative <button class="copybtn" data-copy="lb-neg">copy</button></div>
+      <div class="lb-label">Negative</div>
       <p id="lb-neg"></p>
     </div>
     <div class="lb-sect" id="lb-params-wrap">
@@ -617,6 +617,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=55"></script>
+<script src="/static/app.js?v=56"></script>
 </body>
 </html>

@@ -1300,6 +1300,23 @@ function lbFetchInfo(im) {
   }).catch(() => { /* metadata is optional */ });
 }
 
+/* Guide entry = "### <checkpoint>", the prompt, the negative, then the
+   parameters blob — the same shape the entries in model_guide.txt take. The
+   checkpoint only ever appears inside that blob (output files are named
+   ai_<stamp>_<seed>_<n>, with no model in them), so lift it out of there. */
+function lbEntryText() {
+  const m = /(?:^|,)\s*Model:\s*([^,]+)/.exec(els.lbParams.textContent || "");
+  const out = [];
+  if (m) out.push("### " + m[1].trim());
+  const prompt = els.lbPrompt.textContent.trim();
+  if (prompt) out.push(prompt);
+  const neg = els.lbNeg.textContent.trim();
+  if (neg) out.push("Negative prompt: " + neg);
+  const params = els.lbParams.textContent.trim();
+  if (params) out.push(params);
+  return out.join("\n");
+}
+
 function lbMove(d) {
   const ni = lbIndex + d;
   if (ni < 0 || ni >= lbList.length) return;
@@ -4160,7 +4177,13 @@ $("lb-delete").addEventListener("click", () => {
   const im = lbList[lbIndex];
   if (im) deleteImages([im.rel || im.name]);
 });
+$("lb-copy-entry").addEventListener("click", () => {
+  const entry = lbEntryText();
+  if (!entry) return toast("No generation settings for this image", true);
+  copyText(entry);
+});
 for (const b of document.querySelectorAll(".copybtn")) {
+  if (!b.dataset.copy) continue;      // lb-copy-entry builds its own text
   b.addEventListener("click", () => copyText($(b.dataset.copy).textContent));
 }
 
