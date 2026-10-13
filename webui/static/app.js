@@ -3609,6 +3609,14 @@ function closeRegen() {
 $("regen-cancel").addEventListener("click", closeRegen);
 regenEl.addEventListener("click", (e) => { if (e.target === regenEl) closeRegen(); });
 regenF.mode.addEventListener("change", regenSetMode);
+$("regen-seed-rand").addEventListener("click", () => {
+  // The sheet opens pre-filled with the image's own seed, so regenerating
+  // as-is reproduces it. Roll Forge's 32-bit seed space and show it rather
+  // than sending -1, so the value stays visible and re-runnable.
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  regenF.seed.value = buf[0];
+});
 $("regen-go").addEventListener("click", () => {
   const rel = regenRel;
   if (!rel) return;

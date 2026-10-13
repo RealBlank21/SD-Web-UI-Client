@@ -898,6 +898,16 @@ button:active { transform: scale(.97); }
 .regen-full textarea:focus { border-color: #4a3f78; }
 .regen-full textarea { line-height: 1.4; }
 .rg-note { font-size: 11px; color: var(--dim); margin-top: 4px; }
+.rg-seedrow { display: flex; gap: 6px; }
+.rg-seedrow input { flex: 1; min-width: 0; }
+.rg-seedrow button {
+  flex: none; width: 42px; padding: 0; border-radius: 11px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line); background: var(--panel2);
+  color: var(--accent); font-size: 17px; line-height: 1;
+  -webkit-tap-highlight-color: transparent;
+}
+.rg-seedrow button:active { transform: scale(.94); }
 .rg-grid {
   display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;
 }
