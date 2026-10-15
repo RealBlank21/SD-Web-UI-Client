@@ -669,17 +669,30 @@ button:active { transform: scale(.97); }
 .row select { flex: 1; }
 #sh-load, #sh-comp-save { padding: 0 16px; border-radius: 10px; background: var(--panel2); border: 1px solid var(--line); font-size: 13px; }
 #sh-load:disabled, #sh-comp-save:disabled { opacity: .5; }
-.sh-body button.primary, #sh-save-username, #sh-save-llm, #sh-save-sd, #sh-save-sys {
+.sh-body button.primary, #sh-save-username, #sh-save-llm, #sh-save-sd, #sh-save-sys,
+#sh-save-guide {
   padding: 10px; border-radius: 10px; font-size: 13.5px;
   background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #14101f;
 }
 #sh-save-llm, #sh-save-sd { margin-top: 2px; }
-#sh-save-sys, #sh-reset-sys { flex: 1; }
-#sh-reset-sys {
+#sh-save-sys, #sh-reset-sys, #sh-save-guide, #sh-reset-guide { flex: 1; }
+#sh-reset-sys, #sh-reset-guide {
   padding: 10px; border-radius: 10px; font-size: 13.5px;
   background: var(--panel2); color: var(--text); border: 1px solid var(--line);
 }
-#sh-reset-sys:disabled { opacity: .5; }
+#sh-reset-sys:disabled, #sh-reset-guide:disabled { opacity: .5; }
+/* the guide runs ~19k chars, so it stays folded — otherwise opening this pane
+   means scrolling past it to reach anything below */
+#sh-guide-box { margin-top: 12px; }
+#sh-guide-box summary {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--dim); cursor: pointer; list-style: none;
+  display: flex; align-items: center;
+}
+#sh-guide-box summary::-webkit-details-marker { display: none; }
+#sh-guide-box summary::before { content: "▸ "; }
+#sh-guide-box[open] summary { margin-bottom: 6px; }
+#sh-guide-box[open] summary::before { content: "▾ "; }
 .danger-btn {
   padding: 10px; border-radius: 10px; font-size: 13.5px;
   color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 30%, var(--line));

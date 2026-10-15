@@ -108,6 +108,7 @@ const els = {
   shCompActions: $("sh-comp-actions"),
   shUsername: $("sh-username"),
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
+  shGuide: $("sh-guide"), shGuideState: $("sh-guidestate"),
   chName: $("ch-name"),
   chAvatarImg: $("ch-avatar-img"), chAvatarBtn: $("ch-avatar-btn"),
   chAvatarFile: $("ch-avatar-file"),
@@ -1775,6 +1776,8 @@ async function openSettings() {
       }
       els.shSys.value = cfg.system_prompt || "";
       els.shSysState.textContent = cfg.system_prompt_custom ? "· custom" : "· default";
+      els.shGuide.value = cfg.model_guide || "";
+      els.shGuideState.textContent = cfg.model_guide_custom ? "· custom" : "· model_guide.txt";
       els.shUsername.value = cfg.username || "";
       savedComps = cfg.sd_components || {};
       renderComps(cfg.current_arch || s.current_arch || "");
@@ -3831,6 +3834,40 @@ $("sh-reset-sys").addEventListener("click", async () => {
     els.shSys.value = d.system_prompt || "";
     els.shSysState.textContent = "· default";
     toast("System message reset to default");
+  } catch (e) {
+    if (e.message !== "locked") toast("Reset failed: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+});
+$("sh-save-guide").addEventListener("click", () => {
+  const v = els.shGuide.value.trim();
+  if (!v) {
+    toast("Clear the box or use Reset to go back to model_guide.txt", true);
+    return;
+  }
+  saveSettings({ model_guide: v }, $("sh-save-guide"), "Model guide saved")
+    .then((d) => {
+      if (d) els.shGuideState.textContent =
+        d.model_guide_custom ? "· custom" : "· model_guide.txt";
+    });
+});
+$("sh-reset-guide").addEventListener("click", async () => {
+  if (!confirm("Go back to the model_guide.txt file? Your saved edits "
+             + "here will be discarded.")) return;
+  const btn = $("sh-reset-guide"), orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Resetting…";
+  try {
+    const d = await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_guide_reset: true }),
+    });
+    els.shGuide.value = d.model_guide || "";
+    els.shGuideState.textContent = "· model_guide.txt";
+    toast("Model guide reset to model_guide.txt");
   } catch (e) {
     if (e.message !== "locked") toast("Reset failed: " + e.message, true);
   } finally {

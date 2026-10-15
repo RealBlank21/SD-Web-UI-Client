@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=59">
+<link rel="stylesheet" href="/static/style.css?v=61">
 </head>
 <body>
 
@@ -347,7 +347,18 @@
         <button id="sh-save-sys">Save message</button>
         <button id="sh-reset-sys">Reset to default</button>
       </div>
-      <div class="hint">Core instructions for the AI model. The model guide (model_guide.txt) is appended after this automatically. Applies from the next message on.</div>
+      <div class="hint">Core instructions for the AI model. The model guide is appended after this automatically. Applies from the next message on.</div>
+
+      <details id="sh-guide-box">
+        <summary>Model guide <span class="dim" id="sh-guidestate"></span></summary>
+        <textarea id="sh-guide" class="mono" rows="8" spellcheck="false"
+                  autocapitalize="off" autocomplete="off"></textarea>
+        <div class="row">
+          <button id="sh-save-guide">Save guide</button>
+          <button id="sh-reset-guide">Reset to model_guide.txt</button>
+        </div>
+        <div class="hint">One <span class="mono">### checkpoint.safetensors</span> block per model: prompt, then <span class="mono">Negative prompt:</span>, then <span class="mono">Steps:</span> / <span class="mono">CFG scale:</span> / <span class="mono">Sampler:</span>. Saving stores an override in the config — model_guide.txt itself is left untouched, so reset always brings the file back. Applies from the next message on.</div>
+      </details>
     </section>
 
     <section class="sh-body" data-pane="image" hidden>
@@ -621,6 +632,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=59"></script>
+<script src="/static/app.js?v=61"></script>
 </body>
 </html>
