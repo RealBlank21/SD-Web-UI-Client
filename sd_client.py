@@ -71,7 +71,10 @@ ARCH_PROFILES = {
     # SDXL knee, measured on this box: 12 steps renders the same as 20, and 8
     # is visibly broken. DPM++ 2M costs exactly what Euler / UniPC / Res
     # Multistep cost per step, so this is free; the SDE family is 2x per step.
-    "xl":     dict(sampler="DPM++ 2M", scheduler="karras", cfg=4.5, steps=12,
+    # Raised to 14 to claw back a little fine detail in the face at ~+1.4 s.
+    # Only a fallback now: arch_profile() reads the server's own xl_t2i_step,
+    # so changing the default in Forge's UI is followed from here on.
+    "xl":     dict(sampler="DPM++ 2M", scheduler="karras", cfg=4.5, steps=14,
                    dcfg=None, distilled=False, video=False, size=1024),
     "flux":   dict(sampler="Euler", scheduler="beta", cfg=1.0, steps=20,
                    dcfg=3.0, distilled=True, video=False, size=1024),
@@ -718,8 +721,12 @@ class SDClient:
         prof["label"] = ARCH_LABELS.get(arch, arch)
         opts = self.options()
         got = False
+        # The option suffix is `step`, SINGULAR, on every architecture — there
+        # is no `<arch>_t2i_steps`. That typo meant the lookup returned None for
+        # all 12 arches, so the server's own step default was silently ignored
+        # and this always fell through to ARCH_PROFILES.
         live_keys = (("sampler", "sampler"), ("scheduler", "scheduler"),
-                     ("cfg", "cfg"), ("steps", "steps"))
+                     ("cfg", "cfg"), ("step", "steps"))
         if arch in DISTILLED_ARCHES:
             # only a real distilled family has a distilled CFG slider; the
             # other families' `<arch>_t2i_dcfg` option is the Shift slider

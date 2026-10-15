@@ -263,13 +263,20 @@ request fits that style.
 """
 
 
-def _guide_tail() -> str:
-    """Per-model settings guide from the guide file (optional section)."""
-    guide_file = Path(__file__).resolve().parent / "model_guide.txt"
-    content = ""
-    if guide_file.exists():
-        content = guide_file.read_text(encoding="utf-8",
-                                       errors="replace").strip()
+GUIDE_FILE = Path(__file__).resolve().parent / "model_guide.txt"
+
+
+def default_guide_text() -> str:
+    """The guide as it sits on disk — what the Settings page preloads."""
+    if not GUIDE_FILE.exists():
+        return ""
+    return GUIDE_FILE.read_text(encoding="utf-8", errors="replace").strip()
+
+
+def _guide_tail(override: str | None = None) -> str:
+    """Per-model settings guide (optional section): the Settings override when
+    one is saved, otherwise the guide file."""
+    content = (override or "").strip() or default_guide_text()
 
     if content:
         guide = (
@@ -312,22 +319,25 @@ def _guide_tail() -> str:
     return _FALLBACK_EXAMPLE
 
 
-def build_system_prompt(base: str | None = None) -> str:
+def build_system_prompt(base: str | None = None,
+                        guide: str | None = None) -> str:
     """Compose a full system prompt: base rules + model-guide tail.
-    Pass a custom base to swap the rules while keeping the guide."""
+    Pass a custom base to swap the rules while keeping the guide, and a custom
+    guide to swap the tail while keeping the rules."""
     return (base if base is not None else _BASE_SYSTEM_PROMPT) \
-        + "\n\n" + _guide_tail()
+        + "\n\n" + _guide_tail(guide)
 
 
 DEFAULT_BASE_PROMPT = _BASE_SYSTEM_PROMPT       # what Settings edits
-DEFAULT_SYSTEM_PROMPT = build_system_prompt()   # built-in default (base+guide)
 
 
-def effective_system_prompt(override: str | None = None) -> str:
+def effective_system_prompt(override: str | None = None,
+                            guide: str | None = None) -> str:
     """The system prompt actually sent to the LLM: the custom system message
-    with the guide tail appended, or the built-in default when unset."""
-    base = (override or "").strip()
-    return build_system_prompt(base) if base else DEFAULT_SYSTEM_PROMPT
+    and/or model guide with the built-in defaults filled in wherever the user
+    hasn't saved an override. The guide file is re-read on every call, so
+    editing model_guide.txt on disk takes effect without a restart."""
+    return build_system_prompt((override or "").strip() or None, guide)
 
 
 # The leading run of quality/scaffolding tags every guide entry opens with.
@@ -351,6 +361,43 @@ _COUNT_WORD = re.compile(r"\b(?:duo|trio)\b", re.I)
 
 # The one unambiguous "the viewer is a body in frame" tag.
 _VIEWER_BODY = re.compile(r"\bviewer'?s\s+body\b", re.I)
+
+# A count tag that stands for one person on its own.
+_SOLO_COUNT = {"solo", "1boy", "1girl"}
+
+
+def _norm_tag(t: str) -> str:
+    return re.sub(r"[\\()]", "", t.lower()).strip()
+
+
+def _is_solo_count(t: str) -> bool:
+    return _norm_tag(t) in _SOLO_COUNT
+
+
+def _count_state(prompt: str) -> tuple[int | None, int]:
+    """(people implied by a count word, sum of the numeric count tags).
+
+    `duo, 2boys` agrees - the word says two and the numbers total two.
+    `duo, 2boys, 1boy` does not: it totals three. The checkpoint has no way
+    to draw three people from two sets of tags, so it averages the pair into
+    a single body and the character comes out wearing the user's hair, eyes
+    and glasses while the user is left as a stranger in the background.
+    """
+    word: int | None = None
+    total = 0
+    for tag in (prompt or "").split(","):
+        t = tag.strip()
+        m = _COUNT_WORD.search(t)
+        if m:
+            word = 2 if m.group(0).lower() == "duo" else 3
+        total += sum(int(n) for n in _COUNT_NUM.findall(t))
+    return word, total
+
+
+def _count_is_closed(prompt: str) -> bool:
+    """True when the prompt already states how many people are in frame."""
+    word, total = _count_state(prompt)
+    return word is not None and total >= word
 
 
 def viewer_in_frame(prompt: str) -> bool:
@@ -403,7 +450,28 @@ def ensure_tags(prompt: str, tags: str, viewer_tags: str = "") -> str:
     have = [t.strip() for t in prompt.split(",") if t.strip()]
 
     def norm(t: str) -> str:
-        return re.sub(r"[\\()]", "", t.lower()).strip()
+        return _norm_tag(t)
+
+    # Reconcile the subject count before anything is injected. A character
+    # block may open with its own "1boy"/"1girl"; when the prompt has already
+    # declared the group, that tag is a contradiction rather than an identity
+    # tag, so drop the surplus instead of adding to it. Without this the
+    # injector below puts "1boy" back next to "duo, 2boys" every single time.
+    word, total = _count_state(prompt)
+    if word is not None and total > word:
+        excess = total - word
+        for idx in range(len(have) - 1, -1, -1):
+            if excess <= 0:
+                break
+            if _is_solo_count(have[idx]):
+                have.pop(idx)
+                excess -= 1
+        prompt = ", ".join(have)
+
+    # ...and never inject a lone count tag into a prompt that has already
+    # closed its own count.
+    if _count_is_closed(prompt):
+        wanted = [t for t in wanted if not _is_solo_count(t)]
 
     have_norm = {norm(t) for t in have}
     missing = []

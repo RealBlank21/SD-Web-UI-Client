@@ -55,6 +55,7 @@ from agent_core import (                      # vendored agent brain
     MAX_TOOL_ROUNDS,
     _clean_assistant_msg,
     _is_auth_error,
+    default_guide_text,
     effective_system_prompt,
     ensure_tags,
     execute_tool,
@@ -103,6 +104,10 @@ DEFAULT_CONFIG = {
     "llm_models": [DEFAULT_LLM],
     "sd_url": "http://0.0.0.0:7860",
     "system_prompt": "",   # custom system message; "" = built-in default
+    # custom model guide; "" = the model_guide.txt file on disk. Held in the
+    # config rather than written back to the file so a save never dirties a
+    # hand-maintained model_guide.txt.
+    "model_guide": "",
     "username": "",          # how the AI knows the user
     "persona_id": "",        # active user persona (data/personas.json)
     # per-architecture companion files, e.g.
@@ -514,7 +519,8 @@ class Agent:
     def _sys_msg(self) -> dict:
         """Opening system message: global override (or default) + user
         persona (or plain username) + the active character's block."""
-        base = effective_system_prompt(self.cfg.get("system_prompt"))
+        base = effective_system_prompt(self.cfg.get("system_prompt"),
+                                       self.cfg.get("model_guide"))
         persona = self.persona()
         if persona:
             nm = str(persona.get("name") or "").strip()[:80]
@@ -543,7 +549,17 @@ class Agent:
                 parts.append("Your greeting (the chat's first message) was: "
                              + c["greeting"].strip())
             parts.append("Your appearance — reflect these tags in every "
-                         "image prompt that shows you:\n"
+                         "image prompt that shows you. If your list opens "
+                         "with a count tag (1boy / 1girl) that tag counts "
+                         "only YOU: when anyone else is in the shot, DELETE "
+                         "it and write the total instead — two males are "
+                         "`duo, 2boys`, two females `duo, 2girls`, mixed "
+                         "`duo, 1boy, 1girl`. Never leave your own `1boy` "
+                         "sitting next to `2boys`: the two counts are taken "
+                         "as three people and the model resolves that by "
+                         "merging the pair into one, so the character comes "
+                         "out wearing the user's hair, eyes and glasses while "
+                         "the user is left as a stranger in the background.\n"
                          + c.get("appearance", "").strip())
             base += "\n".join(parts)
         sc = None
@@ -3501,6 +3517,7 @@ class Handler(BaseHTTPRequestHandler):
             masked = (key[:7] + "…" + key[-4:]) if len(key) > 14 \
                 else ("set" if key else "")
             override = cfg.get("system_prompt") or ""
+            guide = cfg.get("model_guide") or ""
             # from the snapshot, not from a live probe: this is the request the
             # Settings page waits on before it will paint anything at all
             sd = self.app.sd_state.snapshot()
@@ -3508,6 +3525,8 @@ class Handler(BaseHTTPRequestHandler):
                         "key_masked": masked, "has_key": bool(key),
                         "system_prompt": override or DEFAULT_BASE_PROMPT,
                         "system_prompt_custom": bool(override),
+                        "model_guide": guide or default_guide_text(),
+                        "model_guide_custom": bool(guide),
                         "username": cfg.get("username", ""),
                         "sd_components": cfg.get("sd_components") or {},
                         "current_arch": sd["current_arch"],
@@ -3518,6 +3537,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         cfg = dict(agent.cfg)
         sys_touched = False
+        guide_touched = False
         switched = None
         if "sd_url" in body:
             url = str(body["sd_url"]).strip().rstrip("/")
@@ -3562,6 +3582,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             cfg["system_prompt"] = text        # empty = default
             sys_touched = True
+        if body.get("model_guide_reset"):
+            cfg["model_guide"] = ""            # back to model_guide.txt
+            guide_touched = True
+        elif "model_guide" in body:
+            text = str(body["model_guide"]).strip()
+            # twice the system message's cap: the stock guide is already 19k
+            if len(text) > 64000:
+                self._json({"error": "model guide too long "
+                                     "(64000 characters max)"}, 400)
+                return
+            cfg["model_guide"] = text          # empty = model_guide.txt
+            guide_touched = True
         if "username" in body:
             cfg["username"] = str(body["username"]).strip()[:60]
         if "sd_components" in body:
@@ -3591,6 +3623,10 @@ class Handler(BaseHTTPRequestHandler):
             out.update({"system_prompt": cfg["system_prompt"]
                         or DEFAULT_BASE_PROMPT,
                         "system_prompt_custom": bool(cfg["system_prompt"])})
+        if guide_touched:
+            out.update({"model_guide": cfg["model_guide"]
+                        or default_guide_text(),
+                        "model_guide_custom": bool(cfg["model_guide"])})
         self._json(out)
 
     def api_personas_list(self):
@@ -4024,6 +4060,9 @@ def main():
     print(f"  Key     : {'configured' if agent.has_key() else 'NOT set — add in Settings'}")
     print(f"  LLM     : {', '.join(cfg['llm_models'])}")
     print(f"  SysMsg  : {'custom' if cfg.get('system_prompt') else 'default'}")
+    guide = cfg.get("model_guide") or ""
+    print(f"  Guide   : {'custom' if guide else 'model_guide.txt'}"
+          f"  [{len(guide or default_guide_text())} chars]")
     print(f"  SD      : {cfg['sd_url']}  [{model}]")
     print(f"  Output  : {OUT_DIR}")
     for u in advertise_urls(args.port):
