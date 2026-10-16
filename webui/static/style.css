@@ -100,25 +100,17 @@ button:active { transform: scale(.97); }
 
 .charlist { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 2px 6px 90px; }
 .char-row {
-  display: flex; align-items: center; gap: 12px; width: 100%;
+  display: flex; align-items: flex-start; gap: 12px; width: 100%;
   padding: 10px 8px; border-radius: 14px; text-align: left;
   border: 1px solid transparent;
   position: relative;
+  background: none; color: inherit; font: inherit;
+  cursor: pointer;
 }
+.char-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.char-row .char-avatar { margin-top: 1px; }
 .char-row:active { transform: scale(.98); background: var(--panel2); }
 .char-row.active { background: var(--panel2); border-color: var(--line); }
-/* favourite pin — absolutely placed so it sits over the row's spare corner
-   in both list and grid mode, without stealing the row's own tap target */
-.char-fav {
-  position: absolute; top: 5px; right: 5px;
-  width: 30px; height: 30px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 17px; line-height: 1; color: var(--dim);
-  background: none; border: 0; padding: 0;
-  user-select: none; -webkit-user-select: none;
-}
-.char-fav.on { color: var(--accent); }
-.char-fav:active { transform: scale(.85); }
 .char-avatar {
   width: 50px; height: 50px; border-radius: 16px; object-fit: cover; flex: none;
 }
@@ -127,30 +119,120 @@ button:active { transform: scale(.97); }
   background: var(--panel2); border: 1px solid var(--line);
   font-size: 20px; color: var(--accent);
 }
-.char-text { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
+.char-text { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 4px; }
 .char-text b { font-size: 15.5px; }
-.char-text .dim { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.char-now { font-size: 10px; color: var(--accent); letter-spacing: .06em; }
+.char-text .dim { font-size: 12px; }
+/* tag chips — a deterministic hue per tag so "Genshin Impact" is the same
+   colour on the card, in the filter bar, and everywhere else */
+.tagchip {
+  display: inline-flex; align-items: center;
+  font-size: 11.5px; line-height: 1; padding: 5px 9px; border-radius: 8px;
+  white-space: nowrap; color: var(--text);
+  background: hsl(var(--h, 260) 42% 26% / .55);
+  border: 1px solid hsl(var(--h, 260) 55% 62% / .55);
+}
+.tagchip.sm { font-size: 10.5px; padding: 3px 7px; border-radius: 7px; }
+button.tagchip { cursor: pointer; }
+button.tagchip:hover { border-color: hsl(var(--h, 260) 60% 70%); }
+button.tagchip.on {
+  background: hsl(var(--h, 260) 50% 32%);
+  border-color: hsl(var(--h, 260) 65% 72%);
+  color: #fff;
+}
+.char-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 
-/* characters home — grid mode (Chatterbox-style avatar cards) */
-.charlist.asgrid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-  gap: 10px; align-content: start; padding: 6px 10px 90px;
+/* the strip of filters above the list */
+.tagbar {
+  display: flex; gap: 7px; padding: 2px 12px 10px;
+  overflow-x: auto; scrollbar-width: none;
 }
-.charlist.asgrid .char-row {
-  flex-direction: column; justify-content: center; gap: 8px;
-  padding: 14px 6px 12px; text-align: center;
+.tagbar::-webkit-scrollbar { display: none; }
+.tagbar[hidden] { display: none; }
+
+/* greeting, flattened to ONE line so a long roleplay opener cannot stretch
+   its row past everyone else's. Not a reserved line — it only exists when the
+   character actually has a greeting, so a blank one leaves no gap. */
+.char-blurb {
+  font-size: 12.5px; color: var(--dim); line-height: 18px;
+  min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.charlist.asgrid .char-avatar { width: 68px; height: 68px; border-radius: 20px; }
-.charlist.asgrid .char-fav { top: 3px; right: 3px; width: 26px; height: 26px; font-size: 15px; }
-.charlist.asgrid .char-text { align-items: center; gap: 2px; }
-.charlist.asgrid .char-text .dim { display: none; }
-.charlist.asgrid .char-text b {
-  font-size: 13.5px; max-width: 100%;
+.char-top {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+}
+.char-top b {
+  font-size: 15.5px; flex: 0 0 auto; max-width: 46%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-@media (min-width: 640px) {
-  .charlist.asgrid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
+/* chips ride the name's line and clip at the right edge rather than wrapping —
+   a second row of chips is what made the list look untidy. They are the part
+   that gives way: the name is the thing you are looking for, and with three
+   tags beside it the squeeze was cutting it to "Arlecc…". */
+.char-top .char-tags { flex: 0 1 auto; flex-wrap: nowrap; overflow: hidden; }
+.char-top .tagchip { flex: none; }
+/* the pin moved inline beside the name — absolutely positioned over the row's
+   corner (the old rule) fought the two-line layout and the greeting ran under
+   it. It stays a span, not a button: the row is already a button. */
+.char-fav {
+  flex: none;
+  width: 18px; height: 18px; border-radius: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; line-height: 1; color: var(--dim);
+  background: none; border: 0; padding: 0;
+  user-select: none; -webkit-user-select: none;
+  cursor: pointer;
+}
+.char-fav.on { color: var(--accent); }
+.char-fav:active { transform: scale(.85); }
+
+/* characters home — grid mode: portrait cards, cover image on top */
+.charlist.asgrid {
+  display: grid; grid-template-columns: repeat(2, 1fr);
+  /* `auto` tracks in a grid with a definite height share that height between
+     them — measured here: the container is 411px, two rows came out at
+     153.25px each, while their content wanted 313px. `overflow: hidden` on
+     .char-row then clipped the name, greeting and count away entirely.
+     `align-content: start` does NOT prevent it, because the tracks are
+     auto-sized rather than fixed. max-content sizes each row to its items
+     and lets the container scroll, which is the behaviour a list wants. */
+  grid-auto-rows: max-content;
+  gap: 10px; align-content: start; padding: 4px 12px 90px;
+}
+.charlist.asgrid .char-row {
+  flex-direction: column; align-items: stretch; justify-content: flex-start;
+  gap: 7px; padding: 0 0 10px; text-align: left;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  overflow: hidden;
+}
+.charlist.asgrid .char-avatar {
+  width: 100%; height: 168px; border-radius: 0; display: block;
+}
+.charlist.asgrid .ch-noavatar {
+  width: 100%; height: 168px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 34px; color: var(--dim);
+}
+.charlist.asgrid .char-text { padding: 0 10px; gap: 4px; }
+.charlist.asgrid .char-top { flex-wrap: wrap; row-gap: 5px; }
+.charlist.asgrid .char-top b { font-size: 14px; flex: 1 1 auto; }
+/* opposite of list mode: here the chips get their own lines above the name,
+   because there is width for it and it is what the cover-art layout wants */
+.charlist.asgrid .char-top .char-tags {
+  flex: 1 1 100%; flex-wrap: wrap; overflow: visible; order: -1;
+}
+/* grid has the room to show more of the greeting than one line */
+.charlist.asgrid .char-blurb {
+  white-space: normal; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+}
+.charlist.asgrid .char-text .dim { font-size: 11.5px; }
+@media (min-width: 620px) {
+  .charlist.asgrid { grid-template-columns: repeat(3, 1fr); }
+  .charlist.asgrid .char-avatar { height: 210px; }
+  .charlist.asgrid .ch-noavatar { height: 210px; }
+}
+@media (min-width: 900px) {
+  .charlist.asgrid { grid-template-columns: repeat(4, 1fr); }
 }
 
 .fab {
@@ -998,6 +1080,280 @@ button:active { transform: scale(.97); }
   background: var(--bg); color: var(--text); border: 1px solid var(--line);
 }
 .comp-card select { font-size: 14px; }
+
+/* ------------------------------------------------- LoRA library + picker */
+
+/* Built for volume: one row per LoRA, collapsed by default, so fifty of
+   them is a list you scan rather than a document you read. */
+/* Text fields want the whole row; the short controls share two per line.
+   A `flex: 1` text box next to a select was being squeezed to ~45% and
+   clipping its placeholder, and "Most downloaded" was truncating to
+   "Most downloadec" — both just from not giving them a row of their own. */
+.lora-tools {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px;
+}
+.lora-tools input.wide { flex: 1 1 100%; min-width: 0; }
+.lora-tools input:not(.wide) { flex: 1 1 120px; min-width: 0; }
+.lora-tools select { flex: 1 1 130px; min-width: 0; }
+.lora-tools button.grow { flex: 1 1 130px; }
+
+/* The global reset is `button { background: none; border: 0 }` and every
+   button in this app is styled individually. Everything below is unstyled by
+   default, which is why the download / load-more / details controls came out
+   as bare text that was easy to miss on a phone. */
+.lora-tools button, .dl-row button, .lm-foot button, #sh-dl-more {
+  padding: 9px 14px; border-radius: 10px;
+  background: var(--panel2); border: 1px solid var(--line);
+  color: var(--text); font-size: 13.5px; white-space: nowrap;
+}
+.lora-tools button:hover, .dl-row button:hover:not(:disabled),
+.lm-foot button:hover:not(:disabled), #sh-dl-more:hover:not(:hidden) {
+  border-color: var(--accent);
+}
+.lora-tools button.primary, .dl-row button.primary, .lm-foot button.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #14101f; border-color: transparent; font-weight: 600;
+}
+.lora-tools button:disabled, .dl-row button:disabled, .lm-foot button:disabled {
+  opacity: .5; cursor: default;
+}
+.lora-tools button.sq { padding: 9px 12px; font-size: 15px; line-height: 1; flex: 0 0 auto; }
+
+/* small square icon buttons on each installed row */
+.lora-caret, .lora-del {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; flex: none;
+  border-radius: 9px; background: var(--panel2);
+  border: 1px solid var(--line); color: var(--dim);
+  font-size: 14px; line-height: 1; padding: 0;
+}
+.lora-caret:hover, .lora-del:hover { color: var(--text); border-color: var(--accent); }
+.lora-del:hover { color: var(--err); border-color: var(--err); }
+.lm-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; flex: none;
+  border-radius: 9px; background: var(--panel2);
+  border: 1px solid var(--line); color: var(--dim);
+  font-size: 15px; line-height: 1; padding: 0;
+}
+.lm-x:hover { color: var(--text); border-color: var(--accent); }
+
+/* checkbox that is not a full-width field — sized to match the buttons
+   beside it rather than reading as a different kind of control, with a
+   pressed state so a toggle looks like one.
+
+   Scoped as `.sh-body .tgl` on purpose. `.sh-body label` is what gives every
+   field its uppercase 11px caption plus `margin-top: 12px`, and at (0,1,1) it
+   beats a bare `.tgl` at (0,1,0) — which is exactly what was happening: the
+   caption rendered as "SFW ONLY" in 11px and the 12px top margin made the box
+   sit 12px proud, so it read as shorter than the select beside it. */
+.sh-body .tgl {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  flex: 1 1 130px;
+  font-size: 13.5px; color: var(--text); margin: 0;
+  text-transform: none; letter-spacing: 0; line-height: normal;
+  padding: 9px 14px; border-radius: 10px;
+  background: var(--panel2); border: 1px solid var(--line);
+  white-space: nowrap; cursor: pointer; user-select: none;
+}
+.sh-body .tgl:hover { border-color: var(--accent); }
+.sh-body .tgl.on {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #14101f; border-color: transparent; font-weight: 600;
+}
+.sh-body .tgl input[type="checkbox"] {
+  width: 16px; height: 16px; flex: none; margin: 0; padding: 0;
+  accent-color: var(--accent);
+}
+.sh-body .tgl.on input[type="checkbox"] { accent-color: #14101f; }
+
+/* sits under the results, not up with the controls */
+#sh-dl-more {
+  width: 100%; margin-top: 8px;
+  padding: 12px 14px; font-size: 14px;
+}
+
+/* view toggle, in Settings > Appearance. Scoped to #charseg because the
+   lightbox mode selector is also a .seg and should keep its subtler state. */
+#charseg button.on {
+  background: var(--accent); color: #14101f;
+  box-shadow: none; font-weight: 600;
+}
+
+.buildstamp {
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--bg); border: 1px solid var(--line);
+  font-size: 15px; color: var(--text);
+}
+
+.lora-list { display: flex; flex-direction: column; gap: 6px; }
+
+.lora-row {
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel2); overflow: hidden;
+}
+.lora-row.bad { border-color: var(--err); }
+
+.lora-head {
+  display: flex; align-items: flex-start; gap: 8px; padding: 10px;
+}
+
+/* The name is a filename, and filenames are long and unbreakable-looking.
+   Truncating it hides the one string a card has to reference, so it wraps
+   instead and breaks mid-word where it has to. */
+.lora-names {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+}
+.lora-name {
+  font-size: 13px; line-height: 1.35;
+  overflow-wrap: anywhere; word-break: break-word;
+}
+.lora-alias { font-size: 11px; }
+
+.lora-body {
+  padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--line);
+}
+/* scoped like .tgl for the same reason: this sits inside .sh-body, where a
+   bare `.lora-body label` only wins on source order, not on merit */
+.sh-body .lora-body label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px; color: var(--dim);
+  margin: 0; text-transform: uppercase; letter-spacing: .08em;
+}
+.sh-body .lora-body input, .sh-body .lora-body textarea {
+  font-size: 16px; padding: 8px 10px; border-radius: 10px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  width: 100%;
+}
+.sh-body .lora-body textarea { font-size: 13px; resize: vertical; }
+.lora-statusrow {
+  display: flex; align-items: center; gap: 10px; margin-top: 2px;
+}
+.lora-status { flex: 1; font-size: 11px; }
+
+/* the card's picker
+   `.page-body input { width: 100% }` and `.page-body label { text-transform:
+   uppercase }` are meant for fields and land on this row too — the checkbox
+   stretched to the full width and the name came out in small caps outside the
+   box. Both need an explicit undo, same as the house `.check` rule does. */
+.ch-lora-list { display: flex; flex-direction: column; gap: 6px; }
+.ch-lora {
+  display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel2);
+  cursor: pointer;
+  margin: 0; text-transform: none; letter-spacing: 0; color: var(--text);
+  font-size: 13px;
+}
+.ch-lora.on { border-color: var(--accent); }
+.page-body .ch-lora input[type="checkbox"] {
+  width: 17px; height: 17px; flex: none; margin: 2px 0 0; padding: 0;
+  accent-color: var(--accent);
+}
+.ch-lora-txt {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1;
+}
+.ch-lora-file {
+  font-size: 13px; line-height: 1.35; overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.ch-lora-txt .dim, .ch-lora-txt .warn { font-size: 11px; }
+.warn { color: var(--err); }
+
+/* ---------------------------------------------------- CivitAI browse panel
+   Separate from the installed list on purpose: those are on disk, these are
+   somewhere else entirely, and mixing them makes "installed" mean two things. */
+#sh-dl-box { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+#sh-dl-box summary {
+  cursor: pointer; font-size: 12px; color: var(--dim);
+  text-transform: uppercase; letter-spacing: .08em;
+}
+#sh-dl-box summary .dim { text-transform: none; letter-spacing: 0; }
+#sh-dl-box .lora-tools { margin-top: 10px; }
+
+.dl-list { display: flex; flex-direction: column; gap: 6px; }
+.dl-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel2);
+}
+.dl-row.have { opacity: .62; }
+.dl-thumb {
+  width: 46px; height: 46px; flex: none; border-radius: 8px;
+  object-fit: cover; background: var(--bg);
+}
+.dl-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dl-name {
+  font-size: 13px; line-height: 1.35; overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.dl-main .dim, .dl-main .warn { font-size: 11px; }
+.dl-row button { flex: none; min-width: 84px; }
+.dl-trig { font-size: 11px; color: var(--accent); }
+
+/* --------------------------------------------------- LoRA detail popup */
+#lora-modal {
+  position: fixed; inset: 0; z-index: 120;
+  background: rgba(5, 7, 12, .72);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+#lora-modal[hidden] { display: none; }
+#lora-modal-card {
+  width: 100%; max-width: 560px; max-height: min(88vh, 900px);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 16px; box-shadow: 0 18px 60px rgba(0, 0, 0, .6);
+}
+.lm-head {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 14px 14px 10px; border-bottom: 1px solid var(--line);
+}
+.lm-title { flex: 1; min-width: 0; }
+.lm-name { font-size: 15px; line-height: 1.3; overflow-wrap: anywhere; }
+.lm-head .dim { font-size: 11px; margin-top: 3px; overflow-wrap: anywhere; }
+.lm-x {
+  flex: none;
+}
+
+.lm-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
+.lm-stats { font-size: 11px; color: var(--dim); margin-bottom: 12px; }
+.lm-sec { margin-bottom: 14px; }
+.lm-lab {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--dim); margin-bottom: 6px;
+}
+.lm-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.lm-chip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; padding: 3px 7px; border-radius: 7px;
+  background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+  overflow-wrap: anywhere;
+}
+.lm-desc {
+  font-size: 13px; line-height: 1.5; color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.lm-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+}
+.lm-shot {
+  position: relative; margin: 0; border-radius: 9px; overflow: hidden;
+  background: var(--bg); aspect-ratio: 1 / 1; cursor: pointer;
+}
+.lm-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.lm-shot.blurred img { filter: blur(22px); transform: scale(1.15); }
+.lm-nsfw {
+  position: absolute; left: 4px; bottom: 4px;
+  font-size: 9px; letter-spacing: .06em; padding: 2px 5px; border-radius: 5px;
+  background: rgba(5, 7, 12, .8); color: var(--err);
+  border: 1px solid var(--err);
+}
+.lm-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 14px; border-top: 1px solid var(--line);
+}
+.lm-foot .dim { flex: 1; font-size: 11px; line-height: 1.35; }
+.lm-foot button { flex: none; min-width: 104px; }
 
 /* ---------------------------------------------- inline AI reply editing */
 

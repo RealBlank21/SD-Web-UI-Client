@@ -27,6 +27,34 @@
 
 const $ = (id) => document.getElementById(id);
 
+/* ------------------------------------------------ stale-build guard
+   The guard above catches old DOM + new JS. It cannot catch the other
+   direction, which is what actually happens in practice: a proxy in front of
+   this server rewrites `no-cache` into a multi-hour `max-age`, so index.html,
+   app.js and style.css all sit in the browser cache together, consistently
+   agreeing — on a build several versions old. Nothing is mismatched, so
+   nothing reloads, and the page just renders the old UI.
+
+   So ask the origin which build index.html points at, and compare that with
+   the script tag that is actually running. If they differ, this page is
+   stale no matter how internally consistent it is. */
+(function guardStaleBuild() {
+  const self_src = document.querySelector('script[src*="app.js"]');
+  const mine = self_src && /app\.js\?v=(\d+)/.exec(self_src.getAttribute("src") || "");
+  if (!mine) return;
+  if (Number(sessionStorage.getItem("stale-reload") || 0) >= 2) return;
+  fetch("index.html", { cache: "no-store" })
+    .then((r) => (r.ok ? r.text() : ""))
+    .then((html) => {
+      const m = /app\.js\?v=(\d+)/.exec(html || "");
+      if (!m || m[1] === mine[1]) return;
+      sessionStorage.setItem("stale-reload",
+        String(Number(sessionStorage.getItem("stale-reload") || 0) + 1));
+      location.reload();
+    })
+    .catch(() => { /* offline: the service worker cache is the best we have */ });
+})();
+
 /** addEventListener that tolerates a missing element. Returns the element (or
     null) so callers can still chain when they need to. */
 function on(id, event, fn, opts) {
@@ -58,6 +86,7 @@ const els = {
   viewChars: $("view-chars"), viewChat: $("view-chat"),
   pageGallery: $("page-gallery"),
   charSearch: $("char-search"), charlist: $("charlist"),
+  charTagBar: $("char-tags"),
   charempty: $("charempty"),
   chatScroll: $("chat-scroll"), chatCharname: $("chat-charname"),
   btnHistory: $("btn-history"), pageHist: $("page-hist"),
@@ -128,6 +157,17 @@ const els = {
   gpEmpty: $("gp-empty"), gpEmptyText: $("gp-empty-text"),
   chAppearance: $("ch-appearance"), chPersona: $("ch-persona"),
   chGreeting: $("ch-greeting"), chModel: $("ch-model"), chSize: $("ch-size"),
+  chTags: $("ch-tags"),
+  chLoraList: $("ch-lora-list"), chLoraCount: $("ch-loracount"),
+  shLoraList: $("sh-lora-list"), shLoraQ: $("sh-lora-q"),
+  shLoraArch: $("sh-lora-arch"), shLoraRefresh: $("sh-lora-refresh"),
+  shLoraNote: $("sh-lora-note"), shLoraUse: $("sh-lora-use"),
+  shLoraCount: $("sh-loracount"),
+  shDlBox: $("sh-dl-box"), shDlQ: $("sh-dl-q"), shDlSort: $("sh-dl-sort"),
+  shDlGo: $("sh-dl-go"), shDlList: $("sh-dl-list"), shDlMore: $("sh-dl-more"),
+  shDlState: $("sh-dl-state"), shDlPeriod: $("sh-dl-period"),
+  shDlTag: $("sh-dl-tag"), shDlArch: $("sh-dl-arch"), shDlSfw: $("sh-dl-sfw"),
+  loraModal: $("lora-modal"), loraModalCard: $("lora-modal-card"),
   chTemp: $("ch-temp"), chMaxtok: $("ch-maxtok"),
   chDelete: $("ch-delete"),
   toast: $("toast"),
@@ -1615,6 +1655,7 @@ function setPsTab(name) {
   }
   document.querySelector(".ps-body").scrollTop = 0;
   if (name === "llm") loadLlmModels(false);     // the picker needs the list
+  if (name === "loras") loadLoras();            // the list is the pane's content
 }
 
 /* ------------------------------------- LLM chain (OpenRouter model picker) */
@@ -1918,6 +1959,568 @@ function compArchList() {
   return out;
 }
 
+// ------------------------------------------------------------------- LoRAs
+
+// A collection, not a document. Fifty of these is the expected size, so every
+// row is independent, searchable and collapsible — the model_guide textarea
+// shape does not survive the count, and its 64k cap would become a wall.
+let loraRows = [];
+let loraArchNow = "";
+let chLoraSel = [];      // names ticked on the card being edited, in order
+let chLoraDirty = false;
+
+const ARCH_LABEL = {
+  xl: "SDXL", sd: "SD 1.5", sd3: "SD3", flux: "Flux", qwen: "Qwen",
+  anima: "Anima", krea: "Krea", wan: "Wan", zimage: "Z-Image",
+};
+
+function loraArchLabel(a) { return ARCH_LABEL[a] || a || "unknown"; }
+
+async function loadLoras() {
+  try {
+    const d = await api("/api/loras");
+    loraRows = d.loras || [];
+    loraArchNow = d.current_arch || "";
+    renderLoraArchFilter();
+    renderLoras();
+    renderChLoras();
+  } catch (e) {
+    if (els.shLoraList) els.shLoraList.textContent = "";
+    if (els.shLoraList) els.shLoraList.appendChild(el("div", "hint", String(e)));
+  }
+}
+
+function renderLoraArchFilter() {
+  const sel = els.shLoraArch;
+  if (!sel) return;
+  const have = new Set(loraRows.map((r) => r.arch).filter(Boolean));
+  const want = JSON.stringify([...have].sort()) + "|" + sel.value;
+  if (sel.dataset.sig === want) return;
+  sel.dataset.sig = want;
+  const prev = sel.value;
+  sel.textContent = "";
+  const all = el("option", null, "All architectures");
+  all.value = "";
+  sel.appendChild(all);
+  for (const a of [...have].sort()) {
+    const o = el("option", null, loraArchLabel(a));
+    o.value = a;
+    sel.appendChild(o);
+  }
+  sel.value = have.has(prev) ? prev : "";
+}
+
+function loraFiltered() {
+  const q = (els.shLoraQ ? els.shLoraQ.value : "").trim().toLowerCase();
+  const arch = els.shLoraArch ? els.shLoraArch.value : "";
+  const note = els.shLoraNote ? els.shLoraNote.value : "";
+  const use = els.shLoraUse ? els.shLoraUse.value : "";
+  const worn = wornLoraNames();
+  return loraRows.filter((r) => {
+    if (arch && r.arch !== arch) return false;
+    // "has notes" means something the user (or the CivitaiAI seed) actually
+    // wrote — an untouched record has an empty trigger and empty notes, and
+    // filtering on `described` alone would count those as annotated.
+    const annotated = !!(r.trigger || r.notes || r.example);
+    if (note === "yes" && !annotated) return false;
+    if (note === "no" && annotated) return false;
+    const isWorn = worn.has(r.name);
+    if (use === "yes" && !isWorn) return false;
+    if (use === "no" && isWorn) return false;
+    if (!q) return true;
+    return [r.name, r.trigger, r.notes, r.alias]
+      .some((v) => String(v || "").toLowerCase().includes(q));
+  });
+}
+
+// Which LoRAs any character card currently references. Read straight off the
+// card list rather than a cached module mirror, so it cannot go stale the way
+// a "currently selected card" flag does.
+function wornLoraNames() {
+  const out = new Set();
+  for (const c of (chars || [])) {
+    for (const n of (c.loras || [])) out.add(n);
+  }
+  return out;
+}
+
+function loraStatus(r) {
+  const bits = [];
+  bits.push(r.installed ? loraArchLabel(r.arch) : "not installed");
+  if (r.installed && r.file_arch && r.arch && r.file_arch !== r.arch) {
+    bits.push("file says " + loraArchLabel(r.file_arch));
+  }
+  if (r.rank) bits.push("rank " + r.rank);
+  if (!r.described) bits.push("no notes yet");
+  return bits.join(" · ");
+}
+
+// What Forge has to be given, and what actually sits in models/Lora. Both, in
+// full: the reference string is what goes in a card, and a LoRA whose own
+// trainer wrote an ss_output_name resolves under BOTH, so showing one without
+// the other leaves you guessing which one to copy.
+function loraFileName(r) {
+  const base = String(r.name || "");
+  if (!base) return "";
+  return /\.(safetensors|ckpt|pt)$/i.test(base) ? base : base + ".safetensors";
+}
+
+function loraRow(r) {
+  const row = el("div", "lora-row" + (r.mismatch ? " bad" : ""));
+  const head = el("div", "lora-head");
+
+  const caret = el("button", "lora-caret", "▸");
+  caret.setAttribute("aria-label", "Expand");
+  head.appendChild(caret);
+
+  const names = el("div", "lora-names");
+  names.appendChild(el("span", "lora-name", loraFileName(r)));
+  if (r.alias && r.alias !== r.name) {
+    names.appendChild(el("span", "dim lora-alias", "goes by “" + r.alias + "”"));
+  }
+  if (!r.installed) {
+    names.appendChild(el("span", "dim",
+      "no such file in the server's models/Lora folder — write notes now, "
+      + "attach it later"));
+  }
+  head.appendChild(names);
+
+  const del = el("button", "lora-del", "✕");
+  del.setAttribute("aria-label", "Forget this LoRA");
+  del.title = r.installed
+    ? "Delete the notes for this file (the file stays)"
+    : "Forget this — no file is left on the server";
+  head.appendChild(del);
+
+  const body = el("div", "lora-body");
+  body.hidden = true;
+
+  const f = (label, key, ph, area) => {
+    const wrap = el("label", null, label);
+    const inp = area ? el("textarea", "mono") : el("input", "mono");
+    if (!area) inp.type = "text";
+    inp.value = r[key] || "";
+    inp.placeholder = ph || "";
+    inp.spellcheck = false;
+    wrap.appendChild(inp);
+    body.appendChild(wrap);
+    return inp;
+  };
+  const weight = f("Weight", "weight", "0.9");
+  weight.setAttribute("inputmode", "decimal");
+  weight.value = r.weight ?? 1;
+  const trigger = f("Trigger word", "trigger", "mitia");
+  const arch = f("Architecture", "arch", "xl — blank = guess from the file");
+  const notes = f("Notes for the AI", "notes",
+    "light blue messy hair, purple eyes, gold atom brooch", true);
+  const example = f("Example prompt", "example",
+    "masterpiece, best quality, mitia, 1boy, solo", true);
+
+  const save = el("button", "primary", "Save");
+  const gather = () => ({
+    weight: Math.min(1.5, Math.max(0, parseFloat(weight.value) || 0)),
+    trigger: trigger.value.trim(),
+    arch: arch.value.trim().toLowerCase(),
+    notes: notes.value.trim(),
+    example: example.value.trim(),
+    enabled: true,
+  });
+  const statusRow = el("div", "lora-statusrow");
+  statusRow.appendChild(el("span", "dim lora-status", loraStatus(r)));
+  statusRow.appendChild(save);
+  body.appendChild(statusRow);
+
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    try {
+      const d = await api("/api/loras", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "save", name: r.name, record: gather() }),
+      });
+      loraRows = d.loras || loraRows;
+      loraArchNow = d.current_arch || loraArchNow;
+      renderLoraArchFilter(); renderLoras(); renderChLoras();
+      toast("Saved");
+    } catch (e) { toast(String(e), true); }
+    save.disabled = false;
+  });
+
+  del.addEventListener("click", async () => {
+    if (!confirm("Forget “" + r.name + "”?\n\nIts notes and weight are "
+      + "deleted, and any card wearing it stops wearing it. The file on disk "
+      + "is left alone.")) return;
+    try {
+      const d = await api("/api/loras", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", name: r.name }),
+      });
+      loraRows = d.loras || [];
+      chLoraSel = chLoraSel.filter((n) => n !== r.name);
+      renderLoraArchFilter(); renderLoras(); renderChLoras();
+      toast("Forgot " + r.name);
+    } catch (e) { toast(String(e), true); }
+  });
+
+  caret.addEventListener("click", () => {
+    body.hidden = !body.hidden;
+    caret.textContent = body.hidden ? "▸" : "▾";
+  });
+
+  row.appendChild(head);
+  row.appendChild(body);
+  return row;
+}
+
+function renderLoras() {
+  const box = els.shLoraList;
+  if (!box) return;
+  box.textContent = "";
+  const rows = loraFiltered();
+  const inst = loraRows.filter((r) => r.installed).length;
+  if (els.shLoraCount) {
+    els.shLoraCount.textContent = loraRows.length
+      ? "— " + inst + " installed, " + loraRows.length + " known"
+      : "";
+  }
+  if (!loraRows.length) {
+    box.appendChild(el("div", "hint",
+      "No LoRAs on the server. Drop .safetensors files into its models/Lora "
+      + "folder and press ↻ — they are picked up from there, nothing to "
+      + "import."));
+    return;
+  }
+  if (!rows.length) {
+    box.appendChild(el("div", "hint", "Nothing matches that search."));
+    return;
+  }
+  for (const r of rows) box.appendChild(loraRow(r));
+}
+
+// -------------------------------------------------------- CivitAI browsing
+//
+// Kept deliberately separate from the list above: those LoRAs are on disk,
+// these are somewhere else entirely. Collapsed by default so the installed
+// set stays the thing you look at.
+
+let dlItems = [];
+let dlCursor = "";
+let dlBusy = false;
+let dlQuery = "";
+
+async function searchLoras(reset) {
+  if (dlBusy) return;
+  dlBusy = true;
+  els.shDlGo.disabled = true;
+  els.shDlState.textContent = "searching…";
+  const q = els.shDlQ.value.trim();
+  const tag = els.shDlTag.value.trim();
+  if (reset) { dlQuery = q + " " + tag; dlItems = []; dlCursor = ""; }
+  try {
+    const p = new URLSearchParams({
+      q, sort: els.shDlSort.value, period: els.shDlPeriod.value, tag,
+      cursor: reset ? "" : dlCursor, limit: "24",
+    });
+    const d = await api("/api/loras/search?" + p);
+    dlItems = reset ? d.items : dlItems.concat(d.items || []);
+    dlCursor = d.next_cursor || "";
+    renderDlArchFilter();
+    renderDl();
+    if (d.cached) {
+      els.shDlState.textContent = "— cached" + (d.age_s ? ", " + d.age_s + "s old" : "");
+    } else {
+      els.shDlState.textContent = "";
+    }
+  } catch (e) {
+    els.shDlState.textContent = "";
+    if (reset) {
+      dlItems = [];
+      els.shDlList.textContent = "";
+      els.shDlList.appendChild(el("div", "hint", "Search failed: " + e));
+    } else {
+      toast("Could not load more", true);
+    }
+  }
+  dlBusy = false;
+  els.shDlGo.disabled = false;
+  els.shDlMore.disabled = false;
+}
+
+function renderDlArchFilter() {
+  const sel = els.shDlArch;
+  if (!sel) return;
+  const have = new Set(dlItems.map((r) => r.arch).filter(Boolean));
+  const want = [...have].sort().join(",") + "|" + sel.value;
+  if (sel.dataset.sig === want) return;
+  sel.dataset.sig = want;
+  const prev = sel.value;
+  sel.textContent = "";
+  const all = el("option", null, "Any architecture");
+  all.value = "";
+  sel.appendChild(all);
+  for (const a of [...have].sort()) {
+    const o = el("option", null, loraArchLabel(a));
+    o.value = a;
+    sel.appendChild(o);
+  }
+  sel.value = have.has(prev) ? prev : "";
+}
+
+// Search-result filters that Civitai has no parameter for. Its `baseModel=`
+// is silently ignored (asked for Illustrious, got SD 1.5 back), so filtering
+// architecture here — off the baseModels it actually returned — is the only
+// version of this filter that tells the truth.
+function dlFiltered() {
+  const arch = els.shDlArch ? els.shDlArch.value : "";
+  const sfw = els.shDlSfw && els.shDlSfw.checked;
+  return dlItems.filter((it) => {
+    if (arch && it.arch !== arch) return false;
+    if (sfw && it.nsfw) return false;
+    return true;
+  });
+}
+
+function renderDl() {
+  const box = els.shDlList;
+  box.textContent = "";
+  const rows = dlFiltered();
+  if (!dlItems.length) {
+    box.appendChild(el("div", "hint",
+      "Nothing found. Try a character name, a style, or a concept."));
+    els.shDlMore.hidden = true;
+    return;
+  }
+  if (!rows.length) {
+    box.appendChild(el("div", "hint",
+      "Nothing matches those filters — " + dlItems.length + " result(s) hidden."));
+    els.shDlMore.hidden = !dlCursor;
+    return;
+  }
+  for (const it of rows) box.appendChild(dlRow(it));
+  els.shDlMore.hidden = !dlCursor;
+}
+
+function dlRow(it) {
+  const row = el("div", "dl-row" + (it.installed ? " have" : ""));
+  if (it.images && it.images.length) {
+    const img = el("img", "dl-thumb");
+    img.src = it.images[0].url;
+    img.alt = "";
+    img.loading = "lazy";
+    row.appendChild(img);
+  }
+  const main = el("div", "dl-main");
+  main.appendChild(el("span", "dl-name", it.file || it.name));
+
+  const bits = [];
+  if (it.civitai_base) bits.push(it.civitai_base);
+  bits.push(it.size_mb + " MB");
+  if (it.downloads) bits.push(it.downloads.toLocaleString() + " downloads");
+  if (it.version_name && it.version_name !== "Main") {
+    bits.push(it.version_name);
+  }
+  main.appendChild(el("span", "dim", bits.join(" · ")));
+  if (it.trained && it.trained.length) {
+    main.appendChild(el("span", "dl-trig", "trigger: " + it.trained[0]));
+  }
+  if (it.nsfw) main.appendChild(el("span", "warn", "contains NSFW"));
+  row.appendChild(main);
+
+  const btn = el("button", null, it.installed ? "Installed" : "Details");
+  btn.addEventListener("click", () => openLoraModal(it));
+  row.appendChild(btn);
+  return row;
+}
+
+// ------------------------------------------------------------ detail popup
+
+let modalBusy = false;
+
+function closeLoraModal() {
+  els.loraModal.hidden = true;
+  els.loraModalCard.textContent = "";
+}
+
+function openLoraModal(it) {
+  const card = els.loraModalCard;
+  card.textContent = "";
+
+  const head = el("div", "lm-head");
+  const h = el("div", "lm-title");
+  h.appendChild(el("div", "lm-name", it.model_name || it.file || it.name));
+  const sub = [it.file, it.civitai_base, it.size_mb + " MB"].filter(Boolean);
+  h.appendChild(el("div", "dim", sub.join(" · ")));
+  head.appendChild(h);
+  const x = el("button", "lm-x", "✕");
+  x.setAttribute("aria-label", "Close");
+  x.addEventListener("click", closeLoraModal);
+  head.appendChild(x);
+  card.appendChild(head);
+
+  const body = el("div", "lm-body");
+
+  const stat = [];
+  if (it.downloads) stat.push(it.downloads.toLocaleString() + " downloads");
+  if (it.rating) stat.push(it.rating.toLocaleString() + " likes");
+  if (it.creator) stat.push("by " + it.creator);
+  if (it.version_name && it.version_name !== "Main") {
+    stat.push("version " + it.version_name);
+  }
+  if (stat.length) body.appendChild(el("div", "lm-stats", stat.join(" · ")));
+
+  // The whole point of the popup: a filename says nothing about what a LoRA
+  // actually does, and Civitai has already told us in three separate fields.
+  if (it.trained && it.trained.length) {
+    const tw = el("div", "lm-sec");
+    tw.appendChild(el("div", "lm-lab", "Trigger words"));
+    const chips = el("div", "lm-chips");
+    for (const t of it.trained) chips.appendChild(el("span", "lm-chip", t));
+    tw.appendChild(chips);
+    body.appendChild(tw);
+  }
+  if (it.desc) {
+    const d = el("div", "lm-sec");
+    d.appendChild(el("div", "lm-lab", "About"));
+    d.appendChild(el("div", "lm-desc", it.desc));
+    body.appendChild(d);
+  }
+  if (it.images && it.images.length) {
+    const g = el("div", "lm-sec");
+    g.appendChild(el("div", "lm-lab",
+      "Preview" + (it.images.length >= 10 ? " (first 10)" : "")));
+    const grid = el("div", "lm-grid");
+    for (const im of it.images) {
+      const fig = el("figure", "lm-shot");
+      const img = el("img");
+      img.src = im.url;
+      img.alt = "";
+      img.loading = "lazy";
+      fig.appendChild(img);
+      if (im.nsfw) {
+        // Blurred rather than hidden. The app has no NSFW policy, but a
+        // settings panel is not the place for surprise nudity over someone's
+        // shoulder — one tap reveals, and the badge says which it was.
+        fig.classList.add("blurred");
+        fig.appendChild(el("span", "lm-nsfw", "NSFW"));
+        fig.addEventListener("click", () => fig.classList.remove("blurred"));
+      }
+      grid.appendChild(fig);
+    }
+    g.appendChild(grid);
+    body.appendChild(g);
+  }
+  card.appendChild(body);
+
+  const foot = el("div", "lm-foot");
+  const note = el("div", "dim");
+  if (it.installed) {
+    note.textContent = "Already installed — attach it from a character card.";
+  } else if (it.arch && loraArchNow && it.arch !== loraArchNow) {
+    note.classList.add("warn");
+    note.textContent = "Built for " + loraArchLabel(it.arch) +
+      "; this box loads " + loraArchLabel(loraArchNow) +
+      ". It will download, but it will not change the image.";
+  } else if (!it.arch) {
+    note.textContent = "Base model unknown — you can set it after installing.";
+  }
+  foot.appendChild(note);
+
+  const go = el("button", "primary", it.installed ? "Installed" : "Download");
+  if (it.installed) {
+    go.disabled = true;
+  } else {
+    go.addEventListener("click", async () => {
+      if (modalBusy) return;
+      modalBusy = true;
+      const label = go.textContent;
+      go.disabled = true;
+      // a single streamed response has no progress events, so this creeps
+      // toward 90% and waits rather than faking a number that never lands
+      let p = 0;
+      const tick = setInterval(() => {
+        p = Math.min(90, p + Math.random() * 10);
+        go.textContent = Math.round(p) + "%";
+      }, 400);
+      try {
+        const d = await api("/api/loras/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ version_id: it.version_id }),
+        });
+        clearInterval(tick);
+        go.textContent = "Installed";
+        loraRows = d.loras || loraRows;
+        loraArchNow = d.current_arch || loraArchNow;
+        it.installed = true;
+        renderLoraArchFilter(); renderLoras(); renderChLoras(); renderDl();
+        toast((d.installed || {}).name + " installed" +
+              (d.seeded ? " — notes filled in from CivitAI" : ""));
+        if (d.warning) toast(d.warning, true);
+        setTimeout(closeLoraModal, 900);
+      } catch (e) {
+        clearInterval(tick);
+        go.disabled = false;
+        go.textContent = label;
+        toast("Download failed: " + e, true);
+      }
+      modalBusy = false;
+    });
+  }
+  foot.appendChild(go);
+  card.appendChild(foot);
+
+  els.loraModal.hidden = false;
+  card.scrollTop = 0;
+}
+
+function renderChLoras() {
+  const box = els.chLoraList;
+  if (!box) return;
+  box.textContent = "";
+  if (!loraRows.length) {
+    box.appendChild(el("div", "hint",
+      "No LoRAs known yet — describe some in Settings → LoRAs."));
+  }
+  for (const r of loraRows) {
+    const on = chLoraSel.includes(r.name);
+    const wrap = el("label", "ch-lora" + (on ? " on" : ""));
+    const cb = el("input");
+    cb.type = "checkbox";
+    cb.checked = on;
+    cb.disabled = !on && chLoraSel.length >= 3;
+    cb.addEventListener("change", () => {
+      if (cb.checked) {
+        if (chLoraSel.length >= 3) {
+          cb.checked = false;
+          toast("Three is the limit per character", true);
+          return;
+        }
+        chLoraSel.push(r.name);
+      } else {
+        chLoraSel = chLoraSel.filter((n) => n !== r.name);
+      }
+      chLoraDirty = true;
+      renderChLoras();
+    });
+    wrap.appendChild(cb);
+    const txt = el("span", "ch-lora-txt");
+    txt.appendChild(el("span", "ch-lora-file", loraFileName(r)));
+    const bits = [r.installed ? loraArchLabel(r.arch) : "not installed"];
+    if (r.weight != null && r.weight !== 1) bits.push("w " + r.weight);
+    if (r.trigger) bits.push("“" + r.trigger + "”");
+    txt.appendChild(el("span", "dim", bits.join(" · ")));
+    if (r.mismatch) txt.appendChild(el("span", "warn", r.mismatch + " — won’t load"));
+    wrap.appendChild(txt);
+    box.appendChild(wrap);
+  }
+  if (els.chLoraCount) {
+    els.chLoraCount.textContent = chLoraSel.length
+      ? "— " + chLoraSel.length + " of 3 selected"
+      : "— loaded on every image of this character";
+  }
+}
+
 function renderComps(activeArch) {
   const box = els.shComps;
   box.textContent = "";
@@ -2094,24 +2697,107 @@ async function refreshChars(watched) {
     if (e.message !== "locked") toast("Characters failed: " + e.message, true);
   }
   renderCharList();
+  renderTagBar();
 }
 
+/* list/card toggle — lives in Settings > Appearance, not the list header.
+   Persists in localStorage. */
+let charGrid = localStorage.getItem("charview") === "grid";
+
+function updateGridBtn() {
+  for (const b of document.querySelectorAll("#charseg button")) {
+    const on = (b.dataset.charview === "grid") === charGrid;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
+function setCharView(mode) {
+  const grid = mode === "grid";
+  if (grid === charGrid) return;
+  charGrid = grid;
+  localStorage.setItem("charview", grid ? "grid" : "rows");
+  updateGridBtn();
+  renderCharList();
+}
+
+/* the tag strip above the list: every distinct tag on any card, tap to filter */
+let charTagFilter = "";
+
+function allCharTags() {
+  const seen = [];
+  for (const c of chars || []) {
+    for (const t of (c.tags || [])) {
+      if (t && !seen.includes(t)) seen.push(t);
+    }
+  }
+  return seen;
+}
+
+function renderTagBar() {
+  const bar = els.charTagBar;
+  if (!bar) return;
+  const tags = allCharTags();
+  bar.textContent = "";
+  bar.hidden = tags.length === 0;
+  if (!tags.length) return;
+  // deterministic colours, so a tag keeps the same colour everywhere
+  const hue = (s) => {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+    return h;
+  };
+  for (const t of tags) {
+    const b = el("button", "tagchip" + (charTagFilter === t ? " on" : ""), t);
+    b.style.setProperty("--h", hue(t));
+    b.setAttribute("aria-pressed", charTagFilter === t ? "true" : "false");
+    b.addEventListener("click", () => {
+      charTagFilter = charTagFilter === t ? "" : t;
+      renderTagBar();
+      renderCharList();
+    });
+    bar.appendChild(b);
+  }
+}
+
+/* cards used to be just a name and a chat count, which is not enough to tell
+   two of them apart when scrolling. The greeting and the tags are already on
+   the card, so they get shown — that is the whole difference between this and
+   the old row. */
 function charRows(filter) {
   const q = (filter || "").trim().toLowerCase();
   const rows = [];
   for (const c of chars) {
-    if (q && !(c.name || "").toLowerCase().includes(q)) continue;
+    if (q) {
+      const hay = [c.name, c.greeting, (c.tags || []).join(" ")]
+        .map((v) => String(v || "").toLowerCase());
+      if (!hay.some((h) => h.includes(q))) continue;
+    }
+    if (charTagFilter && !(c.tags || []).includes(charTagFilter)) continue;
     rows.push(c);
   }
   return rows;
 }
 
-/* list/grid toggle (Chatterbox) — persists in localStorage */
-let charGrid = localStorage.getItem("charview") === "grid";
+function charChips(c) {
+  const wrap = el("span", "char-tags");
+  for (const t of (c.tags || []).slice(0, 4)) {
+    wrap.appendChild(el("span", "tagchip sm", t));
+  }
+  return wrap;
+}
 
-function updateGridBtn() {
-  document.querySelector("#btn-gridtoggle .ic-grid").hidden = charGrid;
-  document.querySelector("#btn-gridtoggle .ic-list").hidden = !charGrid;
+// roleplay text is full of *asterisks* and newlines; one clean line reads far
+// better in a row than the raw greeting did
+function charBlurb(c) {
+  const g = String(c.greeting || "").trim();
+  if (!g) return "";
+  return g.replace(/\s+/g, " ").replace(/^\*+|\*+$/g, "").trim();
+}
+
+function charCount(c) {
+  const n = Number(c.chats) || 0;
+  return n + (n === 1 ? " Conversation" : " Conversations");
 }
 
 function renderCharList() {
@@ -2120,12 +2806,22 @@ function renderCharList() {
   els.charlist.textContent = "";
   els.charempty.hidden = rows.length > 0;
   for (const c of rows) {
-    const row = el("button", "char-row"
+    // A div, not a <button>. A card is a multi-element card — cover image,
+    // chips, name, greeting, count — and <button> cannot lay that out: Chrome
+    // wraps button content in an anonymous centred box, which is what turned
+    // grid mode into a wall of letterboxed pictures with no text under them.
+    // The long-press and context-menu handlers only ever use
+    // .closest(".char-row") and dataset.charid, so this is transparent to
+    // them; role/tabindex/keydown keep it reachable by keyboard.
+    const row = el("div", "char-row"
       + (c.id === activeCharId ? " active" : ""));
-    if (c.avatar) {
+    row.setAttribute("role", "button");
+    row.setAttribute("tabindex", "0");
+    const pic = c.cover || c.avatar;
+    if (pic) {
       const img = document.createElement("img");
       img.className = "char-avatar";
-      img.src = c.avatar;
+      img.src = pic;
       img.alt = "";
       img.loading = "lazy";
       row.appendChild(img);
@@ -2134,15 +2830,29 @@ function renderCharList() {
         (c.name || "?").slice(0, 1).toUpperCase()));
     }
     const tx = el("div", "char-text");
-    tx.appendChild(el("b", null, c.name || c.id));
-    if (c.chats > 0) {
-      tx.appendChild(el("span", "dim",
-        c.chats + (c.chats === 1 ? " chat" : " chats")));
-    }
-    if (c.id === activeCharId) tx.appendChild(el("span", "char-now", "now"));
+    const top = el("div", "char-top");
+    top.appendChild(favStar(c));
+    top.appendChild(el("b", "char-name", c.name || c.id));
+    // tags share the name's line rather than taking one of their own — a row
+    // is four lines tall either way, and spending a line on chips made short
+    // cards feel emptier than they are
+    if ((c.tags || []).length) top.appendChild(charChips(c));
+    tx.appendChild(top);
+    // only when there is one. Reserving the line for everyone was the old
+    // behaviour: it kept every row the same height, but left a visible dead
+    // gap under any character with no greeting written yet. The clamp is what
+    // actually stops a row growing, so the reservation is not needed.
+    const blurb = charBlurb(c);
+    if (blurb) tx.appendChild(el("span", "char-blurb", blurb));
+    tx.appendChild(el("span", "dim", charCount(c)));
     row.appendChild(tx);
-    row.appendChild(favStar(c));
     row.addEventListener("click", () => selectChar(c.id));
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        selectChar(c.id);
+      }
+    });
     row.dataset.charid = c.id;
     els.charlist.appendChild(row);
   }
@@ -2217,6 +2927,10 @@ function setPreview(img, clearBtn, src) {
 
 function openCharForm(card) {
   editCharId = card ? card.id : null;
+  chLoraSel = card && Array.isArray(card.loras) ? card.loras.slice() : [];
+  chLoraDirty = false;
+  if (!loraRows.length) loadLoras();   // first open on a fresh session
+  else renderChLoras();
   aiReset();               // a different card is a different conversation
   pendingAvatar = "";
   pendingCover = "";
@@ -2225,6 +2939,7 @@ function openCharForm(card) {
   els.chTitle.textContent = card ? "Edit character" : "New character";
   els.chName.value = card ? card.name : "";
   els.chAppearance.value = card ? (card.appearance || "") : "";
+  els.chTags.value = card ? (card.tags || []).join(", ") : "";
   els.chPersona.value = card ? (card.persona || "") : "";
   els.chGreeting.value = card ? (card.greeting || "") : "";
   els.chSize.value = card && card.size && card.size.length === 2
@@ -2271,6 +2986,8 @@ async function saveCharForm() {
     greeting: els.chGreeting.value.trim(),
     checkpoint: els.chModel.value,
     size: size ? size.split("x").map(Number) : [],
+    tags: els.chTags.value.split(",").map((s) => s.trim()).filter(Boolean),
+    loras: chLoraSel.slice(0, 3),
   };
   if (!isNaN(temp)) payload.temp = Math.min(2, Math.max(0.1, temp));
   if (!isNaN(mtok)) payload.max_tokens = Math.min(8192, Math.max(16, mtok));
@@ -2337,11 +3054,14 @@ function pickAvatar(file) {
   reader.readAsDataURL(file);
 }
 
-/* center-crop to a square 256 — same path for uploads and gallery picks */
+/* center-crop to a square — same path for uploads and gallery picks.
+   512, not 256: card view stretches the avatar to the full width of a grid
+   cell, which is ~340px on a phone and ~460px on a desktop, so a 256 source
+   was being upscaled nearly 2x and went visibly soft. */
 function avatarFromDataUrl(dataUrl) {
   const img = new Image();
   img.onload = () => {
-    const S = 256;
+    const S = 512;
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = S;
     const ctx = canvas.getContext("2d");
@@ -2770,13 +3490,21 @@ els.grid.addEventListener("touchend", () => {
   if (ggLpTimer) { clearTimeout(ggLpTimer); ggLpTimer = null; }
 }, { passive: true });
 $("pg-refresh").addEventListener("click", loadGallery);
-$("btn-gridtoggle").addEventListener("click", () => {
-  charGrid = !charGrid;
-  localStorage.setItem("charview", charGrid ? "grid" : "rows");
-  updateGridBtn();
-  renderCharList();
-});
+for (const b of document.querySelectorAll("#charseg button")) {
+  b.addEventListener("click", () => setCharView(b.dataset.charview));
+}
 updateGridBtn();
+
+// Build stamp: taken from this page's own script tag rather than a constant,
+// so it can never disagree with the code actually executing — which is the
+// only way to tell "my change isn't landing" from "the browser is running
+// something else". Paired with the stale-build guard above.
+(function stampBuild() {
+  const tag = document.querySelector('script[src*="app.js"]');
+  const v = tag && /app\.js\?v=(\d+)/.exec(tag.getAttribute("src") || "");
+  const out = $("sh-build");
+  if (out) out.textContent = v ? "v" + v[1] : "unversioned";
+})();
 $("btn-back").addEventListener("click", () => switchView("chars"));
 $("btn-newchat").addEventListener("click", newChat);
 els.btnChmenu.addEventListener("click", openChatMenu);
@@ -3903,6 +4631,68 @@ $("ps-back").addEventListener("click", () => { els.pageSettings.hidden = true; }
 for (const b of document.querySelectorAll("#ps-tabs button")) {
   b.addEventListener("click", () => setPsTab(b.dataset.tab));
 }
+
+// --- LoRAs ---
+// Nothing here creates a record. A LoRA has to exist as a file before its
+// name is knowable — the string a card stores is the filename Forge resolves,
+// and that cannot be guessed or derived from a Civitai page. Notes are
+// therefore written against a file the server has already seen; a record with
+// no file can still appear here, but only because the file was deleted out
+// from under a card that still points at it.
+els.shLoraQ.addEventListener("input", renderLoras);
+els.shLoraArch.addEventListener("change", renderLoras);
+els.shLoraNote.addEventListener("change", renderLoras);
+els.shLoraUse.addEventListener("change", renderLoras);
+els.shLoraRefresh.addEventListener("click", async () => {
+  els.shLoraRefresh.disabled = true;
+  try {
+    const d = await api("/api/loras", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "refresh" }),
+    });
+    loraRows = d.loras || [];
+    loraArchNow = d.current_arch || loraArchNow;
+    renderLoraArchFilter(); renderLoras(); renderChLoras();
+    toast(loraRows.filter((r) => r.installed).length + " LoRAs on the server");
+  } catch (e) { toast(String(e), true); }
+  els.shLoraRefresh.disabled = false;
+});
+
+// --- CivitAI browse ---
+els.shDlGo.addEventListener("click", () => searchLoras(true));
+els.shDlMore.addEventListener("click", () => searchLoras(false));
+els.shDlQ.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); searchLoras(true); }
+});
+els.shDlTag.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); searchLoras(true); }
+});
+// sort, period and tag change what Civitai is asked for, so they re-query
+els.shDlSort.addEventListener("change", () => searchLoras(true));
+els.shDlPeriod.addEventListener("change", () => searchLoras(true));
+els.shDlTag.addEventListener("change", () => searchLoras(true));
+// architecture and SFW are post-filters over what came back — instant, and no
+// reason to spend a Civitai call on them
+els.shDlArch.addEventListener("change", renderDl);
+// the SFW toggle borrows the buttons' pressed styling, which is a class on
+// the label — :has() would do it in CSS but not on every browser this PWA
+// still has installed in a tab
+els.shDlSfw.addEventListener("change", () => {
+  els.shDlSfw.parentElement.classList.toggle("on", els.shDlSfw.checked);
+  renderDl();
+});
+els.shDlBox.addEventListener("toggle", () => {
+  if (els.shDlBox.open && !dlItems.length) searchLoras(true);
+});
+// tap the backdrop to dismiss, Escape too — the card itself is the target of
+// clicks, so without this the overlay would swallow every tap on the sheet
+els.loraModal.addEventListener("click", (e) => {
+  if (e.target === els.loraModal) closeLoraModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !els.loraModal.hidden) closeLoraModal();
+});
 $("sh-save-key").addEventListener("click", () => {
   const v = els.shKey.value.trim();
   if (v) saveSettings({ openrouter_key: v }, $("sh-save-key"), "API key saved")
@@ -4561,6 +5351,11 @@ async function init() {
   switchView("chars");                    // the app opens on the character list
   autosize();
   refreshStatus();
+  // Installed LoRAs are rediscovered by the server on every call, so there is
+  // nothing to initialise — but the card sheet's picker reads this list, and
+  // waiting for a visit to Settings > LoRAs left it claiming "none known" on a
+  // box that had a LoRA sitting right there.
+  loadLoras();
   try {
     const h = await api("/api/history");
     applyChatFlags(h);

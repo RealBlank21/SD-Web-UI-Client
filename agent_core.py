@@ -609,6 +609,102 @@ def ensure_tags(prompt: str, tags: str, viewer_tags: str = "",
     return ", ".join(have[:cut] + missing + have[cut:])
 
 
+# --------------------------------------------------------------- LoRA tags
+#
+# Forge has no payload field and no REST route for LoRA weights: it regexes
+# `<lora:NAME:weight>` out of the prompt string (modules/extra_networks.py:157)
+# and patches the UNet. So the activation is nothing more than getting this
+# string into the prompt — and getting it *exactly* right, which is why the tag
+# is written here in code rather than asked of the model.
+#
+# The model is never told which LoRAs exist. It is told what to write (trigger
+# word, how the character looks); the server adds the tag. That split is the
+# whole design: the prose can drift without breaking anything, and the tag
+# cannot be forgotten, misspelled or invented.
+
+LORA_TAG_RE = re.compile(r"<lora:[^>]*>", re.I)
+
+
+def strip_lora_tags(prompt: str) -> tuple[str, list]:
+    """Remove every `<lora:…>` tag, returning (prompt, what was removed).
+
+    Stripping rather than appending-and-hoping is what makes the server's set
+    authoritative: a tag the model wrote for a LoRA that does not exist, or at
+    a weight nobody chose, is removed instead of reaching Forge. Forge is not
+    loud about an unresolvable name — `load_networks` just collects it in
+    `unavailable_networks` and the generation carries on without the weights,
+    so a stale tag produces a plausible image that is quietly wrong.
+
+    Segments left empty by the removal are dropped: a tag in the middle of a
+    comma list leaves "a, , b", and that empty segment is a real prompt token
+    as far as the text encoder is concerned.
+    """
+    prompt = prompt or ""
+    removed = [m.group(0) for m in LORA_TAG_RE.finditer(prompt)]
+    if not removed:
+        return prompt, []
+    left = LORA_TAG_RE.sub("", prompt)
+    if "," in left:
+        left = ", ".join(s.strip() for s in left.split(",") if s.strip())
+    return left, removed
+
+
+def apply_lora_tags(prompt: str, tags: list[str]) -> tuple[str, list]:
+    """Put exactly `tags` on the end of the prompt, and nothing else.
+
+    Called after `ensure_tags`, so the tag cannot be reordered by the count
+    reconciliation (that function rebuilds the prompt from a comma split) and
+    cannot be swallowed by a tag it thought was a count. Order matters to
+    Forge only in that the first entries win when two LoRAs touch the same
+    weights, so card order is the order.
+    """
+    clean, _ = strip_lora_tags(prompt)
+    clean = clean.rstrip().rstrip(",")
+    keep = [t for t in (tags or []) if t]
+    if not keep:
+        return clean, []
+    return clean + ", " + ", ".join(keep), keep
+
+
+def lora_prompt_block(entries: list[dict]) -> str:
+    """The prose the model sees for the active character's LoRAs.
+
+    Scoped to ONE conversation — a card's LoRAs ride that card's chats and
+    nowhere else — so the cost is bounded by the worst single card rather than
+    by the whole collection. A card with none contributes nothing, which is
+    what keeps the plain assistant byte-identical to the free chat.
+
+    Deliberately does NOT describe the `<lora:…>` tag. Telling the model the
+    syntax would invite it to write one, and everything here is wasted if it
+    does. It is told the trigger word; the server does the rest.
+    """
+    live = [e for e in (entries or []) if e.get("attached")]
+    if not live:
+        return ""
+    parts = ["\n\nAppearance LoRAs (already loaded on every image — you do NOT "
+             "add anything to the prompt to turn them on, and you never write "
+             "a <lora:…> tag yourself):"]
+    for e in live:
+        head = f"- {e['label']}"
+        trig = str(e.get("trigger") or "").strip()
+        if trig:
+            head += f" — trigger word: `{trig}`"
+        parts.append(head)
+        notes = str(e.get("notes") or "").strip()
+        if notes:
+            parts.append(f"  {notes}")
+        ex = str(e.get("example") or "").strip()
+        if ex:
+            parts.append(f"  Example for this one: {ex}")
+        miss = str(e.get("mismatch") or "").strip().rstrip(".")
+        if miss:
+            parts.append(f"  WARNING: {miss}.")
+            parts.append("  It will not load — do not try to prompt your way "
+                         "around it, and do not describe what it would have "
+                         "looked like.")
+    return "\n".join(parts)
+
+
 # Scene-bound tags: a place, a prop, or a state that will not be true next
 # message. A character's `appearance` is injected into every image for the
 # life of the card, so anything here silently pins the character to one
@@ -770,6 +866,11 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
         model = args.pop("model", None)
         components = {k: args.pop(k) for k in
                       ("text_encoder", "sd_vae", "low_bits") if k in args}
+        # Set by the server from the active card, never by the model. Popped
+        # here so they cannot reach the payload: `_clean_payload` would drop
+        # them anyway, but with a note about unknown keys, which is noise.
+        loras = args.pop("_loras", None)
+        lora_notes = args.pop("_lora_notes", None) or []
         switched = None
         try:
             if model:
@@ -786,6 +887,12 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
         gen = _gen_info(client, args, elapsed, _seed_of(result), prepared)
         if switched and switched.get("notes"):
             gen["notes"] = (gen.get("notes") or []) + switched["notes"]
+        # The recipe has to carry the LoRAs, or the regen sheet replays the
+        # same prompt with the character silently missing from it.
+        if loras:
+            gen["loras"] = loras
+        if lora_notes:
+            gen["notes"] = (gen.get("notes") or []) + list(lora_notes)
         return {"saved_files": [str(p) for p in saved],
                 "count": len(saved),
                 "seed_used": _seed_of(result),
@@ -801,6 +908,8 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
             raise FileNotFoundError(
                 f"image not found: {src.name} — pick a name from the "
                 "gallery or a generation in this chat")
+        loras = args.pop("_loras", None)
+        lora_notes = args.pop("_lora_notes", None) or []
         model = args.pop("model", None)
         if model:
             try:
@@ -818,11 +927,15 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
             raise _human(e) from None
         elapsed = time.perf_counter() - t0
         saved = save_images(result, out_dir=out_dir, name_prefix="ai_edit")
+        gen = _gen_info(client, args, elapsed, _seed_of(result), prepared)
+        if loras:
+            gen["loras"] = loras
+        if lora_notes:
+            gen["notes"] = (gen.get("notes") or []) + list(lora_notes)
         return {"saved_files": [str(p) for p in saved],
                 "count": len(saved),
                 "seed_used": _seed_of(result),
-                "gen": _gen_info(client, args, elapsed, _seed_of(result),
-                                 prepared)}
+                "gen": gen}
 
     if name == "list_sd_models":
         models = [{"title": m["title"], "arch": m.get("arch", "sd")}

@@ -1,8 +1,8 @@
 /* SD Agent service worker — app-shell caching for offline launch.
    Network-first for API/dynamic content; cache-first for static assets. */
 
-const CACHE = "sdagent-v65";
-const V = "?v=65";                   // keep in sync with index.html
+const CACHE = "sdagent-v85";
+const V = "?v=85";                   // keep in sync with index.html
 const SHELL = [
   "/", "/index.html", "/static/style.css" + V, "/static/app.js" + V,
   "/manifest.webmanifest", "/static/icon-192.png", "/static/icon-512.png",
@@ -52,9 +52,18 @@ self.addEventListener("fetch", (e) => {
   const isShell = url.pathname === "/" || url.pathname === "/index.html";
 
   // app shell: network-first so updates apply immediately; cache fallback
-  // keeps the app openable offline
+  // keeps the app openable offline.
+  //
+  // `cache: "no-cache"` is load-bearing, not decoration. A reverse proxy in
+  // front of this server rewrites the origin's `Cache-Control: no-cache` into
+  // a multi-hour `max-age`, and a plain `fetch()` inside a service worker
+  // still consults the HTTP cache — so index.html, app.js and style.css would
+  // all sit in the browser's cache together, CONSISTENTLY on an old version.
+  // The skew guard in app.js cannot see that (every file agrees), so the page
+  // would simply run yesterday's build for hours. `no-cache` revalidates every
+  // request with the origin without disabling the cache for good responses.
   e.respondWith(
-    fetch(e.request).then((resp) => {
+    fetch(e.request, { cache: "no-cache" }).then((resp) => {
       if (resp.ok) {
         const copy = resp.clone();
         caches.open(CACHE).then((c) => c.put(e.request, copy));

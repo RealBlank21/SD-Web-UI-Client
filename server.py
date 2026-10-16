@@ -59,8 +59,12 @@ from agent_core import (                      # vendored agent brain
     effective_system_prompt,
     ensure_tags,
     strip_scene_tags,
+    strip_lora_tags,
+    apply_lora_tags,
+    lora_prompt_block,
     execute_tool,
 )
+from sd_client import LORA_WEIGHT_BAND, lora_referenceable, lora_tag
 
 APP_DIR = ROOT / "webui"
 DATA_DIR = ROOT / "data"
@@ -265,6 +269,466 @@ DEFAULT_CHAT_FILE = CHATS_DIR / "default.json"
 ASSISTANT_ID = "assistant"
 
 
+# ------------------------------------------------------------------- LoRAs
+
+# A library of LoRAs, keyed by the exact name Forge resolves (`<lora:NAME>`),
+# holding the user's own notes about each. Cards hold references into it, so a
+# character described by ten cards is described once.
+#
+# Deliberately NOT model_guide.txt. That file is one document edited as a whole;
+# this is a catalogue of independent records, browsed and searched. The guide's
+# shape does not survive fifty entries, and its cap would become a wall.
+LORAS_FILE = DATA_DIR / "loras.json"
+
+#: The app's OWN LoRA root, and the only place it may write. Forge is pointed
+#: here with `--lora-dirs` (webui.settings.sh) in addition to its normal
+#: models/Lora. This exists because the unit runs with ProtectHome=read-only
+#: and ReadWritePaths covering only this repo — models/Lora is not writable
+#: from in here, and weakening the unit to reach it is not worth it.
+LORA_DIR_FALLBACK = DATA_DIR / "loras"
+
+#: How many LoRAs one card may carry. Two character LoRAs at full weight fight
+#: over the same attention layers and the result is neither of them; three is
+#: already past the point where a human can predict the outcome.
+LORA_PER_CARD = 3
+
+#: Refuse a card whose weights add up past this. The failure is a blended face
+#: that belongs to nobody, and it is invisible in the settings UI.
+LORA_SUM_WARN = 2.0
+
+
+def load_lora_library() -> dict:
+    """The saved notes, as {name: record}. Missing/corrupt file = empty."""
+    try:
+        data = json.loads(LORAS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    lib = data.get("loras") if isinstance(data, dict) else None
+    return lib if isinstance(lib, dict) else {}
+
+
+def save_lora_library(lib: dict) -> None:
+    tmp = LORAS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"loras": lib}, indent=1,
+                               ensure_ascii=False), encoding="utf-8")
+    tmp.replace(LORAS_FILE)
+
+
+def _clean_lora_record(rec: dict, name: str) -> dict:
+    """One library record, normalised. Unknown keys are dropped."""
+    rec = rec if isinstance(rec, dict) else {}
+    try:
+        weight = round(float(rec.get("weight", 1.0)), 3)
+    except (TypeError, ValueError):
+        weight = 1.0
+    lo, hi = LORA_WEIGHT_BAND
+    return {
+        "weight": max(lo, min(hi, weight)),
+        "trigger": str(rec.get("trigger") or "").strip()[:120],
+        "arch": str(rec.get("arch") or "").strip()[:16],
+        "notes": str(rec.get("notes") or "").strip()[:2000],
+        "example": str(rec.get("example") or "").strip()[:1000],
+        "enabled": bool(rec.get("enabled", True)),
+    }
+
+
+def _arch_mismatch(lora_arch: str, model_arch: str) -> str:
+    """Why this LoRA will not do anything on this checkpoint, or "".
+
+    Only a DIFFERENT FAMILY is a problem. Within SDXL the base model is
+    irrelevant — measured, an Illustrious-trained LoRA applied cleanly to an
+    SDXL checkpoint that shares no training data with it — so this must not
+    fire on "xl vs xl" or every character LoRA gets flagged.
+    """
+    if not lora_arch or not model_arch:
+        return ""
+    if lora_arch == model_arch:
+        return ""
+    return (f"built for {lora_arch}, the loaded model is {model_arch}")
+
+
+def _installed_loras(client) -> dict:
+    """{name: row} for every LoRA on the server, or {} if it cannot be asked.
+
+    A dead SD server must not take the agent down with it, so this fails to an
+    empty map. The cost is that every reference then reads as "not installed",
+    which is visible in the settings list and in the generation notes — far
+    better than the alternative, which is silently generating without the
+    character because a cache lookup raised inside a broad except.
+    """
+    try:
+        return {r["name"]: r for r in client.list_loras()}
+    except Exception:                                  # noqa: BLE001
+        return {}
+
+
+def card_loras(card: dict | None, model_arch: str = "",
+               installed: dict | None = None) -> list[dict]:
+    """Resolve a card's LoRA references into records ready to use.
+
+    Two separate questions get answered here and it matters which is which:
+
+    - is it ATTACHED? the card says so, and that is the whole feature
+    - will it LOAD?  the file has to be on disk, and its family has to match
+
+    A reference with no file is the normal state for a LoRA the user has
+    described but not installed, so it stays in the list with `installed: False`
+    rather than vanishing — otherwise attaching one and forgetting to download
+    it would look like the attachment did nothing.
+    """
+    if not card:
+        return []
+    names = card.get("loras")
+    if not isinstance(names, (list, tuple)):
+        return []
+    names = [str(n).strip() for n in names if str(n or "").strip()]
+    if not names:
+        return []
+    lib = load_lora_library()
+    installed = installed if installed is not None else {}
+
+    out: list[dict] = []
+    for name in names[:LORA_PER_CARD]:
+        rec = _clean_lora_record(lib.get(name) or {}, name)
+        disk = installed.get(name)
+        on_disk = bool(disk)
+        eff_arch = rec["arch"] or (disk or {}).get("arch") or ""
+        out.append({
+            "name": name,
+            "label": name,
+            "attached": True,
+            "installed": on_disk,
+            "weight": rec["weight"],
+            "trigger": rec["trigger"],
+            "notes": rec["notes"],
+            "example": rec["example"],
+            "arch": eff_arch,
+            "model_arch": model_arch,
+            "mismatch": _arch_mismatch(eff_arch, model_arch),
+            "referenceable": lora_referenceable(name),
+        })
+    return out
+
+
+def lora_tag_list(entries: list[dict]) -> tuple[list[str], list[dict], list[str]]:
+    """`(tags, applied, why)` for `entries`.
+
+    `tags` is what goes on the prompt, `applied` the entries that produced
+    them, `why` a reason per skip. Skipping is silent in the sense that the
+    image still generates — so every skip is returned and surfaced in the
+    generation's notes rather than logged to nowhere.
+    """
+    tags: list[str] = []
+    applied: list[dict] = []
+    why: list[str] = []
+    for e in entries or []:
+        if not e.get("installed"):
+            why.append(f"{e['name']}: not installed (no file in the server's "
+                       f"Lora folder)")
+            continue
+        if e.get("mismatch"):
+            why.append(f"{e['name']}: {e['mismatch']} — skipped")
+            continue
+        if not e.get("referenceable"):
+            why.append(f"{e['name']}: name has a ':' or '>' in it, so Forge "
+                       f"cannot address it — skipped")
+            continue
+        tag = lora_tag(e["name"], e.get("weight", 1.0))
+        if not tag:
+            why.append(f"{e['name']}: could not build a tag — skipped")
+            continue
+        tags.append(tag)
+        applied.append(e)
+    return tags, applied, why
+
+
+# ------------------------------------------------------- Civitai browsing
+
+# The token lives in data/, which is gitignored, and is only ever sent to
+# civitai.com. Read per request rather than cached so it can be rotated
+# without a restart.
+CIVITAI_TOKEN_FILE = DATA_DIR / "civitai_token"
+CIVITAI_API = "https://civitai.com/api/v1"
+#: Note the missing `v1`. Downloads live at /api/download/models/, NOT under
+#: /api/v1/ — pointing v1's base at them 404s on every file.
+CIVITAI_DOWNLOAD = "https://civitai.com/api/download/models"
+
+#: Search results change slowly and the endpoint is a public API on someone
+#: else's box. Ten minutes is long enough that hammering the ↻ button does not
+#: hammer them, and short enough that a LoRA published this morning shows up
+#: this afternoon. Keyed by the full query, so a different search is a miss
+#: rather than a wrong answer.
+CIVITAI_TTL = 600
+_civitai_cache: dict[str, tuple[float, dict]] = {}
+
+CIVITAI_SORTS = ("Most Downloaded", "Highest Rated", "Newest")
+
+#: Only meaningful with a popularity sort, so only sent alongside one.
+CIVITAI_PERIODS = ("Day", "Week", "Month", "Year")
+
+#: Civitai's base-model vocabulary mapped onto the families this app knows.
+#: What matters to us is whether it can load at all, and that is a family
+#: question — Illustrious and Pony are both xl, and an xl LoRA runs on any xl
+#: checkpoint (measured), so collapsing them is correct rather than lossy.
+CIVITAI_ARCH = (
+    ("illustrious", "xl"), ("pony", "xl"), ("sdxl", "xl"),
+    ("xl 1.0", "xl"), ("sd 1.5", "sd"), ("sd1.5", "sd"),
+    ("sd3", "sd3"), ("flux", "flux"), ("qwen", "qwen"),
+    ("anima", "anima"), ("krea", "krea"), ("wan", "wan"),
+    ("z-image", "zimage"), ("zimage", "zimage"),
+)
+
+
+def civitai_arch(base: str) -> str:
+    low = str(base or "").lower()
+    for needle, arch in CIVITAI_ARCH:
+        if needle in low:
+            return arch
+    return ""
+
+
+def _civitai_get(path: str, params: dict) -> dict:
+    """GET civitai with the token attached when there is one.
+
+    A token is required for downloads from a creator-gated model and optional
+    for search, so a missing one degrades the feature rather than breaking it.
+    """
+    url = f"{CIVITAI_API}{path}"
+    hdrs = {}
+    tok = ""
+    try:
+        tok = CIVITAI_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    if tok:
+        hdrs["Authorization"] = f"Bearer {tok}"
+    resp = requests.get(url, params=params, headers=hdrs, timeout=30)
+    if resp.status_code >= 400:
+        raise SDWebUIError(f"civitai said {resp.status_code}: "
+                           f"{resp.text[:160]}")
+    return resp.json()
+
+
+def civitai_search(query: str, sort: str = "", cursor: str = "",
+                   limit: int = 24, installed: set | None = None,
+                   tag: str = "", period: str = "") -> dict:
+    """Browse LoRAs on Civitai, cached.
+
+    Results come back with everything needed to decide before downloading: the
+    per-VERSION base model (not the model's, which lists every base it has a
+    release for), whether the box can run it, and the exact file.
+
+    `tag` and `period` are passed through to Civitai. Two caveats worth
+    keeping: an unrecognised tag is IGNORED and returns everything, so a typo
+    looks like "no matches for my filter" rather than an error; and `period`
+    is meaningless without a `sort` that is a popularity measure, so it is only
+    sent alongside one.
+    """
+    query = (query or "").strip()
+    tag = (tag or "").strip()
+    period = (period or "").strip()
+    sort = sort if sort in CIVITAI_SORTS else ""
+    cursor = (cursor or "").strip()
+    key = f"{query.lower()}|{tag.lower()}|{sort}|{period}|{cursor}|{limit}"
+    hit = _civitai_cache.get(key)
+    if hit and time.time() - hit[0] < CIVITAI_TTL:
+        # copy, so the stored entry keeps `cached: False` — that is what it was
+        # when Civitai was actually called, and flagging it True in place would
+        # make the next reader report a cache hit on the entry it just built
+        return {**hit[1], "cached": True, "age_s": int(time.time() - hit[0])}
+
+    params = {"types": "LORA", "limit": max(1, min(50, int(limit)))}
+    if query:
+        params["query"] = query
+    if tag:
+        params["tag"] = tag
+    if sort:
+        params["sort"] = sort
+        if period in CIVITAI_PERIODS:
+            params["period"] = period
+    if cursor:
+        params["cursor"] = cursor
+    raw = _civitai_get("/models", params)
+    installed = installed if installed is not None else set()
+
+    items = []
+    for m in (raw.get("items") or []) if isinstance(raw, dict) else []:
+        vers = m.get("modelVersions") or []
+        # one entry per version: a model can ship an SD1.5 and an SDXL release
+        # and they are not interchangeable on this box
+        for v in vers[:4]:
+            vfiles = [f for f in (v.get("files") or [])
+                      if isinstance(f, dict) and f.get("id")]
+            if not vfiles:
+                continue
+            # Previews hang off the VERSION, not the model — the model object
+            # has no `images` key at all, which is why a first pass at this
+            # silently produced zero thumbnails for every single result.
+            shots = []
+            for im in (v.get("images") or [])[:10]:
+                if not isinstance(im, dict):
+                    continue
+                # Civitai hosts animated previews as .mp4 next to the stills.
+                # An <img> cannot render one, and autoplaying video in a
+                # settings sheet is its own problem — stills only.
+                if str(im.get("type") or "image") != "image":
+                    continue
+                u = _civitai_thumb(str(im.get("url") or ""), 400)
+                if u:
+                    shots.append({
+                        "url": u,
+                        "nsfw": bool(im.get("nsfw")),
+                        "w": int(im.get("width") or 0),
+                        "h": int(im.get("height") or 0),
+                    })
+            trained = [str(t).strip() for t in (v.get("trainedWords") or [])
+                       if str(t).strip()][:12]
+            f = vfiles[0]
+            name = str(f.get("name") or "")
+            # Forge strips the extension for the name a card has to store
+            base = name.rsplit(".", 1)[0] if "." in name else name
+            bm = str(v.get("baseModel") or "")
+            arch = civitai_arch(bm)
+            have = base in installed
+            items.append({
+                "name": base,
+                "file": name,
+                "version_id": int(v.get("id") or 0),
+                "model_id": int(m.get("id") or 0),
+                "model_name": str(m.get("name") or ""),
+                "version_name": str(v.get("name") or ""),
+                "civitai_base": bm,
+                "arch": arch,
+                "size_mb": round(float(f.get("sizeKB") or 0) / 1024, 1),
+                "sha256": str((f.get("hashes") or {}).get("SHA256") or ""),
+                "downloads": int((m.get("stats") or {}).get("downloadCount") or 0),
+                "rating": int((m.get("stats") or {}).get("thumbsUpCount") or 0),
+                "nsfw": bool(m.get("nsfw")),
+                "installed": have,
+                "mismatch": _arch_mismatch(arch, "") if not arch else "",
+                "images": shots,
+                "trained": trained,
+                "desc": _plain(v.get("description") or m.get("description") or ""),
+                "creator": str((m.get("creator") or {}).get("username") or ""),
+            })
+    out = {"items": items,
+           "next_cursor": str((raw.get("metadata") or {}).get("nextCursor") or ""),
+           "query": query, "sort": sort,
+           "cached": False, "age_s": 0}
+    _civitai_cache[key] = (time.time(), out)
+    return out
+
+
+def _civitai_thumb(url: str, width: int = 400) -> str:
+    """Civitai serves one image at many sizes by editing the path.
+
+    Two spellings exist in the wild: `/…/original=true/x.jpeg` (what the API
+    hands out) and `/…/width=525/x.jpeg` (what the site links use). Measured on
+    one 2048x3072 source: original is a 3.6 MB PNG, width=400 is an 87 KB JPEG.
+    A popup gallery on a phone wants the second one.
+    """
+    if not url:
+        return ""
+    return re.sub(r"/(?:original=true|width=\d+)/", f"/width={width}/",
+                  url, count=1)
+
+
+def _plain(html: str, limit: int = 900) -> str:
+    """Civitai descriptions are HTML written for a browser.
+
+    The popup renders textContent, so tags would show as literal angle
+    brackets. This is a readable strip, not a parser — it is for a human
+    skimming what a LoRA does, not for reading someone's recipe.
+    """
+    txt = str(html or "")
+    txt = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", txt)
+    txt = re.sub(r"(?i)<br\s*/?>|</p>|</li>|</h[1-6]>", "\n", txt)
+    txt = re.sub(r"<[^>]+>", "", txt)
+    txt = (txt.replace("&amp;", "&").replace("&lt;", "<")
+              .replace("&gt;", ">").replace("&quot;", '"')
+              .replace("&#39;", "'").replace("&nbsp;", " "))
+    txt = re.sub(r"[ \t]+", " ", txt)
+    txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+    if len(txt) > limit:
+        txt = txt[:limit].rsplit(" ", 1)[0] + "…"
+    return txt
+
+
+def download_lora(version_id: int, dest_dir: Path) -> dict:
+    """Fetch one LoRA into Forge's Lora folder and verify it.
+
+    The id is a **modelVersionId**, never a file id. `/api/download/models/{id}`
+    resolves the version, and a file id there does not error — it silently
+    serves some other model's file. Doing that hands the user a valid LoRA
+    that is not the one they asked for, which is how this went wrong once
+    already: a request for the Mitya LoRA returned "ViviAmano_epoch_10".
+    """
+    version_id = int(version_id)
+    if version_id <= 0:
+        raise ValueError("bad version id")
+    ver = _civitai_get(f"/model-versions/{version_id}", {})
+    files = [f for f in (ver.get("files") or []) if isinstance(f, dict)
+             and f.get("id")]
+    if not files:
+        raise ValueError("that version has no downloadable file")
+    f = files[0]
+    name = str(f.get("name") or "")
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        raise ValueError(f"unusable file name: {name!r}")
+    want = str((f.get("hashes") or {}).get("SHA256") or "").lower()
+    size = int(f.get("sizeKB") or 0)
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    final = dest_dir / name
+    tmp = dest_dir / (name + ".part")
+
+    hdrs = {}
+    tok = ""
+    try:
+        tok = CIVITAI_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    if tok:
+        hdrs["Authorization"] = f"Bearer {tok}"
+
+    got = ""
+    with requests.get(f"{CIVITAI_DOWNLOAD}/{version_id}",
+                      headers=hdrs, stream=True, timeout=(20, 300)) as r:
+        if r.status_code >= 400:
+            raise ValueError(f"civitai said {r.status_code} for that download")
+        h = hashlib.sha256()
+        n = 0
+        with open(tmp, "wb") as fh:
+            for chunk in r.iter_content(1 << 20):
+                if not chunk:
+                    continue
+                fh.write(chunk)
+                h.update(chunk)
+                n += len(chunk)
+    got = h.hexdigest()
+
+    if want and got != want:
+        # civitai's advertised hash and the bytes it serves disagree on some
+        # uploads. Refuse either way: a wrong LoRA is worse than none, and a
+        # partial one is worse than both.
+        tmp.unlink(missing_ok=True)
+        raise ValueError(
+            f"checksum mismatch for {name}\n"
+            f"  expected {want}\n  got      {got}\n"
+            f"Civitai's metadata and the file it serves disagree. Refusing to "
+            f"install — try again, or download it by hand.")
+    if size and abs(n - size * 1024) > 4096:
+        tmp.unlink(missing_ok=True)
+        raise ValueError(f"size mismatch for {name}: got {n} bytes, "
+                         f"expected about {int(size * 1024)}")
+
+    tmp.replace(final)
+    return {"file": name, "name": name.rsplit(".", 1)[0], "bytes": n,
+            "sha256": got, "path": str(final),
+            "base": str(ver.get("baseModel") or ""),
+            "arch": civitai_arch(ver.get("baseModel"))}
+
+
 def new_chat_id() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
 
@@ -398,7 +862,7 @@ def ensure_assistant(chars: list) -> list:
                   "name": "Assistant", "system": True,
                   "appearance": "", "persona": "", "greeting": "",
                   "checkpoint": "", "size": [], "temp": None,
-                  "max_tokens": None})
+                  "max_tokens": None, "loras": [], "tags": []})
     try:
         save_characters(chars)
     except OSError:
@@ -676,6 +1140,13 @@ class Agent:
                              "the user is left as a stranger in the background.\n"
                              + appearance)
             base += "\n".join(parts)
+        # LoRA notes ride the card, so they are scoped to this conversation and
+        # cost nothing anywhere else. Deliberately outside the persona guard
+        # above: a card can have a LoRA and no written appearance yet, and the
+        # trigger word is exactly what the model needs in that case. The plain
+        # assistant has no LoRAs, so it still contributes nothing.
+        if c:
+            base += lora_prompt_block(self.lora_entries())
         sc = None
         if self.scenario_id and c:
             sc = next((s for s in (c.get("scenarios") or [])
@@ -695,6 +1166,25 @@ class Agent:
 
     def char_tags(self) -> str:
         return (self.char or {}).get("appearance", "") or ""
+
+    def lora_entries(self) -> list[dict]:
+        """The active card's LoRAs, resolved against what is on disk.
+
+        Safe to call before Forge answers: `_sys_msg` runs at startup, and a
+        dead SD server must not stop the agent from booting with a system
+        message. A LoRA that cannot be resolved yet still comes back, marked
+        not-installed, so the character block is not silently shorter than it
+        will be once the server is up.
+        """
+        try:
+            arch = self.client.current_arch()
+        except Exception:                              # noqa: BLE001
+            arch = ""
+        try:
+            return card_loras(self.char, arch,
+                              _installed_loras(self.client))
+        except Exception:                              # noqa: BLE001
+            return []
 
     def saved_components(self, arch: str) -> dict:
         """Companion files configured for an architecture in Settings.
@@ -1452,6 +1942,29 @@ class Agent:
             if name == "generate_image" and len(size) == 2:
                 args.setdefault("width", size[0])
                 args.setdefault("height", size[1])
+            # LoRA tags go on AFTER ensure_tags: that function rebuilds the
+            # prompt from a comma split, so a tag added beforehand could be
+            # reordered or dropped by the count reconciliation. The model's
+            # arch is resolved here, after any card checkpoint switch, because
+            # it decides which LoRAs can load at all.
+            larch = self.client.arch_for(args["model"]) \
+                if args.get("model") else self.client.current_arch()
+            entries = card_loras(self.char, larch,
+                                _installed_loras(self.client))
+            tags, applied, skipped = lora_tag_list(entries)
+            # Strip whatever the model wrote either way. It is never told a
+            # LoRA exists, so any tag in its output is invented — and an
+            # invented name fails silently in Forge, producing an image that
+            # looks fine and is missing the character.
+            args["prompt"], _ = apply_lora_tags(args.get("prompt", ""), tags)
+            args["_loras"] = [{"name": e["name"], "weight": e["weight"]}
+                              for e in applied]
+            notes_l = list(skipped)
+            total = sum(e["weight"] for e in applied)
+            if total > LORA_SUM_WARN:
+                notes_l.append(f"LoRA weights total {total:.2f} — above "
+                               f"{LORA_SUM_WARN}, expect a blended look")
+            args["_lora_notes"] = notes_l
         emit({"type": "tool_start", "name": name})
         out = {"result": None, "error": None}
 
@@ -2744,6 +3257,10 @@ class Handler(BaseHTTPRequestHandler):
             self.api_chats_list()
         elif path == "/api/personas":
             self.api_personas_list()
+        elif path == "/api/loras":
+            self.api_loras()
+        elif path == "/api/loras/search":
+            self.api_loras_search()
         elif path.startswith("/api/avatar/"):
             self.api_avatar(path[len("/api/avatar/"):])
         elif path.startswith("/api/cover/"):
@@ -2844,6 +3361,10 @@ class Handler(BaseHTTPRequestHandler):
             self.api_character_favourite()
         elif path == "/api/personas":
             self.api_personas_save()
+        elif path == "/api/loras":
+            self.api_loras()
+        elif path == "/api/loras/search":
+            self.api_loras_search()
         elif path == "/api/persona/select":
             self.api_persona_select()
         elif path == "/api/persona/delete":
@@ -3302,6 +3823,233 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"characters": out,
                     "active": active["id"] if active else ""})
 
+    def api_loras(self):
+        """The LoRA library, merged with what is actually on the server.
+
+        The two are kept separate on purpose. A note about a LoRA the user is
+        thinking of buying is worth writing down, and it must not disappear
+        because the file is not downloaded yet — so a library entry with no
+        file comes back as `installed: false` rather than being dropped.
+
+        GET returns the merged view for the settings list; POST edits one
+        record or asks the server to rescan its Lora folder.
+        """
+        if self.command == "GET":
+            self._json({"loras": self._loras_merged(),
+                        "current_arch": self._safe_arch()})
+            return
+        body = self._body()
+        action = str(body.get("action") or "").strip()
+        if action == "refresh":
+            try:
+                self.app.agent.client.refresh_loras()
+            except Exception as e:                     # noqa: BLE001
+                self._json({"error": f"rescan failed: {e}"}, 502)
+                return
+            self._json({"ok": True, "loras": self._loras_merged(),
+                        "current_arch": self._safe_arch()})
+            return
+
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self._json({"error": "name required"}, 400)
+            return
+        if not lora_referenceable(name):
+            self._json({"error": "that name cannot be used: a LoRA name must "
+                                 "not contain ':' or '>'"}, 400)
+            return
+        lib = load_lora_library()
+        if action == "delete":
+            lib.pop(name, None)
+            # references from cards are dropped too, so a card can never point
+            # at a record that no longer exists
+            cards = load_characters()
+            touched = False
+            for c in cards:
+                refs = c.get("loras")
+                if isinstance(refs, list) and name in refs:
+                    c["loras"] = [n for n in refs if n != name]
+                    touched = True
+            if touched:
+                save_characters(cards)
+        elif action == "save":
+            lib[name] = _clean_lora_record(body.get("record") or {}, name)
+        else:
+            self._json({"error": "unknown action"}, 400)
+            return
+        try:
+            save_lora_library(lib)
+        except OSError as e:
+            self._json({"error": f"could not save: {e}"}, 500)
+            return
+        # the active card's prompt block quotes trigger words and notes, so a
+        # saved edit has to reach the system message without a restart
+        agent = self.app.agent
+        if agent.messages and agent.messages[0].get("role") == "system":
+            agent.messages[0] = agent._sys_msg()
+        self._json({"ok": True, "loras": self._loras_merged(),
+                    "current_arch": self._safe_arch()})
+
+    def _safe_arch(self) -> str:
+        try:
+            return self.app.agent.client.current_arch()
+        except Exception:                              # noqa: BLE001
+            return ""
+
+    def lora_dir(self) -> Path:
+        """Where this app writes LoRAs — its own folder, never Forge's.
+
+        Forge scans `lora_dir` plus every `--lora-dirs` entry
+        (`extensions-builtin/sd_forge_lora/networks.py:209`), so this folder is
+        a second root rather than a replacement: the LoRAs you drop into
+        models/Lora by hand keep working alongside whatever is downloaded here.
+
+        Not derived from the running server's reported paths. That would return
+        Forge's own models/Lora, which this process cannot write — the unit's
+        ProtectHome=read-only makes it read-only to us, and the error arrives
+        only after the whole file has streamed.
+        """
+        d = LORA_DIR_FALLBACK
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def api_loras_search(self):
+        """GET browse Civitai; POST install one. Results are server-cached."""
+        if self.command == "GET":
+            qs = parse_qs(urlparse(self.path).query)
+            installed = set(_installed_loras(self.app.agent.client))
+            try:
+                out = civitai_search(
+                    (qs.get("q") or [""])[0],
+                    (qs.get("sort") or [""])[0],
+                    (qs.get("cursor") or [""])[0],
+                    (qs.get("limit") or ["24"])[0],
+                    installed,
+                    (qs.get("tag") or [""])[0],
+                    (qs.get("period") or [""])[0])
+            except SDWebUIError as e:
+                self._json({"error": str(e)}, 502)
+                return
+            except (TypeError, ValueError) as e:
+                self._json({"error": f"bad search: {e}"}, 400)
+                return
+            self._json(out)
+            return
+
+        body = self._body()
+        try:
+            vid = int(body.get("version_id") or 0)
+        except (TypeError, ValueError):
+            vid = 0
+        if vid <= 0:
+            self._json({"error": "version_id required"}, 400)
+            return
+        dest = self.lora_dir()
+        # Cheap preflight: the app's own folder is inside ReadWritePaths, so
+        # this normally passes. It is here because the failure it guards against
+        # is silent in the worst way — a LoRA downloaded into a folder Forge
+        # does not watch simply never appears, with no error anywhere.
+        probe = dest / ".sdagent-write-probe"
+        try:
+            probe.write_text("x")
+            probe.unlink()
+        except OSError as e:
+            self._json({"error":
+                        f"cannot write to {dest} ({e.strerror}) — nothing "
+                        f"was downloaded"}, 500)
+            return
+        try:
+            info = download_lora(vid, dest)
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
+        except OSError as e:
+            self._json({"error": f"could not write to {dest}: {e}"}, 500)
+            return
+        except requests.RequestException as e:
+            self._json({"error": f"download failed: {e}"}, 502)
+            return
+
+        # Seed the notes from what the uploader already wrote, so an
+        # installed LoRA is never a bare filename with an empty record.
+        # Deliberately not gated on trainedWords: plenty of uploads have an
+        # empty list and a perfectly good description, and gating on it left
+        # those with nothing. Only fills blanks — whatever the user wrote is
+        # theirs and is never overwritten.
+        seeded = False
+        try:
+            ver = _civitai_get(f"/model-versions/{vid}", {})
+            trained = [str(t).strip() for t in (ver.get("trainedWords") or [])
+                       if str(t).strip()][:4]
+            desc = _plain(ver.get("description"), 400)
+            name = info["name"]
+            if (trained or desc) and name not in load_lora_library():
+                lib = load_lora_library()
+                lib[name] = _clean_lora_record({
+                    "weight": 0.9 if trained else 1.0,
+                    "trigger": ", ".join(trained)[:120],
+                    "arch": info["arch"],
+                    "notes": "From CivitAI" + (f" ({info['base']})"
+                                                if info["base"] else ""),
+                    "example": desc,
+                    "enabled": True,
+                }, name)
+                save_lora_library(lib)
+                seeded = True
+        except Exception:                              # noqa: BLE001
+            pass            # seeding is a nicety; never fail the install
+
+        try:
+            self.app.agent.client.refresh_loras()
+        except Exception as e:                         # noqa: BLE001
+            return self._json({"ok": True, "installed": info,
+                               "warning": f"downloaded, but the server did "
+                                          f"not re-scan: {e}"}, 200)
+        rows = self._loras_merged()
+        # The download succeeding is not the same as Forge being able to see
+        # it. If --lora-dirs was lost (settings file edited, Forge restarted
+        # the old way) the file sits here forever and simply never appears.
+        seen = any(r["name"] == info["name"] and r["installed"] for r in rows)
+        payload = {"ok": True, "installed": info, "loras": rows,
+                   "current_arch": self._safe_arch(), "seeded": seeded}
+        if not seen:
+            payload["warning"] = (
+                f"{info['file']} downloaded to {dest}, but Forge is not "
+                f"scanning that folder — it will not appear until "
+                f"--lora-dirs {dest} is in webui.settings.sh and Forge "
+                f"restarts.")
+            return self._json(payload, 200)
+        return self._json(payload)
+
+    def _loras_merged(self) -> list[dict]:
+        """Library records joined onto the server's installed list.
+
+        Keyed by Forge's own name, because that is what a card stores and what
+        `<lora:…>` has to carry. Names present in only one side are the two
+        interesting cases: described-but-absent, and installed-but-undescribed.
+        """
+        lib = load_lora_library()
+        disk = _installed_loras(self.app.agent.client)
+        rows: list[dict] = []
+        for name in sorted(set(lib) | set(disk), key=str.lower):
+            d = disk.get(name) or {}
+            rec = _clean_lora_record(lib.get(name) or {}, name)
+            row = {
+                "name": name,
+                "installed": name in disk,
+                "alias": d.get("alias", name),
+                "path": d.get("path", ""),
+                "file_arch": d.get("arch", ""),
+                "rank": d.get("rank"),
+                "described": name in lib,
+            }
+            row.update(rec)
+            # a stored arch wins over the guessed one: it is the user's call
+            row["arch"] = rec["arch"] or d.get("arch", "")
+            row["mismatch"] = _arch_mismatch(row["arch"], self._safe_arch())
+            rows.append(row)
+        return rows
+
     def api_avatar(self, cid_raw: str):
         cid = _safe_name(cid_raw.strip().lower()) or ""
         f = self._avatar_path(cid)
@@ -3340,6 +4088,32 @@ class Handler(BaseHTTPRequestHandler):
         card["persona"] = str(body.get("persona", "")).strip()[:8000]
         card["greeting"] = str(body.get("greeting", "")).strip()[:2000]
         card["checkpoint"] = str(body.get("checkpoint", "")).strip()[:200]
+        # Short labels shown as chips on the character card. Capped and
+        # trimmed because they render as pills beside a name and an over-long
+        # one pushes the greeting off the row.
+        tsel = body.get("tags")
+        if isinstance(tsel, (list, tuple)):
+            tags: list[str] = []
+            for t in tsel:
+                s = re.sub(r"\s+", " ", str(t or "")).strip()[:24]
+                if s and s not in tags and len(tags) < 6:
+                    tags.append(s)
+            card["tags"] = tags
+        else:
+            card["tags"] = []
+        # References into the LoRA library, in application order. Capped here
+        # as well as at read time so a hand-edited file with fifty entries
+        # cannot smuggle past the limit by skipping the form.
+        lsel = body.get("loras")
+        if isinstance(lsel, (list, tuple)):
+            names: list[str] = []
+            for n in lsel:
+                s = str(n or "").strip()
+                if s and s not in names and len(names) < LORA_PER_CARD:
+                    names.append(s)
+            card["loras"] = names[:LORA_PER_CARD]
+        else:
+            card["loras"] = []
         size = body.get("size")
         if isinstance(size, (list, tuple)) and len(size) == 2:
             try:

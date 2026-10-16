@@ -251,6 +251,118 @@ def is_distilled(title: str) -> bool:
     return name_is_distilled(title)
 
 
+# --- LoRA -------------------------------------------------------------------
+#
+# Forge applies a LoRA per request by regexing `<lora:NAME:weight>` out of the
+# prompt string (modules/extra_networks.py:157) and patching the UNet — there
+# is no payload field and no REST route to set weights. So the whole mechanism
+# is: get this string into the prompt, and get it right.
+
+#: A LoRA name cannot contain these or it can never be referenced. The regex
+#: captures `[^>]+` for the argument list, but that list is split on ":" by
+#: ExtraNetworkParams, so a name with a colon loses its weight. Forge strips
+#: "," and ":" from names itself (extra_networks_lora.py:12).
+LORA_BAD_CHARS = re.compile(r"[:\r\n]")
+
+#: Enough to be recognisable in a listing, short enough for a prompt.
+LORA_WEIGHT_BAND = (0.0, 1.5)
+
+
+def lora_referenceable(name: str) -> bool:
+    """True when `name` can be written as a `<lora:…>` tag at all."""
+    n = str(name or "").strip()
+    return bool(n) and ">" not in n and not LORA_BAD_CHARS.search(n)
+
+
+def lora_tag(name: str, weight: float) -> str:
+    """The exact string that activates `name` at `weight`.
+
+    Returns "" for a name that cannot be referenced (see `lora_referenceable`)
+    rather than emitting a tag Forge will misparse — a silently broken tag is
+    worse than none, because the image looks fine and the LoRA is simply
+    missing.
+    """
+    n = str(name or "").strip()
+    if not lora_referenceable(n):
+        return ""
+    try:
+        w = float(weight)
+    except (TypeError, ValueError):
+        return ""
+    lo, hi = LORA_WEIGHT_BAND
+    w = max(lo, min(hi, w))
+    # %.4f keeps 0.9 as "0.9" rather than "0.9000" — this string ends up in
+    # the stored infotext and the regen sheet, and a reader should see the
+    # number they typed.
+    return f"<lora:{n}:{w:g}>"
+
+
+# modelspec.architecture is the one reliable field: it is written by every
+# Kohya-era trainer and, unlike ss_output_name, actually present. Observed
+# values: "stable-diffusion-xl-v1-base/lora", "stable-diffusion-v1/lora"
+# (Anima, which also sets ss_base_model_version="anima"), and Flux's
+# "flux-lora". Keyed longest-first so "xl" can't shadow "sdxl".
+_LORA_ARCH_HINTS = (
+    ("anima", "anima"),
+    ("qwen", "qwen"),
+    ("z-image", "zimage"),
+    ("zimage", "zimage"),
+    ("wan", "wan"),
+    ("krea", "krea"),
+    ("flux", "flux"),
+    ("illustrious", "xl"),
+    ("pony", "xl"),
+    ("sdxl", "xl"),
+    ("xl-base", "xl"),
+    ("xl/", "xl"),
+    ("sd3", "sd3"),
+    ("stable-diffusion-xl", "xl"),
+    ("sd_v1", "sd"),
+    ("sd-v1", "sd"),
+    ("stable-diffusion-v1", "sd"),
+)
+
+
+def lora_arch(meta: dict) -> str:
+    """Architecture family a LoRA's own header says it was trained for.
+
+    "" when the header is silent — which is common and not a problem: the
+    Illustrious Mitya LoRA on this box carries no __metadata__ at all, so the
+    name fallback has to carry it alone.
+    """
+    if not isinstance(meta, dict):
+        return ""
+    raw = " ".join(str(meta.get(k) or "") for k in
+                   ("modelspec.architecture", "ss_base_model_version",
+                    "ss_sd_model_name", "ss_output_name")).lower()
+    for needle, arch in _LORA_ARCH_HINTS:
+        if needle in raw:
+            return arch
+    return ""
+
+
+def guess_lora_arch(name: str) -> str:
+    """Name-based fallback when the file's own header says nothing."""
+    low = str(name or "").lower()
+    for needle, arch in _LORA_ARCH_HINTS:
+        if needle in low:
+            return arch
+    # Kohya writes its own family into the filename for Illustrious/SDXL era
+    # releases ("[ILLUST]-…", "PONY_…", "SDXL_…").
+    if low.startswith(("[illust", "pony", "sdxl")) or "illustrious" in low:
+        return "xl"
+    return ""
+
+
+def _lora_rank(meta: dict) -> int | None:
+    """ss_network_dim, when the header has one. 0 means the file lied."""
+    try:
+        n = int((meta or {}).get("ss_network_dim"))
+    except (TypeError, ValueError):
+        return None
+    return n if 0 < n <= 1024 else None
+
+
 def split_sampler(name: str) -> tuple[str, str | None]:
     """Split a legacy combined sampler name into (sampler, schedule type).
 
@@ -365,6 +477,8 @@ class SDClient:
         self._opts: dict = {}
         self._models_ts = 0.0
         self._models: list[dict] = []
+        self._loras_ts = 0.0
+        self._loras: list[dict] = []
         self.known_arches: dict[str, str] = {}   # user-pinned title -> arch
 
     # ------------------------------------------------------------- plumbing
@@ -625,6 +739,60 @@ class SDClient:
             for k, v in (mapping or {}).items() if k and v
         }
         self._models_ts = 0.0
+
+    def list_loras(self, force: bool = False) -> list[dict]:
+        """Installed LoRAs, annotated with the architecture they are built for.
+
+        Forge serves these from `/sdapi/v1/loras`, a route the sd_forge_lora
+        extension registers itself (`scripts/lora_script.py:37`) and only when
+        the server runs with --api. Each row's `name` is the filename minus its
+        extension and is exactly the string `<lora:NAME:weight>` has to carry;
+        `alias` is Forge's own short name from the file's `ss_output_name`,
+        which resolves to the same weights when they differ.
+
+        `arch` is the LoRA's OWN training base, read from the safetensors
+        header. It is only advisory: a LoRA trained on Illustrious applies
+        cleanly to any SDXL checkpoint (measured — Illustrious -> novaAnime3dXL
+        changed the image as expected), so this is not a reason to hide one.
+        It is here because the opposite case is fatal: an Anima LoRA
+        (`networks.lora_anima`) on an SDXL checkpoint does nothing at all.
+        """
+        if not force and self._loras and time.time() - self._loras_ts < 60:
+            return self._loras
+        raw = self._get_soft("/sdapi/v1/loras", timeout=25, default=[]) or []
+        out: list[dict] = []
+        for m in raw if isinstance(raw, list) else []:
+            if not isinstance(m, dict):
+                continue
+            name = str(m.get("name") or "").strip()
+            if not name:
+                continue
+            path = str(m.get("path") or "")
+            meta = m.get("metadata") if isinstance(m.get("metadata"), dict) \
+                else {}
+            out.append({
+                "name": name,
+                "alias": str(m.get("alias") or name).strip() or name,
+                "path": path,
+                "installed": True,
+                "arch": lora_arch(meta) or guess_lora_arch(name)
+                        or guess_lora_arch(path),
+                "rank": _lora_rank(meta),
+                "meta_arch": str(meta.get("modelspec.architecture") or ""),
+            })
+        out.sort(key=lambda r: r["name"].lower())
+        with self._opt_lock:
+            self._loras = out
+            self._loras_ts = time.time()
+        return out
+
+    def refresh_loras(self) -> list[dict]:
+        """Ask Forge to rescan its LoRA directory, then re-list."""
+        self._post("/sdapi/v1/refresh-loras", {})
+        with self._opt_lock:            # drop the cache or we re-read the old
+            self._loras = []            # scan for another 60s
+            self._loras_ts = 0.0
+        return self.list_loras(force=True)
 
     def list_samplers(self) -> list[str]:
         return list(self.capabilities().samplers)
