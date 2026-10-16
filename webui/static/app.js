@@ -118,6 +118,7 @@ const els = {
   chCoverClear: $("ch-cover-clear"), chAiFab: $("ch-aifab"),
   aiSheet: $("aisheet"), aiTitle: $("ai-title"), aiHint: $("ai-hint"),
   aiText: $("ai-text"), aiGo: $("ai-go"), aiCancel: $("ai-cancel"),
+  aiLog: $("ai-log"),
   scsCoverImg: $("scs-cover-img"), scsCoverBtn: $("scs-cover-btn"),
   scsCoverFile: $("scs-cover-file"),
   scsCoverClear: $("scs-cover-clear"),
@@ -2216,6 +2217,7 @@ function setPreview(img, clearBtn, src) {
 
 function openCharForm(card) {
   editCharId = card ? card.id : null;
+  aiReset();               // a different card is a different conversation
   pendingAvatar = "";
   pendingCover = "";
   clearAvatar = clearCover = clearScCover = false;
@@ -2504,54 +2506,144 @@ async function usePickedImage(rel) {
 
 const AI_MODES = {
   character: {
-    title: "Generate character",
-    hint: "Describe the character you want — the AI drafts the name, look "
-          + "tags, personality and greeting.",
-    placeholder: "e.g. a dry-humored knight who secretly paints flowers",
+    title: "Character assistant",
+    hint: "Describe them to start, then keep talking — ask for one field to "
+          + "change, or say revert to undo the last edit.",
+    placeholder: "e.g. Sasuke from Naruto… then: make the first message shorter",
     prefill: () => "",
   },
 };
+
+// The assistant is a conversation, not a one-shot filler: the user describes
+// a character, the model drafts the card, and they keep coming back to adjust
+// one field at a time. State lives here, not in the sheet, so closing the
+// sheet to hand-edit the form and reopening it keeps the thread — which is
+// what lets the model see those hand edits as the live card state.
+const AI_FIELDS = ["name", "appearance", "persona", "greeting"];
+let aiHistory = [];      // [{role, content}] sent to the model
+let aiStack = [];        // snapshots of the 4 fields, for revert
+let aiBusy = false;
+
+function charFields() {
+  return {
+    name: els.chName.value,
+    appearance: els.chAppearance.value,
+    persona: els.chPersona.value,
+    greeting: els.chGreeting.value,
+  };
+}
+
+function applyCharFields(f) {
+  els.chName.value = f.name ?? "";
+  els.chAppearance.value = f.appearance ?? "";
+  els.chPersona.value = f.persona ?? "";
+  els.chGreeting.value = f.greeting ?? "";
+}
+
+const FIELD_LABEL = {
+  name: "name", appearance: "look tags",
+  persona: "personality", greeting: "first message",
+};
+
+function aiLog(cls, text) {
+  const d = el("div", cls, text);
+  els.aiLog.appendChild(d);
+  els.aiLog.scrollTop = els.aiLog.scrollHeight;
+  return d;
+}
+
+function aiReset() {
+  aiHistory = [];
+  aiStack = [];
+  els.aiLog.textContent = "";
+}
 
 function openAiSheet(mode) {
   const m = AI_MODES[mode];
   if (!m) return;
   els.aiTitle.textContent = m.title;
   els.aiHint.textContent = m.hint;
-  els.aiText.value = m.prefill();
-  els.aiText.placeholder = m.placeholder;
+  if (!els.aiText.placeholder) els.aiText.placeholder = m.placeholder;
   els.aiGo.disabled = false;
-  els.aiGo.textContent = "Generate";
+  els.aiGo.textContent = "Send";
+  if (!els.aiLog.childElementCount) {
+    aiLog("ai-note", "Describe a character, or paste a name. Afterwards you "
+      + "can ask for one field to change, or say revert.");
+  }
   els.aiSheet.hidden = false;
   setTimeout(() => els.aiText.focus(), 60);
 }
 
 async function runAiGenerate() {
   const text = els.aiText.value.trim();
-  if (!text) { toast("Describe it first", true); return; }
+  if (!text) { toast("Say what you want first", true); return; }
+  if (aiBusy) return;
+  const before = charFields();          // includes the user's hand edits
+  aiBusy = true;
   const btn = els.aiGo;
   btn.disabled = true;
-  btn.textContent = "Generating…";
+  btn.textContent = "Thinking…";
+  els.aiText.value = "";
+  aiLog("ai-you", text);
   try {
     const d = await api("/api/char/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: text }),
+      body: JSON.stringify({
+        prompt: text,
+        history: aiHistory,
+        current: before,
+      }),
     });
-    els.chName.value = d.name || els.chName.value;
-    els.chAppearance.value = d.appearance || "";
-    els.chPersona.value = d.persona || "";
-    els.chGreeting.value = d.greeting || "";
-    els.aiSheet.hidden = true;
-    toast("Character drafted — review and save");
+    if (d.revert) {
+      const prev = aiStack.pop();
+      if (prev) {
+        applyCharFields(prev);
+        aiLog("ai-note", "Reverted — the fields are back as they were.");
+      } else {
+        aiLog("ai-note warn", "Nothing to revert to yet.");
+      }
+    }
+    const changed = AI_FIELDS.filter((k) => d[k]);
+    if (changed.length) {
+      // Snapshot what the form held BEFORE this edit — hand edits included,
+      // so revert restores the user's own version and not the model's.
+      aiStack.push(before);
+      if (aiStack.length > 25) aiStack.shift();
+      const next = { ...before };
+      for (const k of changed) next[k] = d[k];
+      applyCharFields(next);
+      aiLog("ai-note", "Changed: " + changed.map((k) => FIELD_LABEL[k])
+        .join(", ") + ".");
+    }
+    if (d.dropped_tags && d.dropped_tags.length) {
+      aiLog("ai-note warn", "Left out of the look tags (they'd be forced "
+        + "into every image): " + d.dropped_tags.join(", "));
+    }
+    const said = d.reply || (changed.length ? "Done." : "");
+    if (said) aiLog("ai-bot", said);
+    aiHistory.push({ role: "user", content: text });
+    if (said) aiHistory.push({ role: "assistant", content: said });
+    if (changed.length && aiStack.length === 1) {
+      aiLog("ai-note", "Say revert to undo that.");
+    }
   } catch (e) {
-    if (e.message !== "locked") toast("Generate failed: " + e.message, true);
+    if (e.message !== "locked") aiLog("ai-note warn", "Failed: " + e.message);
+    els.aiText.value = text;            // don't swallow what they typed
   } finally {
+    aiBusy = false;
     btn.disabled = false;
-    btn.textContent = "Generate";
+    btn.textContent = "Send";
   }
 }
 
 els.aiGo.addEventListener("click", runAiGenerate);
+els.aiText.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    runAiGenerate();
+  }
+});
 els.aiCancel.addEventListener("click", () => {
   els.aiSheet.hidden = true;
 });

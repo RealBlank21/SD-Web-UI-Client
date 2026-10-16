@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=63">
+<link rel="stylesheet" href="/static/style.css?v=65">
 </head>
 <body>
 
@@ -597,7 +597,9 @@
   <div class="regen-card">
     <b id="ai-title">Generate with AI</b>
     <p class="dim" id="ai-hint"></p>
-    <textarea id="ai-text" rows="3" enterkeyhint="done"></textarea>
+    <div id="ai-log"></div>
+    <textarea id="ai-text" rows="2" enterkeyhint="send"
+              placeholder="Describe them, or ask for a change…"></textarea>
     <div class="regen-actions">
       <button id="ai-cancel">Cancel</button>
       <button id="ai-go">Generate</button>
@@ -632,6 +634,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=63"></script>
+<script src="/static/app.js?v=65"></script>
 </body>
 </html>

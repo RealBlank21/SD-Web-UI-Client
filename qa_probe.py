@@ -37,6 +37,41 @@ SCALE = {"extreme close-up", "close-up", "closeup", "close up", "medium shot",
          "cowboy shot", "full body", "wide shot"}
 SOLO_COUNT = {"solo", "1boy", "1girl"}
 COUNT_WORD = {"duo": 2, "trio": 3, "quad": 4}
+# Evidence that a SECOND person is genuinely drawn, as opposed to merely
+# counted. The server injects the user's persona whenever the count totals
+# >1 (viewer_in_frame), so a count tag is a standing instruction to draw
+# them — see check_stale_count.
+SECOND_PERSON = (
+    # contact naming the other body
+    "another's hand", "another's mouth", "hand on another", "hand on her",
+    "hand on his", "hand on their", "groping", "grabbing", "holding her",
+    "holding his", "carrying", "pov hand", "hand from bottom", "pov hands",
+    "another person", "second person", "viewer's body", "someone's hand",
+    # camera positions that put a body in shot
+    "pov", "first person", "from behind", "viewpoint",
+    # a named second subject
+    "2boys", "2girls", "2boys 1girl", "1boy 1girl", "1girl 1boy",
+    "3boys", "3girls", "twins", "multiple girls", "multiple boys",
+)
+# Two subjects sharing an action or a space, with no contact tag. A genuine
+# duo in a wide shot often has neither "another's hand" nor a POV tag, so
+# without this a "two people standing in a park" reads as a stale count.
+TOGETHER = ("together", "next to", "beside", "side by side", "holding hands",
+            "facing each other", "kissing", "embracing", "leaning on",
+            "walking with", "sitting next to", "arm around", "group photo",
+            "both ", "all three")
+# Framing that leaves no room for a second body. Deliberately excludes
+# "medium shot" and "cowboy shot" — both comfortably hold two people.
+SINGLE_FRAME = ("extreme close-up", "close-up", "closeup", "close up",
+                "portrait", "upper body", "headshot", "bust shot",
+                "facial closeup")
+# Poses that put the viewer's body in frame with the subject, which the
+# system prompt treats as requiring the POV guards even without genital
+# focus — a viewer leaning over a reclining character is the common case.
+VIEWER_OVER_SUBJECT = ("leaning over", "lean over", "leans over", "looms over",
+                       "looming over", "from above", "looking down at",
+                       "bent over", "bending over", "hovering over",
+                       "kneeling over", "above her", "above him")
 GUARDS = ("pov cock", "another person's cock", "first person view")
 GENITAL = ("penis", "cock", "pussy", "mound", "pussy mound")
 CHEST = ("boobs", "breasts", "cleavage", "nipples", "nipple")
@@ -122,7 +157,15 @@ def check_anatomy_guard(prompt, negative, turn, prev):
     if genital and prox and present < 3:
         return {"anatomy_guard_missing": f"{present}/3"}
     if not genital and present == 3:
-        # chest/face/framing: dead weight, and "first person view" flattens
+        # A viewer looming over a reclining subject puts the viewer's body in
+        # frame even with no genital focus, and the system prompt says so
+        # explicitly ("from above", "looking down at", "pov", "arms above
+        # head" ON A RECLINING SUBJECT). Flagging those as dead weight is a
+        # false positive on exactly the shots where the guards earn their
+        # keep, so check the pose before complaining.
+        over = any(k in low for k in VIEWER_OVER_SUBJECT)
+        if over:
+            return {}
         return {"anatomy_guard_overapplied":
                 "chest" if chest else "no genital focus"}
     return {}
@@ -133,7 +176,7 @@ def check_stacked_contact(prompt, negative, turn, prev):
     counts = {}
     for t in tags(prompt):
         low = t.lower()
-        if not any(o in low for o in OWNERSHIP):
+        if not any(o in low for o in OWNSHIP):
             continue
         m = re.search(r"\b(hand|hands|finger|fingers|mouth|arm|arms|leg|legs|"
                       r"thigh|thighs|breast|boob|butt|hip)\b", low)
@@ -162,6 +205,48 @@ def check_seed_discipline(prompt, negative, turn, prev):
     return {}
 
 
+def check_stale_count(prompt, negative, turn, prev):
+    """A two-person count carried into a shot that draws only one person.
+
+    `viewer_in_frame` treats any count over one as "the user is in frame"
+    and ensure_tags then injects the user's persona into the prompt. So the
+    count tag is not bookkeeping, it is a standing instruction to draw them.
+
+    The failure this catches is a USER who is still in the room but has
+    stopped being in the SHOT: the model reuses last turn's prompt verbatim,
+    `duo, 1boy` rides along, and the checkpoint dutifully crops a hand or a
+    shoulder into a solo shot. Naelith's "violated by comfiness" turn is the
+    canonical case — a girl alone under a blanket, with `duo, 1boy, 1girl`
+    inherited from the turn where the user was genuinely carrying her.
+
+    Only fires when the count was CARRIED, because a model that writes
+    `duo` for a fresh two-person shot is right. Known false positive: a
+    genuine two-subject shot that simply keeps the same count across turns
+    and describes the second person with no contact or POV tag (two people
+    standing in a park). Read it as a prompt to look at, not a verdict.
+    """
+    if not prev or not has_multi(prompt):
+        return {}
+    # carried verbatim: same count tags in both turns
+    def counts(p):
+        return {t.lower() for t in tags(p)
+                if re.search(r"\b(duo|trio|quad|\d+\s*(?:boys?|girls?|others?))\b",
+                             t.lower())}
+    carried = counts(prompt) & counts(prev)
+    if not carried:
+        return {}
+    low = (prompt or "").lower()
+    evidence = [e for e in SECOND_PERSON if e in low]
+    evidence += [e for e in TOGETHER if e in low]
+    if evidence:
+        return {}
+    # tight framing leaves no room for a second body
+    if any(f in low for f in SINGLE_FRAME):
+        return {}
+    return {"stale_count": f"carried {sorted(carried)} but nothing draws a "
+                          f"second person"}
+
+
 CHECKS = {
     "count_conflict": check_count_conflict,
     "scale_ladder": check_scale_ladder,
@@ -169,6 +254,7 @@ CHECKS = {
     "dup_tags": check_dup_tags,
     "anatomy_guard": check_anatomy_guard,
     "stacked_contact": check_stacked_contact,
+    "stale_count": check_stale_count,
     "seed_discipline": check_seed_discipline,
 }
 DEFAULT_CHECKS = [c for c in CHECKS if c != "seed_discipline"]

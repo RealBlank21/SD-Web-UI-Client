@@ -193,6 +193,20 @@ Prompt craft:
 - seed -1 (random). Reuse a reported seed to iterate.
 - batch_size > 1 only when the user asks for several images/variations.
 
+Character counts (solo / 1girl / 1boy / duo / 2boys...):
+- The server injects the user's persona appearance into any prompt whose
+  count tags total more than one, so the count IS the instruction "draw the
+  user as well". Write 'solo' for a shot of the character alone.
+- Re-derive the count every turn, even when you reuse the previous prompt
+  verbatim. Someone who is still in the room but no longer in the SHOT has
+  left the frame without leaving, and a carried-over 'duo, 1boy' makes the
+  checkpoint crop a hand or a shoulder into a solo shot. No contact, no POV
+  tag, no second body described = solo.
+- COUNT TAGS MUST TOTAL ONCE. Two males = `duo, 2boys`, two females =
+  `duo, 2girls`, mixed = `duo, 1boy, 1girl`. Never `duo, 2boys, 1boy`; a
+  stale solo count beside a plural makes the model average two people into
+  one body.
+
 Settings depend on the model architecture — this matters more than anything
 else, because the wrong CFG ruins a modern model:
 - SD 1.5 / SDXL: cfg_scale ~7 (SDXL is fine at 4.5-7), clip_skip 2 for most
@@ -428,7 +442,8 @@ def viewer_in_frame(prompt: str) -> bool:
     return False
 
 
-def ensure_tags(prompt: str, tags: str, viewer_tags: str = "") -> str:
+def ensure_tags(prompt: str, tags: str, viewer_tags: str = "",
+                negative: str = "") -> str:
     """Add identity tags missing from an SD prompt (no duplicates).
 
     Character tags are always injected. Viewer tags — the active user
@@ -441,16 +456,32 @@ def ensure_tags(prompt: str, tags: str, viewer_tags: str = "") -> str:
     character's look to sit. Matching ignores backslash-escapes and
     parentheses so guide-style tags like 'arlecchino \\(genshin impact\\)'
     still count as present.
+
+    `negative` is the caller's negative prompt, and it wins over both
+    sources. A tag the model deliberately negated is one it chose to
+    remove, so re-adding it is wrong even when it is a genuine identity
+    tag — otherwise a card's `appearance` field becomes a permanent veto
+    on the scene.
     """
     prompt = (prompt or "").strip()
     viewer_tags = (viewer_tags or "").strip()
     wanted = [t.strip() for t in (tags or "").split(",") if t.strip()]
     if viewer_tags and viewer_in_frame(prompt):
         wanted += [t.strip() for t in viewer_tags.split(",") if t.strip()]
-    have = [t.strip() for t in prompt.split(",") if t.strip()]
 
     def norm(t: str) -> str:
         return _norm_tag(t)
+
+    # The model outranks the card. Naelith's appearance carried "iron
+    # shackles, chained wrists, dark stone cell background"; the model read
+    # that the scene had moved to a bedroom and put the lot in the negative
+    # — and this injector put every one of them back in the positive, so
+    # both turns shipped a cell the prose had already left.
+    if negative:
+        blocked = {norm(t) for t in negative.split(",") if t.strip()}
+        if blocked:
+            wanted = [t for t in wanted if norm(t) not in blocked]
+    have = [t.strip() for t in prompt.split(",") if t.strip()]
 
     # Reconcile the subject count before anything is injected. A character
     # block may open with its own "1boy"/"1girl"; when the prompt has already
@@ -485,6 +516,63 @@ def ensure_tags(prompt: str, tags: str, viewer_tags: str = "") -> str:
     while cut < len(have) and norm(have[cut]) in _QUALITY_TAGS:
         cut += 1
     return ", ".join(have[:cut] + missing + have[cut:])
+
+
+# Scene-bound tags: a place, a prop, or a state that will not be true next
+# message. A character's `appearance` is injected into every image for the
+# life of the card, so anything here silently pins the character to one
+# moment forever — the cell they were found in, the dirt they arrived with.
+#
+# Matched as substrings against the normalised tag, so "iron shackles" and
+# "chained wrists" are both caught by "shackle" / "chain". Deliberately
+# narrow: emotion words ("smirk", "blush", "smile") stay, because a card
+# carrying one is merely a little static, whereas a background or a pair of
+# shackles is a scene that the prose can never leave.
+#
+# Substring matching on identity vocabulary is a trap, and every term below
+# that looks like a body part or a garment was removed because it ate
+# something real: "scar" matches Scaramouche, "collar" matches the fur
+# trim on Hinata's jacket and the shirt under Draco's robe, "stained"
+# matches a painter's fingers. Prefer a compound ("stone wall") over a
+# bare noun; the demonstrable cases are all caught without them.
+_SCENE_TAGS = (
+    # setting / background
+    "background", "bedroom", "dungeon", "cell", "cellar", "prison",
+    "jail", "stone wall", "prison cell", "interior", "outdoor", "forest",
+    "street",
+    # restraints / props
+    "shackle", "chain", "chained", "handcuff", "rope", "tied up",
+    "bound", "hogtied", "leash", "gag", "restraint", "bonds",
+    # transient condition
+    "dirt", "dirty", "mud", "blood", "bloody", "wound", "wounded",
+    "injur", "bruise", "sweat", "soaked", "wet", "torn",
+    "ripped", "tattered", "soiled",
+    # pose / expression slots — self-evidently not anatomy
+    "expression", "posing", "pose",
+)
+
+
+def strip_scene_tags(tags: str) -> tuple[str, list]:
+    """Split a comma-separated tag string into (identity, dropped).
+
+    Used on `appearance` coming back from the character generator. The
+    generator's job is to describe a person, but it reads its own greeting
+    for inspiration and lifts the opening shot — shackles, dirt, the stone
+    wall behind them — into the card, where `ensure_tags` then re-injects
+    it into every later image. Dropping the offenders here keeps them in
+    the greeting, where they are the scene rather than the character.
+    """
+    keep, drop = [], []
+    for t in (tags or "").split(","):
+        t = t.strip()
+        if not t:
+            continue
+        n = _norm_tag(t)
+        if any(k in n for k in _SCENE_TAGS):
+            drop.append(t)
+        else:
+            keep.append(t)
+    return ", ".join(keep), drop
 
 
 # ------------------------------------------------------------------- tools

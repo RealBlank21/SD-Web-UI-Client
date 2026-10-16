@@ -1,0 +1,18 @@
+{
+  "note": "Replays the spine of the Naelith chat 'Generate image' (20261016-131305-fe75) against the fixes made 2026-10-16. Trimmed to the turns that exercise them: T3 walks the scene OUT of the dungeon (card scene-tag bleed), T4 is the user's own 'don't mention my characteristics' (persona injection - known unfixed), T5-T6 are duo, T7 is a solo act with a present-but-unseen user (stale count). Turns 12/14/15 of the original ('More', 'More gangbang') were dropped as pure repetition.",
+  "conversations": [
+    {
+      "id": "naelith-first-chat",
+      "char": "naelith",
+      "turns": [
+        "Generate image",
+        "*strip her naked and make the chain tighten so you're spreaded wide and can't move*",
+        "*put a dog collar on you and bring you outside, into the public, forcing you to walk on all four like a dog*",
+        "(don't mention my characteristics in the prompt. Now the model is confused and it's showing her with glasses and braid.)",
+        "Butt up. Let everyone see your small tight pussy",
+        "*i kneel down behind you and spank your ass hard*",
+        "Now i want you to go to that person and beg him for his cock, image of her clinging to a person's leg, pathetically begging for his cock"
+      ]
+    }
+  ]
+}

@@ -58,6 +58,7 @@ from agent_core import (                      # vendored agent brain
     default_guide_text,
     effective_system_prompt,
     ensure_tags,
+    strip_scene_tags,
     execute_tool,
 )
 
@@ -471,23 +472,63 @@ def remove_cover(key: str) -> None:
         pass
 
 
-# One-shot meta prompt for the character form's "Generate with AI" button.
-# Deliberately independent of the roleplay system prompt.
+# Meta prompt for the character form's AI assistant. Deliberately independent
+# of the roleplay system prompt.
+#
+# This is a CONVERSATION, not a one-shot form filler. The user describes a
+# character, the model drafts the card, and then the user keeps talking to it
+# to adjust one field at a time - including hand-edits made in the form
+# between turns, which the model sees as the live card state.
+#
+# The response is therefore a PATCH: only the keys the model actually changed.
+# A key it omits is left alone. That is the whole contract - the client used
+# to assign `d.persona || ""` into the form, so an omitted key ERASED the
+# field, which turned any partial or verbose reply into silent data loss.
 CHAR_MAKER_PROMPT = (
-    "You design roleplay character cards for a chat app that also generates "
-    "images with Stable Diffusion. The user gives a loose idea; invent "
-    "fitting details when it is vague. Reply with ONLY a JSON object - no "
-    "markdown, no commentary - with exactly these keys:\n"
+    "You help build a roleplay character card for a chat app that also "
+    "generates images with Stable Diffusion. This is a conversation: the user "
+    "describes a character, you draft the card, and they then keep talking to "
+    "you to adjust it. Reply with ONLY a JSON object - no markdown, no "
+    "commentary - shaped like this:\n"
+    '"reply": one short sentence saying what you changed, or asking the one '
+    "question you need answered\n"
+    "plus ONLY the keys you actually changed this turn, which are any of:\n"
     '"name": the character\'s name (1-4 words)\n'
-    '"appearance": Stable Diffusion booru tags for their fixed look, '
-    "comma-separated (8-20 tags: hair, eyes, body, outfit, distinguishing "
-    "features)\n"
+    '"appearance": Stable Diffusion booru tags for their PERMANENT physical '
+    "look - hair, eyes, skin, build, age, species, permanent markings. "
+    "Comma-separated, 8-16 tags, and stop as soon as the identity is "
+    "complete rather than padding to the count.\n"
+    "  This one field is force-injected into EVERY image of the character "
+    "for the life of the card, so it must describe the person and never a "
+    "moment. Do NOT include: backgrounds or settings (bedroom, dungeon, "
+    "forest, stone wall); props or restraints (chains, shackles, rope, "
+    "collar); temporary condition (dirty, wounded, wet, clothed or not, "
+    "torn); pose, action or expression. You will want to describe the "
+    "opening scene - put it in the greeting, which is the only field "
+    "where a scene belongs.\n"
     '"persona": how they think, speak and behave - 3-6 sentences written as '
     "directions for a roleplay system prompt\n"
     '"greeting": their first message in a new chat, in character, with '
     "*actions in asterisks*, 2-5 sentences\n"
-    'Example shape: {"name": "...", "appearance": "...", "persona": "...", '
-    '"greeting": "..."}')
+    "\n"
+    "HOW TO PATCH:\n"
+    "- Return ONLY the fields you changed. Any key you omit is left EXACTLY "
+    "as it is, including edits the user made by hand since your last turn.\n"
+    "- NEVER return an empty string for a field. An empty value erases what "
+    "is there; if you have nothing to say about a field, omit the key.\n"
+    "- Most turns change ONE field. 'make the first message shorter' returns "
+    "only greeting. 'give her a scar' returns only appearance. Do not "
+    "rewrite the other three to 'refresh' them - that discards the user's "
+    "edits and reads as the assistant ignoring them.\n"
+    "- The user may ask you to undo: 'revert', 'undo that', 'that sucked', "
+    "'put it back'. Reply {\"revert\": true, \"reply\": \"...\"} and no "
+    "field keys at all.\n"
+    "- If the request is a question, or too vague to act on, return only "
+    '"reply" and no field keys.\n'
+    'First turn example: {"reply": "Here\'s a starting point.", "name": '
+    '"...", "appearance": "...", "persona": "...", "greeting": "..."}\n'
+    'Revision example: {"reply": "Shortened and plainer.", "greeting": '
+    '"..."}')
 
 
 # ------------------------------------------------------------------ personas
@@ -1395,7 +1436,8 @@ class Agent:
             # must not pull their whole body into frame.
             args["prompt"] = ensure_tags(args.get("prompt", ""),
                                          self.char_tags(),
-                                         self.persona_appearance())
+                                         self.persona_appearance(),
+                                         args.get("negative_prompt", ""))
             # preferred checkpoint applies when the model didn't pick one
             cp = (self.char.get("checkpoint") or "").strip()
             if cp and not args.get("model"):
@@ -4051,8 +4093,18 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, "timeline": agent.timeline})
 
     def api_char_generate(self):
-        """Character form's 'Generate with AI': LLM drafts a full card
-        (name / appearance tags / persona / greeting) from a description."""
+        """Character form's AI assistant, as a conversation.
+
+        Each call is a PATCH over the live card: the client sends the form's
+        current values (which include the user's hand edits) plus the
+        conversation so far, and the model returns only the fields it wants
+        to change. Keys it omits are left alone by the client.
+
+        That omission-is-the-default contract is the reason this is not the
+        one-shot filler it used to be: assigning `d.persona || ""` into the
+        form meant a reply that skipped a key silently emptied that field,
+        and a "make the greeting shorter" turn had no way to exist.
+        """
         body = self._body()          # read first — never leak the body when
         agent = self.app.agent       # an early error returns on keep-alive
         if not agent.has_key():
@@ -4060,13 +4112,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         prompt = str(body.get("prompt", "")).strip()
         if not prompt:
-            self._json({"error": "describe the character first"}, 400)
+            self._json({"error": "say what you want first"}, 400)
             return
+
+        # The live card, which the model must revise rather than replace.
+        cur = body.get("current") or {}
+        state = "\n".join(
+            f"{k}: {(str(cur.get(k) or '').strip() or '(empty)')}"
+            for k in ("name", "appearance", "persona", "greeting"))
+        system = (CHAR_MAKER_PROMPT + "\n\nCURRENT CARD STATE (live; includes "
+                  "the user's own edits, which you must preserve unless you "
+                  "are asked to change that field):\n" + state)
+
+        msgs = [{"role": "system", "content": system}]
+        for h in (body.get("history") or [])[-10:]:
+            if not isinstance(h, dict):
+                continue
+            role = "assistant" if h.get("role") == "assistant" else "user"
+            text = str(h.get("content") or "").strip()[:4000]
+            if text:
+                msgs.append({"role": role, "content": text})
+        msgs.append({"role": "user", "content": prompt[:4000]})
+
         try:
-            data = agent.llm_complete(
-                [{"role": "system", "content": CHAR_MAKER_PROMPT},
-                 {"role": "user", "content": prompt[:4000]}],
-                temperature=0.9, max_tokens=1500)
+            data = agent.llm_complete(msgs, temperature=0.9, max_tokens=2000)
         except LLMError as e:
             self._json({"error": scrub_paths(str(e))}, 502)
             return
@@ -4079,21 +4148,38 @@ class Handler(BaseHTTPRequestHandler):
                 parsed = json.loads(content[s:e + 1])
                 if isinstance(parsed, dict):
                     d = parsed
-            except json.DecodeError:
+            except json.JSONDecodeError:
                 pass
-        if not str(d.get("name", "")).strip():
-            self._json({"error": "the model returned no character — "
+
+        out = {"reply": scrub_paths(str(d.get("reply", "")).strip())[:600]}
+        if d.get("revert") is True:
+            out["revert"] = True
+        caps = (("name", 60), ("appearance", 4000), ("persona", 8000),
+                ("greeting", 2000))
+        for key, cap in caps:
+            val = scrub_paths(str(d.get(key, "")).strip())[:cap]
+            if not val:
+                continue               # omitted or empty: leave the field be
+            if key == "appearance":
+                # The model describes the opening shot in the greeting and
+                # lifts pieces of it into `appearance`, where ensure_tags
+                # re-injects them into every image for the life of the card.
+                val, dropped = strip_scene_tags(val)
+                if dropped:
+                    out["dropped_tags"] = dropped
+                if not val:
+                    continue
+            out[key] = val
+        if not out.get("revert") and not any(k in out for k, _ in caps) \
+                and not out.get("reply"):
+            # Nothing usable came back at all. A reply on its own is NOT
+            # this error: the prompt asks for one when the request is a
+            # question ("what is his name again?"), and the client shows it
+            # without touching a field.
+            self._json({"error": "the model didn't return anything — "
                                  "try again"}, 502)
             return
-        self._json({
-            "name": str(d.get("name", "")).strip()[:60],
-            "appearance":
-                scrub_paths(str(d.get("appearance", "")).strip())[:4000],
-            "persona":
-                scrub_paths(str(d.get("persona", "")).strip())[:8000],
-            "greeting":
-                scrub_paths(str(d.get("greeting", "")).strip())[:2000],
-        })
+        self._json(out)
 
     def api_image_generate(self):
         """One-off SD generation for the character form / scenario page:

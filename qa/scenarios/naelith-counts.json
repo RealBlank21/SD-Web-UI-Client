@@ -1,0 +1,18 @@
+{
+  "note": "Regression for the stale-count bug found 2026-10-16 on the Naelith chat 'Sup' (20261016-132936-d2ea). The model wrote `duo, 1boy, 1girl` on a shot of Naelith alone under a blanket, carried verbatim from the previous turn where the user was genuinely carrying her. viewer_in_frame() reads count > 1 as 'the user is in frame' and ensure_tags injected the persona, so the checkpoint cropped a hand and a shoulder into a solo shot. Turns 1-3 replay the real conversation; 4-5 hold the solo state; 6 is the INVERSE (the user must come back into frame, so a fix that over-fires into always-solo is caught); 7 is a meta question that must not generate.",
+  "conversations": [
+    {
+      "id": "naelith-stale-count",
+      "char": "naelith",
+      "turns": [
+        "sup",
+        "*picks you up, pull off the chains, walk into my bedroom and plop you down the bed and throw a pajama at you. Very comfy*",
+        "Shhhhh today you are gonna be violated, by comfiness",
+        "*pulls the blanket up a bit* just stay there. dont move",
+        "no, dont show me, i just want to see her face",
+        "*i lean over the bed and put my hand flat on her stomach* there you are",
+        "what are you doing later"
+      ]
+    }
+  ]
+}
