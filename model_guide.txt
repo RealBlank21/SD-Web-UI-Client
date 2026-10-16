@@ -1,29 +1,15 @@
-### Nova Anime XL:
-masterpiece, best quality, amazing quality, 4k, very aesthetic, high resolution, ultra-detailed, absurdres, newest, esthetic, scenery, 1girl, solo, cute, pink hair, long hair, choppy bangs, long sidelocks, nebulae cosmic purple eyes, rimlit eyes, facing to the side, looking at viewer, downturned eyes, light smile, red annular solar eclipse halo, red choker, detailed purple blazer, collared white shirt, big red neckerchief, glowing stars in hand, dispersion \(optics\), from side, from below, dutch angle, portrait, upper body, head tilt, colorful, rim light, backlit, (colorful light particles:1.2), cosmic sky, aurora, chaos, perfect night, fantasy background, dreamlike atmosphere, BREAK, detailed background, blurry foreground, bokeh, depth of field, volumetric lighting
-Negative prompt: photorealistic, realistic, 3d, extra digits, (particles, adversarial_noise:1.2), multiple views, multiple angle, split view, grid view, two shot, outside border, picture frame, framed, border, letterboxed, pillarboxed, 2koma, modern, recent, old, oldest, cartoon, graphic, text, painting, crayon, graphite, abstract, glitch, deformed, mutated, ugly, disfigured, long body, lowres, bad anatomy, bad hands, missing fingers, extra fingers, extra digits, fewer digits, cropped, very displeasing, (worst quality, bad quality:1.2), sketch, jpeg artifacts, signature, watermark, username, (censored, bar_censor, mosaic_censor:1.2), simple background, conjoined, bad ai-generated
-Steps: 20, CFG scale: 4.5, Sampler: Euler a, Seed: 3282307999, Model: NovaAnimeILV19, width: 768, height: 1344, middle: [0, (shadow: [0, highlight: [20, Model hash: fa486caafc, Global Seed: 428649103, Hires steps: 40, Hires upscale: 1.5, Hires CFG Scale: 4, Denoising strength: 0.4, Clip skip: 2
+Use this model unless stated otherwise.
 
-### MeinaMix:
-1girl, ponytail,white hair, purple eyes, t-shirt, skirt, thighhighs, flower, petals, light smile,medium breasts, collarbone, depth of field, petals, (illustration:1.1), landscape, background, abstract, mountainous horizon, cloud, sun,
-Negative prompt: (worst quality, low quality:1.4), nsfw
-Steps: 30, CFG scale: 7, Sampler: DPM++ SDE Karras, Seed: 1847947635, VAE: kl-f8-anime2.ckpt, Size: 512x1024, Model: Meina V12, Version: v1.8.0, Model hash: a5e5a941a3, Hires steps: 5, Hires upscale: 2, Hires upscaler: R-ESRGAN 4x+ Anime6B, Denoising strength: 0.45, Downcast alphas_cumprod: True, Clip skip: 2
+Use Step 18 if close up of a genital.
 
-Recommendations of use:
---------------------------------------------------------------------------------
-Enable Quantization in K samplers.
+### novaAnimeXL_ilV190.safetensors
 
-Hires.fix is needed for prompts where the character is far away in order to make decent images, it drastically improve the quality of face and eyes!
----------------------------------------------
-Recommended parameters:
-Sampler: DPM++ SDE Karras: 20 to 30 steps.
-Sampler: DPM++ 2M Karras: 20 to 60 steps.
-Sampler: Euler a: 40 to 60 steps.
-CFG Scale: 4 to 9.
-Resolutions: 512x768, 512x1024 for Portrait!
-Resolutions: 768x512, 1024x512, 1536x512 for Landscape!
-Hires.fix: R-ESRGAN 4x+Anime6b, with 10 steps at 0.3 up to 0.6 denoising.
-Clip Skip: 2.
-Negatives: ' (worst quality, low quality), (zombie, interlocked fingers) '
-Negatives if you can't use Hires.fix:
-'(worst quality:1.6, low quality:1.6), (zombie, sketch, interlocked fingers, comic)'
---------------------------------------------------------------------------------
+Example 1 (Not a POV):
+masterpiece, best quality, amazing quality, 4k, very aesthetic, high resolution, ultra-detailed, absurdres, newest, esthetic, scenery, Arlecchino from Genshin Impact, Aether from (genshin impact), blonde hair, long braided hair, golden eyes, twink, slender hands, duo, 1girl, 1boy, Arlecchino \(genshin impact\), white hair, long hair, black streaks in hair, red eyes, x-shaped pupils, pale skin, naked, large breasts, nipples, blush, biting lip, half-lidded eyes, looking down at viewer, head tilted back, mouth open, another's mouth on pussy, hand on another's head, other hand flat on the tabletop, standing over viewer, thighs framing viewer, close to camera, filling frame, teacup on table, dorm room interior, evening, warm lamp light, window, bookshelf, close-up, dutch angle, from below, low angle, shallow depth of field, detailed background, BREAK, rim light, volumetric lighting, detailed skin
+Negative prompt: photorealistic, realistic, 3d, extra digits, (particles, adversarial_noise:1.2), multiple views, multiple angle, split view, grid view, outside border, picture frame, framed, border, letterboxed, pillarboxed, 2koma, modern, recent, old, oldest, cartoon, graphic, text, painting, crayon, graphite, abstract, glitch, deformed, mutated, ugly, disfigured, long body, lowres, bad anatomy, bad hands, missing fingers, extra fingers, extra digits, fewer digits, cropped, very displeasing, (worst quality, bad quality:1.2), sketch, jpeg artifacts, signature, watermark, username, (censored, bar_censor, mosaic_censor:1.2), simple background, conjoined, bad ai-generated, extra hands, extra arms, own mouth on own pussy, own hand on own head, own hand on own crotch, pov cock, another person's cock, clothing, black coat, shirt, wide shot, full body
+Steps: 14, Sampler: DPM++ 2M, Schedule type: Karras, CFG scale: 4.5, Seed: 2336680434, Size: 832x1216, Model: novaAnime3dXL_v70
+
+Example 2 (A POV):
+masterpiece, best quality, very aesthetic, ultra-detailed, 1boy, solo, scaramouche \(genshin impact\), short indigo hair, red eyeliner, purple eyes, looking down at viewer, smug expression, blush, nude, fully erect hard cock, throbbing erect penis, veins, glistening tip, penis standing rigid in front of viewer, pov, between thighs, thighs framing view, legs spread, lying on back, from below, close-up, bedroom, soft warm lighting, depth of field, bokeh
+Negative prompt: flaccid, soft penis, pussy, boobs, breasts, female, 1girl, lowres, blurry, bad anatomy, extra digits, watermark, text, censored, mosaic censor, deformed, disfigured
+Steps: 18, Sampler: DPM++ 2M, Schedule type: Karras, CFG scale: 7.0, Seed: 2675047699, Size: 832x1216, Model hash: 1d0c21959c, Model: novaAnime3dXL_v70
