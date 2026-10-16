@@ -257,6 +257,11 @@ COVER_KEY_RE = re.compile(
     r"|sc-[a-z0-9][a-z0-9-]{0,40}\.[a-z0-9][a-z0-9-]{0,48})$")
 CHAT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9\-]{0,40}$")
 DEFAULT_CHAT_FILE = CHATS_DIR / "default.json"
+# The plain assistant used to be a special first row ("No character") rather
+# than a card. It is an ordinary character now — one with nothing filled in,
+# so its prompts read exactly as the free chat did — which means the list has
+# no special case at all and this card is created on demand.
+ASSISTANT_ID = "assistant"
 
 
 def new_chat_id() -> str:
@@ -271,6 +276,32 @@ def derive_title(timeline: list) -> str:
                 return t[:60]
             break
     return "New chat"
+
+
+def _last_reply(agent: "Agent") -> str:
+    """The newest assistant line on the timeline — a snippet of what was on
+    screen when the user gave their verdict."""
+    for evt in reversed(agent.timeline):
+        if evt.get("type") == "reply":
+            return str(evt.get("text") or "")[:300]
+    return ""
+
+
+def _clean_feedback(raw) -> dict:
+    """A stored verdict, or {} when there isn't a usable one."""
+    if not isinstance(raw, dict):
+        return {}
+    rating = str(raw.get("rating") or "").strip().lower()
+    if rating not in ("like", "dislike"):
+        return {}
+    try:
+        at = int(raw.get("at") or 0)
+    except (TypeError, ValueError):
+        at = 0
+    return {"rating": rating, "at": at,
+            "msgs": int(raw.get("msgs") or 0) if str(
+                raw.get("msgs") or "0").lstrip("-").isdigit() else 0,
+            "reply": str(raw.get("reply") or "")[:300]}
 
 
 _TITLE_SYSTEM = (
@@ -350,6 +381,37 @@ def save_characters(chars: list) -> None:
     tmp.write_text(json.dumps(chars, indent=2, ensure_ascii=False),
                    encoding="utf-8")
     tmp.replace(CHARS_FILE)
+
+
+def ensure_assistant(chars: list) -> list:
+    """Guarantee the plain assistant card exists, appending it if missing.
+
+    Empty persona / appearance / greeting on purpose: `_sys_msg` skips the
+    character block entirely for a card with nothing in it, so this chats
+    exactly like the free chat it replaced — no roleplay, no injected tags.
+    Editable like any other card; deleting it just brings it back.
+    """
+    if any(c.get("id") == ASSISTANT_ID for c in chars):
+        return chars
+    chars.append({"id": ASSISTANT_ID, "created": int(time.time()),
+                  "name": "Assistant", "system": True,
+                  "appearance": "", "persona": "", "greeting": "",
+                  "checkpoint": "", "size": [], "temp": None,
+                  "max_tokens": None})
+    try:
+        save_characters(chars)
+    except OSError:
+        pass
+    return chars
+
+
+def _fav_at(card: dict) -> float:
+    """When a card was pinned, for the favourites-first ordering. Cards
+    pinned before this existed (or hand-edited) sort as oldest."""
+    try:
+        return float(card.get("fav_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def slugify(name: str) -> str:
@@ -454,7 +516,7 @@ def migrate_flat_chats() -> None:
     try:
         for f in CHATS_DIR.glob("*.json"):
             if f == DEFAULT_CHAT_FILE:
-                continue                     # free chat stays single
+                continue                     # legacy free chat, not a card
             cid = f.stem
             if not CHAR_ID_RE.match(cid):
                 continue
@@ -491,6 +553,8 @@ class Agent:
         self.chat_id = ""                # active chat id (bound chats)
         self.scenario_id = ""            # scenario bound to the active chat
         self.auto_images = True          # per-chat: may the model use image tools?
+        self.feedback = {}               # verdict on the conversation as it
+        self.feedback_log = []           # stands; verdicts it has moved past
         self._title = ""                 # active chat's title
         self._home = DEFAULT_CHAT_FILE   # where the active chat persists
         self.messages = [self._sys_msg()]
@@ -500,6 +564,7 @@ class Agent:
         self.status_cb = None            # set while a turn streams
         self._save_lock = threading.Lock()   # chat-file writes; also taken by
         self._titled = set()              # the async title worker, see below
+        ensure_assistant(load_characters())     # the plain chat is a card too
         self._load_state()
         self._rehydrate_char()
 
@@ -542,25 +607,33 @@ class Agent:
             if user:
                 base += f"\n\nThe user's name is {user[:60]}."
         c = self.char
-        if c:
-            parts = [f"\n\nYou are roleplaying as {c.get('name', '?')}."
-                     f"\nPersonality: {c.get('persona', '').strip()}"]
+        if c and any(str(c.get(k) or "").strip()
+                     for k in ("persona", "appearance", "greeting")):
+            # a card with nothing filled in (the plain assistant) contributes
+            # no block at all — there is no one to roleplay as
+            persona = str(c.get("persona") or "").strip()
+            appearance = str(c.get("appearance") or "").strip()
+            parts = ["\n\nYou are roleplaying as "
+                     + (str(c.get("name") or "?").strip() or "?") + "."]
+            if persona:
+                parts.append("Personality: " + persona)
             if c.get("greeting"):
                 parts.append("Your greeting (the chat's first message) was: "
                              + c["greeting"].strip())
-            parts.append("Your appearance — reflect these tags in every "
-                         "image prompt that shows you. If your list opens "
-                         "with a count tag (1boy / 1girl) that tag counts "
-                         "only YOU: when anyone else is in the shot, DELETE "
-                         "it and write the total instead — two males are "
-                         "`duo, 2boys`, two females `duo, 2girls`, mixed "
-                         "`duo, 1boy, 1girl`. Never leave your own `1boy` "
-                         "sitting next to `2boys`: the two counts are taken "
-                         "as three people and the model resolves that by "
-                         "merging the pair into one, so the character comes "
-                         "out wearing the user's hair, eyes and glasses while "
-                         "the user is left as a stranger in the background.\n"
-                         + c.get("appearance", "").strip())
+            if appearance:
+                parts.append("Your appearance — reflect these tags in every "
+                             "image prompt that shows you. If your list opens "
+                             "with a count tag (1boy / 1girl) that tag counts "
+                             "only YOU: when anyone else is in the shot, DELETE "
+                             "it and write the total instead — two males are "
+                             "`duo, 2boys`, two females `duo, 2girls`, mixed "
+                             "`duo, 1boy, 1girl`. Never leave your own `1boy` "
+                             "sitting next to `2boys`: the two counts are taken "
+                             "as three people and the model resolves that by "
+                             "merging the pair into one, so the character comes "
+                             "out wearing the user's hair, eyes and glasses while "
+                             "the user is left as a stranger in the background.\n"
+                             + appearance)
             base += "\n".join(parts)
         sc = None
         if self.scenario_id and c:
@@ -745,6 +818,10 @@ class Agent:
         self.scenario_id = str(d.get("scenario_id") or "")
         # absent = written before the toggle existed -> default to on
         self.auto_images = d.get("auto_images", True) is not False
+        self.feedback = _clean_feedback(d.get("feedback"))
+        log = d.get("feedback_log")
+        self.feedback_log = [f for f in (log or []) if isinstance(f, dict)] \
+            if isinstance(log, list) else []
         msgs = d.get("messages")
         self.messages = [self._sys_msg()] + \
             (msgs if isinstance(msgs, list) else [])
@@ -753,10 +830,49 @@ class Agent:
     def _fresh_chat(self, scenario_id: str = ""):
         self.scenario_id = scenario_id
         self.auto_images = True          # a fresh chat starts with images on
+        self.feedback = {}
+        self.feedback_log = []
         self.messages = [self._sys_msg()]
         self.timeline = []
         self._title = ""
         self._seed_greeting()
+
+    # ------------------------------------------------------------ feedback
+
+    def set_feedback(self, rating: str) -> dict:
+        """Rate the conversation as it stands: "like", "dislike", or "" to
+        clear. The same verdict twice clears it, the opposite one replaces
+        it — there is one rating per chat, not a per-message scoreboard.
+
+        Deliberately captured and not acted on. The point is to collect what
+        the user thought of a conversation while it is in front of them.
+        """
+        rating = (rating or "").strip().lower()
+        if rating not in ("like", "dislike"):
+            self.feedback = {}
+        elif self.feedback.get("rating") == rating:
+            self.feedback = {}
+        else:
+            self.feedback = {"rating": rating, "at": int(time.time()),
+                             "msgs": len(self.messages),
+                             "reply": _last_reply(self)}
+        self._save_state()
+        return self.feedback
+
+    def clear_feedback(self) -> None:
+        """The conversation moved on, so the verdict no longer describes it.
+
+        The old one is kept: archived in `feedback_log` with the message count
+        it was given at, which is what makes the archive analysable later.
+        Saves here rather than trusting the caller — the turn paths all do
+        save afterwards, but the archive should not depend on that.
+        """
+        if not self.feedback:
+            return                         # nothing rated, nothing to write
+        self.feedback_log.append(dict(self.feedback))
+        del self.feedback_log[:-200]        # keep a chat's archive bounded
+        self.feedback = {}
+        self._save_state()
 
     def _seed_greeting(self):
         """Opening events of a fresh chat: a cover image (the bound
@@ -783,8 +899,9 @@ class Agent:
             self.timeline.append({"type": "reply", "text": g})
 
     def set_character(self, card: dict | None) -> None:
-        """Switch to a character (their newest chat) or the free chat.
-        Caller must hold the agent lock."""
+        """Switch to a character (their newest chat). None means no character
+        at all — the assistant card covers the plain chat, this is only the
+        fallback. Caller must hold the agent lock."""
         self._save_state()                       # flush current chat home
         self.char = card
         if card:
@@ -824,7 +941,8 @@ class Agent:
 
     def new_chat(self, scenario_id: str = "") -> None:
         """Start a fresh chat for the active character — the old one stays
-        archived. The unbound free chat simply resets in place."""
+        archived. With no character at all (the fallback above) it resets
+        in place instead."""
         if not self.char:
             self.scenario_id = ""
             self.auto_images = True
@@ -870,14 +988,71 @@ class Agent:
                 self._fresh_chat()
             self._save_state()
 
+    def _adopt_free_chat(self, card: dict, active: bool) -> None:
+        """The unbound chat (chats/default.json) is the assistant character's
+        now, so its file moves into their chat directory and its history
+        survives the change.
+
+        `active` says the free chat is the chat that was open, which is what
+        makes it the assistant's *active* chat as well. A legacy file can
+        outlive that — someone may have been chatting as a character for
+        weeks — so the file migration runs either way, but it must not
+        disturb the live state of whoever is active.
+        """
+        cid = card["id"]
+
+        def drop_legacy():
+            try:
+                DEFAULT_CHAT_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if active:
+            files = self._list_chats(cid)
+            self.char = card
+            if files:
+                self.chat_id = files[0].stem
+                self._home = files[0]
+                self._apply_chat_payload(self._load_chat_payload(files[0]))
+                self._save_state()
+                return
+            self.chat_id = new_chat_id()
+            self._home = self._chat_file(cid, self.chat_id)
+            self._apply_chat_payload(self._load_chat_payload(DEFAULT_CHAT_FILE))
+            self._save_state()        # writes chats/<cid>/<chat_id>.json
+            drop_legacy()
+            return
+
+        if self._list_chats(cid) or not DEFAULT_CHAT_FILE.exists():
+            return                     # already migrated, or nothing to move
+        payload = self._load_chat_payload(DEFAULT_CHAT_FILE)
+        if not (payload.get("messages") or payload.get("timeline")):
+            return
+        chat_id = new_chat_id()
+        home = self._chat_file(cid, chat_id)
+        payload = dict(payload, id=chat_id, character_id=cid,
+                       title=str(payload.get("title") or derive_title(
+                           payload.get("timeline") or []))[:60])
+        home.parent.mkdir(parents=True, exist_ok=True)
+        home.write_text(json.dumps(payload, ensure_ascii=False),
+                        encoding="utf-8")
+        drop_legacy()
+
     def _rehydrate_char(self):
         """Restore the active character (and their active chat) at startup."""
         cid = getattr(self, "_state_char_id", "")
         self._state_char_id = ""
+        cards = load_characters()
+        assistant = next((c for c in cards if c.get("id") == ASSISTANT_ID), None)
         if not cid:
+            # no character was active — that used to be a separate mode and
+            # is the assistant character now
+            if assistant:
+                self._adopt_free_chat(assistant, active=True)
             return
-        card = next((c for c in load_characters()
-                     if c.get("id") == cid), None)
+        if assistant:
+            self._adopt_free_chat(assistant, active=False)
+        card = next((c for c in cards if c.get("id") == cid), None)
         if card:
             self.char = card
             if self.messages and self.messages[0].get("role") == "system":
@@ -922,6 +1097,7 @@ class Agent:
             "chat_id": self.chat_id if self.char else "",
             "scenario_id": self.scenario_id,
             "auto_images": self.auto_images,
+            "feedback": self.feedback,
             "messages": self.messages[1:],
             "timeline": self.timeline,
         }
@@ -940,6 +1116,8 @@ class Agent:
                     "updated": now,
                     "scenario_id": self.scenario_id,
                     "auto_images": self.auto_images,
+                    "feedback": self.feedback,
+                    "feedback_log": self.feedback_log,
                     "messages": mirror["messages"],
                     "timeline": self.timeline,
                 }
@@ -949,6 +1127,7 @@ class Agent:
         else:
             payload = {"messages": mirror["messages"],
                        "auto_images": self.auto_images,
+                       "feedback": self.feedback,
                        "timeline": self.timeline}
             CHATS_DIR.mkdir(parents=True, exist_ok=True)
             DEFAULT_CHAT_FILE.write_text(
@@ -972,7 +1151,7 @@ class Agent:
                 and self.llm_models):
             return
         if not CHAT_ID_RE.match(self.chat_id):
-            return          # the unbound free chat has nowhere to store one
+            return          # no chat file to store the title in
         if self.chat_id in self._titled:
             return
         if not any(e.get("type") == "reply" for e in self.timeline):
@@ -1014,6 +1193,7 @@ class Agent:
             self._title = d.get("title", "")
             self.scenario_id = str(d.get("scenario_id") or "")
             self.auto_images = d.get("auto_images", True) is not False
+            self.feedback = _clean_feedback(d.get("feedback"))
             if isinstance(d.get("messages"), list):
                 self.messages = [self._sys_msg()] + d["messages"]
             self.timeline = d.get("timeline") or []
@@ -1118,6 +1298,9 @@ class Agent:
             # so a later edit/regenerate can rewind the context exactly
             evt = {"type": "reply", "text": reply, "mi": len(messages)}
             self.push(evt, emit)
+            # a verdict rated the conversation *before* this reply, so it no
+            # longer describes it — archive it and start the chat unrated
+            self.clear_feedback()
             self.maybe_generate_title()
             return True
         return False
@@ -2509,7 +2692,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(data)
         elif path == "/api/history":
             self._json({"timeline": self.app.agent.timeline,
-                        "busy": self.app.agent.lock.locked()})
+                        "busy": self.app.agent.lock.locked(),
+                        "feedback": self.app.agent.feedback})
         elif path == "/api/settings":
             self.api_settings()
         elif path == "/api/characters":
@@ -2598,19 +2782,24 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 agent.lock.release()
             self._json({"ok": True, "timeline": agent.timeline,
-                        "auto_images": agent.auto_images})
+                        "auto_images": agent.auto_images,
+                        "feedback": agent.feedback})
         elif path == "/api/chat/select":
             self.api_chat_select()
         elif path == "/api/chat/delete":
             self.api_chat_delete()
         elif path == "/api/chat/auto_images":
             self.api_chat_auto_images()
+        elif path == "/api/chat/feedback":
+            self.api_chat_feedback()
         elif path == "/api/characters":
             self.api_characters_save()
         elif path == "/api/character/select":
             self.api_character_select()
         elif path == "/api/character/delete":
             self.api_character_delete()
+        elif path == "/api/character/favourite":
+            self.api_character_favourite()
         elif path == "/api/personas":
             self.api_personas_save()
         elif path == "/api/persona/select":
@@ -2655,10 +2844,12 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self.app.agent.timeline = [e for i, e in enumerate(tl)
                                            if i not in idxs]
+                self.app.agent.clear_feedback()   # it rated what just went
                 self.app.agent._save_state()
                 # the caller re-reads /api/history — every later index moved
                 self._json({"ok": True, "removed": len(idxs),
-                            "timeline": self.app.agent.timeline})
+                            "timeline": self.app.agent.timeline,
+                            "feedback": self.app.agent.feedback})
                 return
             try:
                 idx = int(body.get("index", -1))
@@ -2668,9 +2859,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "bad index"}, 400)
                 return
             evt = tl.pop(idx)
+            self.app.agent.clear_feedback()       # it rated what just went
             self.app.agent._save_state()
             self._json({"ok": True, "removed": evt.get("type"),
-                        "timeline": self.app.agent.timeline})
+                        "timeline": self.app.agent.timeline,
+                        "feedback": self.app.agent.feedback})
         elif path == "/api/edit_event":
             self.api_edit_event()
         elif path == "/api/regen_reply":
@@ -2716,8 +2909,10 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(mi, int) and 1 <= mi <= len(agent.messages) \
                     and agent.messages[mi - 1].get("role") == "assistant":
                 agent.messages[mi - 1]["content"] = text
+            agent.clear_feedback()     # it rated the old wording
             agent._save_state()
-            self._json({"ok": True, "text": text, "timeline": agent.timeline})
+            self._json({"ok": True, "text": text, "timeline": agent.timeline,
+                        "feedback": agent.feedback})
         finally:
             agent.lock.release()
 
@@ -2895,7 +3090,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             agent.select_chat(cid, chat_id)
             self._json({"ok": True, "timeline": agent.timeline,
-                        "auto_images": agent.auto_images})
+                        "auto_images": agent.auto_images,
+                        "feedback": agent.feedback})
         except ValueError as e:
             self._json({"error": str(e)}, 400)
         except Exception as e:                      # noqa: BLE001
@@ -2914,7 +3110,35 @@ class Handler(BaseHTTPRequestHandler):
         try:
             agent.delete_chat(cid, chat_id)
             self._json({"ok": True, "timeline": agent.timeline,
-                        "auto_images": agent.auto_images})
+                        "auto_images": agent.auto_images,
+                        "feedback": agent.feedback})
+        finally:
+            agent.lock.release()
+
+    def api_chat_feedback(self):
+        """Rate the active conversation: "like", "dislike", or "" to clear.
+
+        Captured, not acted on — there is nothing downstream that reads it
+        yet. Stored per chat so it survives restarts and archived into the
+        chat's own log when the conversation moves on.
+        """
+        body = self._body()
+        rating = body.get("rating", "")
+        if not isinstance(rating, str):
+            self._json({"error": "rating must be a string"}, 400)
+            return
+        agent = self.app.agent
+        # a verdict on a chat with nothing in it is noise, and it would sit in
+        # the archive until the first reply silently retired it
+        if not any(e.get("type") in ("user", "reply") for e in agent.timeline):
+            self._json({"error": "nothing to rate yet"}, 400)
+            return
+        if not agent.lock.acquire(blocking=False):
+            self._json({"error": "busy — a turn is already running"}, 409)
+            return
+        try:
+            fb = agent.set_feedback(rating)
+            self._json({"ok": True, "feedback": fb})
         finally:
             agent.lock.release()
 
@@ -2965,6 +3189,7 @@ class Handler(BaseHTTPRequestHandler):
             "gallery_count": gallery_total(),
             "busy": agent.lock.locked(),
             "auto_images": agent.auto_images,
+            "feedback": agent.feedback,
             "character": ({"id": char["id"],
                            "name": char.get("name", "")}
                           if char else None),
@@ -3006,7 +3231,7 @@ class Handler(BaseHTTPRequestHandler):
         return s
 
     def api_characters_list(self):
-        cards = load_characters()
+        cards = ensure_assistant(load_characters())
         out = []
         for c in cards:
             c = dict(c)
@@ -3028,6 +3253,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 c["chats"] = 0
             out.append(c)
+        # favourites first, most recently pinned at the very top; the rest
+        # keep creation order (sort is stable)
+        out.sort(key=lambda c: (not c.get("fav"), -_fav_at(c)))
         active = self.app.agent.char
         self._json({"characters": out,
                     "active": active["id"] if active else ""})
@@ -3154,9 +3382,30 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 agent.set_character(None)
             self._json({"ok": True, "timeline": agent.timeline,
-                        "auto_images": agent.auto_images})
+                        "auto_images": agent.auto_images,
+                        "feedback": agent.feedback})
         finally:
             agent.lock.release()
+
+    def api_character_favourite(self):
+        """Pin a character to the top of the list, or unpin it."""
+        body = self._body()
+        cid = str(body.get("id", "")).strip()
+        cards = load_characters()
+        card = next((c for c in cards if c.get("id") == cid), None)
+        if not card:
+            self._json({"error": "character not found"}, 404)
+            return
+        want = body.get("favourite")
+        on = (not card.get("fav")) if want is None else bool(want)
+        if on:
+            card["fav"] = True
+            card["fav_at"] = time.time()   # pins land at the very top
+        else:
+            card["fav"] = False
+            card.pop("fav_at", None)
+        save_characters(cards)
+        self._json({"ok": True, "favourite": on})
 
     def api_character_delete(self):
         body = self._body()
@@ -3164,6 +3413,9 @@ class Handler(BaseHTTPRequestHandler):
         cards = load_characters()
         if not any(c.get("id") == cid for c in cards):
             self._json({"error": "character not found"}, 404)
+            return
+        if cid == ASSISTANT_ID:
+            self._json({"error": "the assistant cannot be deleted"}, 400)
             return
         agent = self.app.agent
         if not agent.lock.acquire(blocking=False):
@@ -3827,7 +4079,7 @@ class Handler(BaseHTTPRequestHandler):
                 parsed = json.loads(content[s:e + 1])
                 if isinstance(parsed, dict):
                     d = parsed
-            except json.JSONDecodeError:
+            except json.DecodeError:
                 pass
         if not str(d.get("name", "")).strip():
             self._json({"error": "the model returned no character — "

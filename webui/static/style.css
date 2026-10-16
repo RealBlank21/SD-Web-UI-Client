@@ -103,9 +103,22 @@ button:active { transform: scale(.97); }
   display: flex; align-items: center; gap: 12px; width: 100%;
   padding: 10px 8px; border-radius: 14px; text-align: left;
   border: 1px solid transparent;
+  position: relative;
 }
 .char-row:active { transform: scale(.98); background: var(--panel2); }
 .char-row.active { background: var(--panel2); border-color: var(--line); }
+/* favourite pin — absolutely placed so it sits over the row's spare corner
+   in both list and grid mode, without stealing the row's own tap target */
+.char-fav {
+  position: absolute; top: 5px; right: 5px;
+  width: 30px; height: 30px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; line-height: 1; color: var(--dim);
+  background: none; border: 0; padding: 0;
+  user-select: none; -webkit-user-select: none;
+}
+.char-fav.on { color: var(--accent); }
+.char-fav:active { transform: scale(.85); }
 .char-avatar {
   width: 50px; height: 50px; border-radius: 16px; object-fit: cover; flex: none;
 }
@@ -129,6 +142,7 @@ button:active { transform: scale(.97); }
   padding: 14px 6px 12px; text-align: center;
 }
 .charlist.asgrid .char-avatar { width: 68px; height: 68px; border-radius: 20px; }
+.charlist.asgrid .char-fav { top: 3px; right: 3px; width: 26px; height: 26px; font-size: 15px; }
 .charlist.asgrid .char-text { align-items: center; gap: 2px; }
 .charlist.asgrid .char-text .dim { display: none; }
 .charlist.asgrid .char-text b {
@@ -247,16 +261,8 @@ button:active { transform: scale(.97); }
 .iconbtn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .iconbtn:active, .iconbtn:hover { background: var(--panel2); color: var(--text); }
 
-/* auto-image toggle (chat top bar) — dimmed when off, lit accent when on.
-   aria-pressed is the single source of truth, mirrored from the server. */
-#btn-autoimg[aria-pressed="true"] {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 13%, transparent);
-}
-#btn-autoimg[aria-pressed="true"] svg {
-  fill: color-mix(in srgb, var(--accent) 18%, transparent);
-}
-#btn-autoimg[aria-pressed="false"] { color: var(--line); }
+/* chat options (3-dot) — the dots are filled, so they carry no stroke */
+#btn-chmenu svg { fill: currentColor; stroke: none; }
 
 /* ------------------------------------------------------------------ chat */
 
@@ -837,6 +843,11 @@ button:active { transform: scale(.97); }
 .ctx-card button:last-child { border-bottom: 0; }
 .ctx-card button:active { background: var(--panel2); }
 .ctx-card button.danger { color: var(--err); }
+/* an `on` item is a state, not an action — tint it and mark it ticked */
+.ctx-card button.on { color: var(--accent); font-weight: 600; }
+.ctx-card button.on::after {
+  content: "✓"; margin-left: auto; font-size: 13px; opacity: .85;
+}
 .ctx-card .ctx-preview {
   max-height: 120px; margin: 14px 14px 4px; border-radius: 10px;
   display: flex; justify-content: center; overflow: hidden;

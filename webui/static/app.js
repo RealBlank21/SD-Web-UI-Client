@@ -61,7 +61,7 @@ const els = {
   charempty: $("charempty"),
   chatScroll: $("chat-scroll"), chatCharname: $("chat-charname"),
   btnHistory: $("btn-history"), pageHist: $("page-hist"),
-  btnAutoimg: $("btn-autoimg"),
+  btnChmenu: $("btn-chmenu"),
   pageChform: $("page-chform"), chTitle: $("ch-title"),
   cfBack: $("cf-back"), cfSave: $("cf-save"),
   hsBack: $("hs-back"), hsNew: $("hs-new"), hsList: $("hs-list"),
@@ -690,6 +690,9 @@ function handleEvent(evt) {
       stopProgressPolling();
       pillHide();
       scheduleTitleRefresh();
+      // the server retires the rating once the reply lands — the chat it was
+      // given for is gone
+      chatRating = "";
       break;
   }
   if (evt.type !== "progress") scrollDown(true);
@@ -2095,9 +2098,6 @@ async function refreshChars(watched) {
 function charRows(filter) {
   const q = (filter || "").trim().toLowerCase();
   const rows = [];
-  if (!q || "no character".includes(q) || "free chat".includes(q)) {
-    rows.push({ plain: true });
-  }
   for (const c of chars) {
     if (q && !(c.name || "").toLowerCase().includes(q)) continue;
     rows.push(c);
@@ -2117,21 +2117,10 @@ function renderCharList() {
   const rows = charRows(els.charSearch.value);
   els.charlist.classList.toggle("asgrid", charGrid);
   els.charlist.textContent = "";
-  els.charempty.hidden = rows.some((r) => !r.plain);
+  els.charempty.hidden = rows.length > 0;
   for (const c of rows) {
-    const row = el("button", "char-row" + (c.plain
-      ? (activeCharId ? "" : " active")
-      : (c.id === activeCharId ? " active" : "")));
-    if (c.plain) {
-      row.appendChild(el("span", "char-avatar ch-noavatar", "✦"));
-      const tx = el("div", "char-text");
-      tx.appendChild(el("b", null, "No character"));
-      tx.appendChild(el("span", "dim", "plain assistant chat"));
-      row.appendChild(tx);
-      row.addEventListener("click", () => selectChar(""));
-      els.charlist.appendChild(row);
-      continue;
-    }
+    const row = el("button", "char-row"
+      + (c.id === activeCharId ? " active" : ""));
     if (c.avatar) {
       const img = document.createElement("img");
       img.className = "char-avatar";
@@ -2151,9 +2140,40 @@ function renderCharList() {
     }
     if (c.id === activeCharId) tx.appendChild(el("span", "char-now", "now"));
     row.appendChild(tx);
+    row.appendChild(favStar(c));
     row.addEventListener("click", () => selectChar(c.id));
     row.dataset.charid = c.id;
     els.charlist.appendChild(row);
+  }
+}
+
+/* the pin, a span rather than a button — a row is a button and nesting one
+   inside another is invalid markup. stopPropagation keeps a tap on it from
+   also opening the chat. */
+function favStar(c) {
+  const s = el("span", "char-fav" + (c.fav ? " on" : ""), c.fav ? "★" : "☆");
+  s.title = c.fav ? "Unfavourite" : "Favourite";
+  s.setAttribute("role", "button");
+  s.setAttribute("aria-label", s.title);
+  s.setAttribute("aria-pressed", c.fav ? "true" : "false");
+  const go = (e) => { e.preventDefault(); e.stopPropagation(); toggleFav(c.id); };
+  s.addEventListener("click", go);
+  s.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") go(e);
+  });
+  return s;
+}
+
+async function toggleFav(id) {
+  try {
+    await api("/api/character/favourite", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    await refreshChars();
+  } catch (e) {
+    if (e.message !== "locked") toast("Favourite failed: " + e.message, true);
   }
 }
 
@@ -2180,7 +2200,7 @@ function selectChar(id) {
     activeCharId = id;
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
-    applyAutoFlag(d);
+    applyChatFlags(d);
     switchView("chat");
     refreshStatus();
   }).catch((e) => {
@@ -2229,7 +2249,7 @@ function openCharForm(card) {
   els.chAvatarClear.hidden = !(card && card.avatar);
   setPreview(els.chCoverImg, els.chCoverClear,
     (card && card.cover) || "");
-  els.chDelete.hidden = !card;
+  els.chDelete.hidden = !card || !!card.system;
   renderScenarioList();
   els.pageChform.hidden = false;
   setTimeout(() => els.chName.focus(), 60);
@@ -2541,10 +2561,12 @@ function charCtx(row) {
   const c = chars.find((x) => x.id === id);
   if (!c) return;
   openCtx([
+    { label: c.fav ? "Unfavourite" : "Favourite",
+      action: () => toggleFav(id) },
     { label: "Edit", action: () => openCharForm(c) },
     { label: "Start scenario", action: () => startScenarioMenu(c) },
-    { label: "Delete", danger: true,
-      action: () => deleteCharById(id, c.name) },
+    ...(c.system ? [] : [{ label: "Delete", danger: true,
+      action: () => deleteCharById(id, c.name) }]),
   ], c.avatar || null);
 }
 
@@ -2665,43 +2687,76 @@ $("btn-gridtoggle").addEventListener("click", () => {
 updateGridBtn();
 $("btn-back").addEventListener("click", () => switchView("chars"));
 $("btn-newchat").addEventListener("click", newChat);
-els.btnAutoimg.addEventListener("click", toggleAutoImages);
+els.btnChmenu.addEventListener("click", openChatMenu);
 
-/* --------------------------------------------------- auto image toggle
+/* ------------------------------------------------------- chat options menu
  *
- * Per chat, persisted server-side. Off means the image tools are withheld
- * from the model entirely, so the chat is plain text — regenerating an
- * existing image from the UI still works. The button reflects
- * aria-pressed; the server owns the value.
+ * Everything chat-wide that isn't worth a permanent header button lives
+ * here. Both settings are per chat and owned by the server; this file only
+ * mirrors them so the menu can show the current state.
+ *
+ * Auto images: off means the image tools are withheld from the model
+ * entirely, so the chat is plain text — regenerating an existing image from
+ * the UI still works.
+ *
+ * Like/dislike: one verdict on the conversation as it stands. The server
+ * clears it when the next reply lands (and archives it), so tapping is
+ * always about what is on screen right now. Captured only — nothing reads
+ * it yet.
  */
 
-function paintAutoImages(on) {
-  const b = els.btnAutoimg;
-  b.setAttribute("aria-pressed", on ? "true" : "false");
-  b.title = on ? "Auto images on — tap for text only" : "Auto images off";
+let autoImages = true;
+let chatRating = "";        // "" | "like" | "dislike"
+
+/* chat-mutating endpoints (new / select / delete / character switch) carry
+   the active chat's flags, so the menu follows the chat without a refetch */
+function applyChatFlags(d) {
+  if (!d) return;
+  if (typeof d.auto_images === "boolean") autoImages = d.auto_images;
+  if (d.feedback) chatRating = d.feedback.rating || "";
 }
 
-/* chat-mutating endpoints (new / select / delete / character switch) carry the
-   active chat's flag, so the button follows the chat without a second fetch */
-function applyAutoFlag(d) {
-  if (d && typeof d.auto_images === "boolean") paintAutoImages(d.auto_images);
+function openChatMenu() {
+  const rated = chatRating;
+  openCtx([
+    { label: rated === "like" ? "Liked" : "Like", on: rated === "like",
+      action: () => rateChat("like") },
+    { label: rated === "dislike" ? "Disliked" : "Dislike",
+      on: rated === "dislike", action: () => rateChat("dislike") },
+    { label: autoImages ? "Auto images on" : "Auto images off",
+      on: autoImages, action: () => toggleAutoImages() },
+  ]);
+}
+
+async function rateChat(rating) {
+  try {
+    const d = await api("/api/chat/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rating }),
+    });
+    chatRating = (d.feedback && d.feedback.rating) || "";
+    toast(chatRating ? (chatRating === "like" ? "Liked" : "Disliked")
+                     : "Rating cleared");
+  } catch (e) {
+    if (e.message !== "locked") toast("Failed: " + e.message, true);
+  }
 }
 
 async function toggleAutoImages() {
-  const want = els.btnAutoimg.getAttribute("aria-pressed") !== "true";
-  const prev = els.btnAutoimg.getAttribute("aria-pressed");
-  paintAutoImages(want);                        // optimistic
+  const want = !autoImages;
+  const prev = autoImages;
+  autoImages = want;                               // optimistic
   try {
     const d = await api("/api/chat/auto_images", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ on: want }),
     });
-    paintAutoImages(d.auto_images !== false);
-    toast(d.auto_images !== false
-      ? "Auto images on" : "Auto images off — text only");
+    autoImages = d.auto_images !== false;
+    toast(autoImages ? "Auto images on" : "Auto images off — text only");
   } catch (e) {
-    paintAutoImages(prev === "true");           // server refused: revert
+    autoImages = prev;                             // server refused: revert
     if (e.message !== "locked") toast("Failed: " + e.message, true);
   }
 }
@@ -2770,7 +2825,7 @@ async function refreshStatus() {
     els.chatCharname.textContent = s.character ? s.character.name : "Free chat";
     els.btnHistory.hidden = !s.character;
     // per-chat setting — pick it up on chat switch, new chat and restart
-    if (typeof s.auto_images === "boolean") paintAutoImages(s.auto_images);
+    applyChatFlags(s);
     return s;
   } catch (e) {
     if (e.message === "locked") return;
@@ -2882,7 +2937,7 @@ async function newChat() {
     const d = await api("/api/chat/new", { method: "POST" });
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
-    applyAutoFlag(d);
+    applyChatFlags(d);
     toast("New chat");
   } catch (e) {
     if (e.message !== "locked") toast("Failed: " + e.message, true);
@@ -2995,7 +3050,7 @@ async function deleteChatsBatch(ids) {
   if (last) {
     els.msgs.textContent = "";
     renderHistory(last.timeline || []);
-    applyAutoFlag(last);
+    applyChatFlags(last);
     refreshStatus();
   }
   await openHistory();
@@ -3009,7 +3064,7 @@ function selectChat(chatId) {
   }).then((d) => {
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
-    applyAutoFlag(d);
+    applyChatFlags(d);
     els.pageHist.hidden = true;
     switchView("chat");
   }).catch((e) => {
@@ -3027,7 +3082,7 @@ async function deleteChatById(chatId) {
     toast("Chat deleted");
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
-    applyAutoFlag(d);
+    applyChatFlags(d);
     await openHistory();
   } catch (e) {
     if (e.message !== "locked") toast("Delete failed: " + e.message, true);
@@ -3138,7 +3193,9 @@ function openCtx(items, previewSrc) {
     ctxCard.appendChild(pv);
   }
   for (const it of items) {
-    const b = el("button", it.danger ? "danger" : "", it.label);
+    const b = el("button", (it.danger ? "danger" : "")
+      + (it.on ? " on" : ""), it.label);
+    if (it.on) b.setAttribute("aria-pressed", "true");
     b.addEventListener("click", () => { closeCtx(); it.action(); });
     ctxCard.appendChild(b);
   }
@@ -4414,6 +4471,7 @@ async function init() {
   refreshStatus();
   try {
     const h = await api("/api/history");
+    applyChatFlags(h);
     if (h.timeline && h.timeline.length) {
       renderHistory(h.timeline);
       images = timelineImages(h.timeline);
