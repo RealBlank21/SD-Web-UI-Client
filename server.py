@@ -733,14 +733,21 @@ def new_chat_id() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
 
 
-def derive_title(timeline: list) -> str:
-    for evt in timeline:
+def chat_preview(payload: dict, limit: int = 120) -> str:
+    """The line under a character's name in the history list: the user's own
+    first message. There is no generated title — the raw message is both more
+    recognisable than a two-word summary and free.
+
+    Reads `timeline` when there is one and falls back to `messages` for chats
+    saved before the timeline existed.
+    """
+    for evt in payload.get("timeline") or []:
         if evt.get("type") == "user":
-            t = (evt.get("text") or "").strip()
-            if t:
-                return t[:60]
-            break
-    return "New chat"
+            return (evt.get("text") or "").strip()[:limit]
+    for m in payload.get("messages") or []:
+        if isinstance(m, dict) and m.get("role") == "user":
+            return str(m.get("content") or "").strip()[:limit]
+    return ""
 
 
 def _last_reply(agent: "Agent") -> str:
@@ -767,67 +774,6 @@ def _clean_feedback(raw) -> dict:
             "msgs": int(raw.get("msgs") or 0) if str(
                 raw.get("msgs") or "0").lstrip("-").isdigit() else 0,
             "reply": str(raw.get("reply") or "")[:300]}
-
-
-_TITLE_SYSTEM = (
-    "You name roleplay conversations. Reply with ONLY a title: two to five "
-    "words, plain text. No markdown, no headings, no numbering, no quotes, no "
-    "trailing punctuation, no explanation, no emoji. Name the place, the "
-    "moment or the situation - not just a character's name."
-)
-
-
-def clean_title(raw: str) -> str:
-    """One LLM line -> a title, or "" when it plainly isn't one.
-
-    A "name this" brief reliably draws markdown back, and occasionally draws
-    a date or a numbered heading instead of a title. The first chat this ran
-    on came back as "# 2026-05-13" and went straight into the history list,
-    so anything that is not plainly words is rejected and the derived title
-    is left in place instead.
-    """
-    line = (raw or "").strip().splitlines()[0] if (raw or "").strip() else ""
-    t = re.sub(r"^[\s#>*\-+`~]+", "", line)   # heading / bullet / quote marks
-    t = re.sub(r"[*`~_]+", "", t)             # emphasis markers anywhere
-    t = re.sub(r"\s+", " ", t).strip()
-    t = t.strip("\"'").strip()
-    t = t.strip("[](){}<>").strip()
-    t = t.rstrip(" .,:;!-")
-    if not t:
-        return ""
-    # digits, dates, times, bare punctuation -> not a title
-    if not re.search(r"[^\W\d_]", t):
-        return ""
-    return " ".join(t.split()[:6])[:48].strip()
-
-
-def generate_title(agent: "Agent") -> str:
-    """Ask the LLM for a short title for the active chat.
-
-    Best-effort and cheap — one small non-streaming call with no tools, from
-    a worker thread so the turn is never waiting on it. Any failure returns
-    "" and the derived title simply stays.
-    """
-    ctx = [{"role": m["role"], "content": str(m["content"])[:600]}
-           for m in agent.messages[1:7]
-           if m.get("role") in ("user", "assistant") and m.get("content")]
-    if not ctx:
-        return ""
-    # tools=[] matters: chat_completion defaults to the full tool set, and
-    # this call has no business generating an image.
-    try:
-        data = chat_completion(agent.cfg["openrouter_key"],
-                               agent.llm_models[0],
-                               [{"role": "system",
-                                 "content": _TITLE_SYSTEM}] + ctx,
-                               temperature=0.2, max_tokens=24, tools=[])
-    except Exception:                       # noqa: BLE001 — cosmetic only
-        return ""
-    try:
-        raw = str(data["choices"][0]["message"].get("content") or "")
-    except (KeyError, IndexError, TypeError):
-        return ""
-    return clean_title(raw)
 
 
 def load_characters() -> list:
@@ -1034,7 +980,6 @@ def migrate_flat_chats() -> None:
             chat_id = new_chat_id()
             payload = {
                 "id": chat_id,
-                "title": derive_title(d.get("timeline") or []),
                 "updated": int(f.stat().st_mtime),
                 "messages": d.get("messages") or [],
                 "timeline": d.get("timeline") or [],
@@ -1060,15 +1005,13 @@ class Agent:
         self.auto_images = True          # per-chat: may the model use image tools?
         self.feedback = {}               # verdict on the conversation as it
         self.feedback_log = []           # stands; verdicts it has moved past
-        self._title = ""                 # active chat's title
         self._home = DEFAULT_CHAT_FILE   # where the active chat persists
         self.messages = [self._sys_msg()]
         self.timeline = []
         self.lock = threading.Lock()     # one turn at a time
         self.stop_flag = threading.Event()  # set by /api/abort
         self.status_cb = None            # set while a turn streams
-        self._save_lock = threading.Lock()   # chat-file writes; also taken by
-        self._titled = set()              # the async title worker, see below
+        self._save_lock = threading.Lock()   # chat-file writes
         ensure_assistant(load_characters())     # the plain chat is a card too
         self._load_state()
         self._rehydrate_char()
@@ -1345,7 +1288,6 @@ class Agent:
             return {}
 
     def _apply_chat_payload(self, d: dict):
-        self._title = str(d.get("title", ""))
         self.scenario_id = str(d.get("scenario_id") or "")
         # absent = written before the toggle existed -> default to on
         self.auto_images = d.get("auto_images", True) is not False
@@ -1365,7 +1307,6 @@ class Agent:
         self.feedback_log = []
         self.messages = [self._sys_msg()]
         self.timeline = []
-        self._title = ""
         self._seed_greeting()
 
     # ------------------------------------------------------------ feedback
@@ -1459,7 +1400,6 @@ class Agent:
         self.char = card
         self.chat_id = new_chat_id()
         self._home = self._chat_file(card["id"], self.chat_id)
-        self._title = derive_title(self.timeline)
         self._save_state()
 
     def delete_character(self, cid: str) -> None:
@@ -1479,7 +1419,6 @@ class Agent:
             self.auto_images = True
             self.messages = [self._sys_msg()]
             self.timeline = []
-            self._title = ""
             self._save_state()
             return
         self._save_state()
@@ -1489,9 +1428,18 @@ class Agent:
         self._save_state()
 
     def select_chat(self, cid: str, chat_id: str) -> None:
+        """Open one chat, switching character first if it is not the active
+        one. The history list spans every character, so the chat the user
+        picked is regularly not the current character's."""
         if not (self.char and self.char["id"] == cid):
-            raise ValueError("character is not active")
+            card = next((c for c in load_characters()
+                         if c.get("id") == cid), None)
+            if not card:
+                raise ValueError("character not found")
+            self.set_character(card)      # flushes home, opens their newest
         path = self._chat_file(cid, chat_id)
+        if not path.exists():
+            raise ValueError("chat not found")
         self.chat_id = chat_id
         self._home = path
         self._apply_chat_payload(self._load_chat_payload(path))
@@ -1561,9 +1509,7 @@ class Agent:
             return
         chat_id = new_chat_id()
         home = self._chat_file(cid, chat_id)
-        payload = dict(payload, id=chat_id, character_id=cid,
-                       title=str(payload.get("title") or derive_title(
-                           payload.get("timeline") or []))[:60])
+        payload = dict(payload, id=chat_id, character_id=cid)
         home.parent.mkdir(parents=True, exist_ok=True)
         home.write_text(json.dumps(payload, ensure_ascii=False),
                         encoding="utf-8")
@@ -1619,9 +1565,8 @@ class Agent:
             pass
 
     def _save_state_locked(self):
-        """_save_state's body. Callers must already hold _save_lock — the
-        async title worker writes from outside any turn and has to land its
-        title in the same file without tearing a concurrent save."""
+        """_save_state's body. Kept separate so a caller that already holds
+        _save_lock can write without deadlocking on it."""
         now = int(time.time())
         mirror = {
             "character_id": self.char["id"] if self.char else "",
@@ -1637,13 +1582,9 @@ class Agent:
             cid = self.char["id"]
             if CHAT_ID_RE.match(self.chat_id):
                 self._char_dir(cid).mkdir(parents=True, exist_ok=True)
-                if self._title in ("", "New chat"):
-                    # re-derive until the first real user message lands
-                    self._title = derive_title(self.timeline)[:60]
                 payload = {
                     "id": self.chat_id,
                     "character_id": cid,
-                    "title": self._title,
                     "updated": now,
                     "scenario_id": self.scenario_id,
                     "auto_images": self.auto_images,
@@ -1667,52 +1608,9 @@ class Agent:
         STATE_FILE.write_text(
             json.dumps(mirror, ensure_ascii=False), encoding="utf-8")
 
-    # --------------------------------------------------------- async title
-
-    def maybe_generate_title(self) -> None:
-        """Kick off a background title for a chat still carrying the derived
-        one. Returns immediately — a turn never waits for this.
-
-        derive_title takes the first user message verbatim, and that message
-        is very often a raw SD prompt or a parenthetical aside, so chats end
-        up listed as "Naked, modern bedroom background, night time, slight
-        sweat, ". A model reads the exchange and does better.
-        """
-        if not (self.char and self.chat_id and self.has_key()
-                and self.llm_models):
-            return
-        if not CHAT_ID_RE.match(self.chat_id):
-            return          # no chat file to store the title in
-        if self.chat_id in self._titled:
-            return
-        if not any(e.get("type") == "reply" for e in self.timeline):
-            return          # nothing to summarise yet
-        threading.Thread(target=self._title_worker, daemon=True).start()
-
-    def _title_worker(self) -> None:
-        chat_id, home = self.chat_id, self._home
-        try:
-            title = generate_title(self)
-        except Exception:                           # noqa: BLE001 — cosmetic
-            title = ""
-        try:
-            with self._save_lock:
-                # the user may have switched or deleted the chat while the
-                # model was thinking; never write into a different one
-                if self.chat_id != chat_id or self._home != home:
-                    return
-                self._titled.add(chat_id)           # one attempt per chat
-                if not title:
-                    return
-                self._title = title
-                self._save_state_locked()
-        except Exception:                           # noqa: BLE001
-            pass
-
     def _load_state(self):
         """Startup: restore the active chat from the restart mirror."""
         self.chat_id = ""
-        self._title = ""
         self.auto_images = True
         if not STATE_FILE.exists():
             self._home = DEFAULT_CHAT_FILE
@@ -1721,7 +1619,6 @@ class Agent:
             d = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             self._state_char_id = d.get("character_id", "")
             self.chat_id = d.get("chat_id", "")
-            self._title = d.get("title", "")
             self.scenario_id = str(d.get("scenario_id") or "")
             self.auto_images = d.get("auto_images", True) is not False
             self.feedback = _clean_feedback(d.get("feedback"))
@@ -1832,7 +1729,6 @@ class Agent:
             # a verdict rated the conversation *before* this reply, so it no
             # longer describes it — archive it and start the chat unrated
             self.clear_feedback()
-            self.maybe_generate_title()
             return True
         return False
 
@@ -3248,6 +3144,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/history":
             self._json({"timeline": self.app.agent.timeline,
                         "busy": self.app.agent.lock.locked(),
+                        "auto_images": self.app.agent.auto_images,
                         "feedback": self.app.agent.feedback})
         elif path == "/api/settings":
             self.api_settings()
@@ -3625,22 +3522,43 @@ class Handler(BaseHTTPRequestHandler):
         self._sse_stream(q)
 
     def api_chats_list(self):
-        """Chat list of a character, newest first."""
+        """Every chat of every character, most recently touched first.
+
+        The list is how the user gets back into a conversation, so it spans
+        the whole cast: each row carries the character's name and the chat's
+        first user message (`chat_preview`) rather than a stored title.
+        `?char=<id>` narrows it to one character — nothing in the app needs
+        that any more, but it keeps the endpoint cheap to poke at.
+        """
         cid = (parse_qs(urlparse(self.path).query).get("char") or [""])[0]
-        card = next((c for c in load_characters()
-                     if c.get("id") == cid), None)
-        if not card:
-            self._json({"error": "character not found"}, 404)
-            return
         agent = self.app.agent
+        cards = load_characters()
+        if cid:
+            cards = [c for c in cards if c.get("id") == cid]
         chats = []
-        for p in agent._list_chats(cid):
-            d = agent._load_chat_payload(p)
-            chats.append({"id": p.stem,
-                          "title": str(d.get("title") or "New chat"),
-                          "updated": int(p.stat().st_mtime),
-                          "messages": len(d.get("messages") or [])})
-        self._json({"chats": chats, "active": agent.chat_id})
+        for card in cards:
+            ccid = str(card.get("id") or "")
+            if not ccid:
+                continue
+            for p in agent._list_chats(ccid):
+                try:
+                    updated = int(p.stat().st_mtime)
+                except OSError:
+                    continue
+                d = agent._load_chat_payload(p)
+                chats.append({"char": ccid,
+                              "char_name": str(card.get("name") or ccid),
+                              "id": p.stem,
+                              "preview": chat_preview(d),
+                              "updated": updated,
+                              "messages": len(d.get("messages") or [])})
+        # file mtime, not the payload's "updated": it is what the sort of a
+        # single character's own list already uses, and it moves even when a
+        # chat was rewritten by something other than a turn
+        chats.sort(key=lambda c: c["updated"], reverse=True)
+        self._json({"chats": chats,
+                    "active": agent.chat_id if agent.char else "",
+                    "active_char": agent.char["id"] if agent.char else ""})
 
     def api_chat_select(self):
         body = self._body()

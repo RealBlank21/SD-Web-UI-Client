@@ -93,7 +93,7 @@ const els = {
   btnChmenu: $("btn-chmenu"),
   pageChform: $("page-chform"), chTitle: $("ch-title"),
   cfBack: $("cf-back"), cfSave: $("cf-save"),
-  hsBack: $("hs-back"), hsNew: $("hs-new"), hsList: $("hs-list"),
+  hsBack: $("hs-back"), hsList: $("hs-list"),
   hsTitle: $("hs-title"), hsSelect: $("hs-select"),
   hsAll: $("hs-all"), hsDel: $("hs-del"),
   msgs: $("msgs"), pill: $("pill"), pillText: $("pill-text"), pillBar: $("pill-bar"),
@@ -730,27 +730,12 @@ function handleEvent(evt) {
     case "done":
       stopProgressPolling();
       pillHide();
-      scheduleTitleRefresh();
       // the server retires the rating once the reply lands — the chat it was
       // given for is gone
       chatRating = "";
       break;
   }
   if (evt.type !== "progress") scrollDown(true);
-}
-
-let titleRefreshTimer = 0;
-/** The server names a chat in the background after its first reply, so the
- *  history list can lag by a second or two. Re-fetch it only if it is
- *  actually on screen — this never waits on, or delays, the turn itself. */
-function scheduleTitleRefresh() {
-  clearTimeout(titleRefreshTimer);
-  if (!activeCharId) return;
-  titleRefreshTimer = setTimeout(() => {
-    titleRefreshTimer = 0;
-    if (els.pageHist.hidden || hsSelecting) return;
-    openHistory().catch(() => {});
-  }, 2200);
 }
 
 /* --------------------------------------------------------------- gallery
@@ -1233,12 +1218,14 @@ async function confirmMove(dest, opts) {
   } catch { /* toast shown */ }
 }
 
-/* the chat view holds /outputs/ URLs — re-read it after files move */
+/* the chat view holds /outputs/ URLs — re-read it after files move, and
+   after a delete that may have landed on a different chat */
 async function reloadChat() {
   try {
     const h = await api("/api/history");
     renderHistory(h.timeline || []);
     images = timelineImages(h.timeline || []);
+    applyChatFlags(h);
   } catch { /* the gallery still works without it */ }
 }
 
@@ -3533,7 +3520,9 @@ let chatRating = "";        // "" | "like" | "dislike"
 function applyChatFlags(d) {
   if (!d) return;
   if (typeof d.auto_images === "boolean") autoImages = d.auto_images;
-  if (d.feedback) chatRating = d.feedback.rating || "";
+  // present-but-empty clears the rating: deleting the open chat lands on
+  // another one, which is unrated
+  if ("feedback" in d) chatRating = (d.feedback && d.feedback.rating) || "";
 }
 
 function openChatMenu() {
@@ -3643,7 +3632,6 @@ async function refreshStatus() {
     const s = await api("/api/status");
     activeCharId = s.character ? s.character.id : "";
     els.chatCharname.textContent = s.character ? s.character.name : "Free chat";
-    els.btnHistory.hidden = !s.character;
     // per-chat setting — pick it up on chat switch, new chat and restart
     applyChatFlags(s);
     return s;
@@ -3764,56 +3752,53 @@ async function newChat() {
   }
 }
 
-/* --------------------------------------------------------- chat history */
+/* --------------------------------------------------------- chat history
+ *
+ * One list of every chat of every character, newest first — it lives on the
+ * Characters page, not in a chat, precisely because it crosses characters.
+ * A row is the character's name, the user's first message in that chat (no
+ * generated title) and when it was last touched.
+ */
 
 function fmtChatDate(ts) {
   const d = new Date(ts * 1000);
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) {
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-  if (d.getFullYear() === now.getFullYear()) {
-    return d.toLocaleDateString([], { month: "short", day: "numeric" });
-  }
-  return d.toLocaleDateString();
+  return d.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" }) +
+    " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 async function openHistory() {
-  if (!activeCharId) {
-    toast("History is per character", true);
-    return;
-  }
   setHsSelect(false);
   try {
-    const d = await api("/api/chats?char=" + encodeURIComponent(activeCharId));
+    const d = await api("/api/chats");
     els.hsList.textContent = "";
     if (!d.chats.length) {
       els.hsList.appendChild(el("div", "hint", "No chats yet."));
     }
     for (const c of d.chats) {
-      const row = el("button", "hist-row" +
-        (c.id === d.active ? " active" : ""));
+      const active = c.id === d.active && c.char === d.active_char;
+      const row = el("button", "hist-row" + (active ? " active" : ""));
       row.appendChild(el("span", "hs-check", "✓"));
       const tx = el("div", "char-text");
-      tx.appendChild(el("b", null, c.title || "New chat"));
+      tx.appendChild(el("b", null, c.char_name));
+      tx.appendChild(el("span", "hs-preview", c.preview || "No messages yet"));
       tx.appendChild(el("span", "dim", fmtChatDate(c.updated) +
-        " · " + c.messages + " messages"));
+        " | (" + c.messages + " message" + (c.messages === 1 ? "" : "s") + ")"));
       row.appendChild(tx);
       row.addEventListener("click", () => {
         if (hsSelecting) {
-          const id = c.id;
-          if (hsSelected.has(id)) {
-            hsSelected.delete(id);
+          const key = hsKey(row);
+          if (hsSelected.has(key)) {
+            hsSelected.delete(key);
             row.classList.remove("sel");
           } else {
-            hsSelected.add(id);
+            hsSelected.add(key);
             row.classList.add("sel");
           }
           hsTitleSync();
-        } else selectChat(c.id);
+        } else selectChat(c.id, c.char);
       });
       row.dataset.chatid = c.id;
+      row.dataset.char = c.char;
       els.hsList.appendChild(row);
     }
     els.pageHist.hidden = false;
@@ -3825,13 +3810,15 @@ async function openHistory() {
 /* ---- batch select/delete (Chatterbox-style) ---- */
 
 let hsSelecting = false;
-const hsSelected = new Set();
+const hsSelected = new Set();      // "<char>:<chat id>" — ids repeat per char
+
+function hsKey(row) { return row.dataset.char + ":" + row.dataset.chatid; }
 
 function hsTitleSync() {
   const n = hsSelected.size;
   els.hsTitle.textContent = hsSelecting
     ? (n ? `${n} selected` : "Select chats")
-    : "Chat history";
+    : "Conversation History";
   els.hsDel.classList.toggle("armed", n > 0);
 }
 
@@ -3840,7 +3827,6 @@ function setHsSelect(on) {
   hsSelected.clear();
   els.pageHist.classList.toggle("selecting", on);
   els.hsSelect.hidden = on;
-  els.hsNew.hidden = on;
   els.hsAll.hidden = !on;
   els.hsDel.hidden = !on;
   for (const row of els.hsList.querySelectorAll(".hist-row.sel")) {
@@ -3849,60 +3835,61 @@ function setHsSelect(on) {
   hsTitleSync();
 }
 
-async function deleteChatsBatch(ids) {
-  let ok = 0, last = null;
-  for (const id of ids) {
+async function deleteChatsBatch(keys) {
+  /* keys are "<char>:<chat id>" — a batch spans characters, so each delete
+     names its own owner. The server falls back to the character's newest
+     remaining chat when the one deleted was the open one, which can move
+     the app off the character it was on: re-read both after the batch. */
+  let ok = 0;
+  for (const key of keys) {
+    const i = key.indexOf(":");
     try {
-      const d = await api("/api/chat/delete", {
+      await api("/api/chat/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ char: activeCharId, chat: id }),
+        body: JSON.stringify({ char: key.slice(0, i), chat: key.slice(i + 1) }),
       });
       ok++;
-      last = d;
     } catch (e) {
       if (e.message === "locked") break;
     }
   }
-  toast(ok === ids.length
+  toast(ok === keys.length
     ? `Deleted ${ok} chat${ok === 1 ? "" : "s"}`
-    : `Deleted ${ok} of ${ids.length}`);
-  if (last) {
-    els.msgs.textContent = "";
-    renderHistory(last.timeline || []);
-    applyChatFlags(last);
-    refreshStatus();
-  }
+    : `Deleted ${ok} of ${keys.length}`);
+  await refreshStatus();
+  await reloadChat();
   await openHistory();
 }
 
-function selectChat(chatId) {
+function selectChat(chatId, charId) {
   api("/api/chat/select", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ char: activeCharId, chat: chatId }),
+    body: JSON.stringify({ char: charId, chat: chatId }),
   }).then((d) => {
     els.msgs.textContent = "";
     renderHistory(d.timeline || []);
     applyChatFlags(d);
     els.pageHist.hidden = true;
     switchView("chat");
+    refreshStatus();     // the chat may belong to another character
   }).catch((e) => {
     if (e.message !== "locked") toast("Open failed: " + e.message, true);
   });
 }
 
-async function deleteChatById(chatId) {
+async function deleteChatById(row) {
+  const char = row.dataset.char, chat = row.dataset.chatid;
   try {
-    const d = await api("/api/chat/delete", {
+    await api("/api/chat/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ char: activeCharId, chat: chatId }),
+      body: JSON.stringify({ char, chat }),
     });
     toast("Chat deleted");
-    els.msgs.textContent = "";
-    renderHistory(d.timeline || []);
-    applyChatFlags(d);
+    await refreshStatus();
+    await reloadChat();
     await openHistory();
   } catch (e) {
     if (e.message !== "locked") toast("Delete failed: " + e.message, true);
@@ -3917,10 +3904,10 @@ els.hsBack.addEventListener("click", () => {
 els.hsSelect.addEventListener("click", () => setHsSelect(true));
 els.hsAll.addEventListener("click", () => {
   const rows = [...els.hsList.querySelectorAll(".hist-row")];
-  const all = rows.length && rows.every((r) => hsSelected.has(r.dataset.chatid));
+  const all = rows.length && rows.every((r) => hsSelected.has(hsKey(r)));
   for (const r of rows) {
-    if (all) { hsSelected.delete(r.dataset.chatid); r.classList.remove("sel"); }
-    else { hsSelected.add(r.dataset.chatid); r.classList.add("sel"); }
+    if (all) { hsSelected.delete(hsKey(r)); r.classList.remove("sel"); }
+    else { hsSelected.add(hsKey(r)); r.classList.add("sel"); }
   }
   hsTitleSync();
 });
@@ -3932,17 +3919,13 @@ els.hsDel.addEventListener("click", () => {
       danger: true, action: () => deleteChatsBatch(ids) },
   ], null);
 });
-els.hsNew.addEventListener("click", async () => {
-  els.pageHist.hidden = true;
-  await newChat();
-});
 els.hsList.addEventListener("contextmenu", (e) => {
   if (hsSelecting) return;
   const target = e.target.closest(".hist-row");
   if (!target) return;
   e.preventDefault();
   openCtx([{ label: "Delete", danger: true,
-    action: () => deleteChatById(target.dataset.chatid) }], null);
+    action: () => deleteChatById(target) }], null);
 });
 let hsLpTimer = null, hsLpStart = null;
 els.hsList.addEventListener("touchstart", (e) => {
@@ -3954,7 +3937,7 @@ els.hsList.addEventListener("touchstart", (e) => {
     hsLpTimer = null;
     if (navigator.vibrate) navigator.vibrate(25);
     openCtx([{ label: "Delete", danger: true,
-      action: () => deleteChatById(target.dataset.chatid) }], null);
+      action: () => deleteChatById(target) }], null);
     hsLpStart = null;
   }, 550);
 }, { passive: true });
