@@ -1,0 +1,56 @@
+{
+  "note": "Worked example: the two bugs found on 2026-10-15. Baseline run had 5 count_conflict across C1 and 63% of genital-proximity prompts in the chat history missing their anatomy guard. Copy this file and rewrite the turns for whatever you are chasing — the turns should walk into the specific failure, a random chat proves nothing.",
+  "conversations": [
+    {
+      "id": "duo-counts",
+      "char": "nao",
+      "turns": [
+        "*i lean against the doorframe, arms crossed* hey. you free?",
+        "so what's the half-finished thing on the easel",
+        "*i step closer and put my hand flat on the wall next to his shoulder* you always look like this when you're concentrating",
+        "hm. come here then",
+        "*i swallow, suddenly very aware of how close we are* ...ok maybe that was too much",
+        "wait you're still smiling. stop smiling, you're making me nervous",
+        "what does that look mean, the one where you tilt your head",
+        "use the same seed and prompt but add me properly this time, your hand on my waist"
+      ]
+    },
+    {
+      "id": "duo-counts-female",
+      "char": "arlecchino",
+      "turns": [
+        "hey Arleee *sits beside you*",
+        "*glances at the papers on the desk* that looks like actual work. thought you didn't do those",
+        "*stands and walks to the window, pulling the curtain aside* it's snowing",
+        "come here, you're cold",
+        "*sits on the floor with my back against the wall* ...this is stupid. scoot over",
+        "i take your hand",
+        "use the same seed and prompt but add me, one hand on your thigh"
+      ]
+    },
+    {
+      "id": "pov-anatomy",
+      "char": "nao",
+      "turns": [
+        "*i get on my knees between your thighs*",
+        "look at me",
+        "get closer",
+        "why is that your cock then",
+        "use the same seed and prompt but keep it yours"
+      ]
+    },
+    {
+      "id": "meta-and-corrections",
+      "char": "arlecchino",
+      "turns": [
+        "why is there a window in the background, we never went outside",
+        "*tugs your collar down* i want to see the bite mark",
+        "why are you smiling, i said i was angry",
+        "close up",
+        "no, full body, i want to see all of you",
+        "bump the cfg up, the lines are soft",
+        "use the same seed and prompt but add me, one hand massaging one of her boobs through the fabric"
+      ]
+    }
+  ]
+}
