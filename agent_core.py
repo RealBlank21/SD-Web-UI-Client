@@ -843,7 +843,7 @@ def _resolve_output_image(name: str, out_dir: Path) -> Path:
 
 def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
     """Run a tool call; wraps sd_client methods. Returns a JSON-able dict."""
-    from sd_client import SDWebUIError, save_images
+    from sd_client import (SDWebUIError, save_images, forge_lease)
 
     def _human(e: SDWebUIError) -> SDWebUIError:
         """Translate raw WebUI load failures into something actionable."""
@@ -873,13 +873,20 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
         lora_notes = args.pop("_lora_notes", None) or []
         switched = None
         try:
-            if model:
-                switched = client.set_model(model, **components)
-            elif components:
-                client.configure(**components)
-            t0 = time.perf_counter()
-            prepared = client.prepare_args(args, model=model, kind="txt2img")
-            result = client.submit(prepared["payload"])
+            # The lease holds this Forge's global options steady for the whole
+            # "pick a model, then run" window. Two users on one WebUI share a
+            # single loaded checkpoint, so without this the second user's job
+            # silently runs on the first user's model — and records the wrong
+            # one in `gen`, poisoning the regen recipe. See forge_lease.
+            with forge_lease(client, model, components) as running:
+                if model:
+                    switched = client.current_model()
+                else:
+                    model = model or running or None
+                t0 = time.perf_counter()
+                prepared = client.prepare_args(
+                    args, model=model, kind="txt2img")
+                result = client.submit(prepared["payload"])
         except SDWebUIError as e:
             raise _human(e) from None
         elapsed = time.perf_counter() - t0
@@ -911,20 +918,19 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
         loras = args.pop("_loras", None)
         lora_notes = args.pop("_lora_notes", None) or []
         model = args.pop("model", None)
-        if model:
+        # Same lease as txt2img — the dial is shared across every generation
+        # path, so guarding only one of them would leave img2img unguarded.
+        with forge_lease(client, model) as running:
+            model = model or running or None
+            t0 = time.perf_counter()
             try:
-                client.set_model(model)
+                prepared = client.prepare_args(
+                    {**args, "init_images": [base64.b64encode(src.read_bytes())
+                                             .decode()]},
+                    model=model, kind="img2img")
+                result = client.submit(prepared["payload"], img2img=True)
             except SDWebUIError as e:
                 raise _human(e) from None
-        t0 = time.perf_counter()
-        try:
-            prepared = client.prepare_args(
-                {**args, "init_images": [base64.b64encode(src.read_bytes())
-                                         .decode()]},
-                model=model, kind="img2img")
-            result = client.submit(prepared["payload"], img2img=True)
-        except SDWebUIError as e:
-            raise _human(e) from None
         elapsed = time.perf_counter() - t0
         saved = save_images(result, out_dir=out_dir, name_prefix="ai_edit")
         gen = _gen_info(client, args, elapsed, _seed_of(result), prepared)

@@ -43,7 +43,8 @@ import requests
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from sd_client import (                              # vendored WebUI client
+from sd_client import (forge_lock, forge_lease,
+                                                     # vendored WebUI client
     SDClient,
     SDWebUIError,
     guess_arch,
@@ -2778,30 +2779,31 @@ def run_regeneration(agent: Agent, rel: str, instruction: str, emit,
         # one options write for checkpoint + companions: separate writes mean
         # separate model reloads, and the second one can fail on a tight card
         emit({"type": "status", "text": f"loading {arch} checkpoint…"})
-        agent.client.set_model(
-            ckpt, arch=arch,
-            **{k: v for k, v in components.items() if v})
         model = ckpt
     else:
         args = _clean_gen_args(args, agent.client, "")
         if not args.get("prompt"):
             raise ValueError("no original prompt found for this image")
-        if any(components.values()):
-            agent.client.configure(
-                **{k: v for k, v in components.items() if v})
 
-    if mode == "img2img":
-        emit({"type": "status", "text": "applying change…"})
-        prepared = agent.client.prepare_args(args, model=ckpt or model,
-                                             kind="img2img")
-        prepared["payload"]["init_images"] = [
-            base64.b64encode(src.read_bytes()).decode()]
-        result = agent.client.submit(prepared["payload"], img2img=True)
-    else:
-        emit({"type": "status", "text": "generating…"})
-        prepared = agent.client.prepare_args(args, model=ckpt or model,
-                                             kind="txt2img")
-        result = agent.client.submit(prepared["payload"])
+    # One lease across "switch the dial" and "run". Forge's dial is global, so
+    # a regen that switched models without it could be overtaken mid-flight
+    # by another user on the same WebUI and produce the wrong checkpoint.
+    with forge_lease(agent.client, ckpt or None,
+                     {k: v for k, v in components.items() if v},
+                     arch=arch if ckpt else None) as running:
+        model = ckpt or model or running
+        if mode == "img2img":
+            emit({"type": "status", "text": "applying change…"})
+            prepared = agent.client.prepare_args(args, model=model,
+                                                 kind="img2img")
+            prepared["payload"]["init_images"] = [
+                base64.b64encode(src.read_bytes()).decode()]
+            result = agent.client.submit(prepared["payload"], img2img=True)
+        else:
+            emit({"type": "status", "text": "generating…"})
+            prepared = agent.client.prepare_args(args, model=model,
+                                                 kind="txt2img")
+            result = agent.client.submit(prepared["payload"])
 
     saved = save_images(result, out_dir=src.parent, name_prefix="ai")
     if not saved:
@@ -5373,9 +5375,10 @@ class Handler(BaseHTTPRequestHandler):
                 or agent.client.arch_for(title)
             components = {k: str(body.get(k) or "").strip()
                           for k in _COMPONENT_KEYS}
-            info = agent.client.set_model(
-                title, arch=arch,
-                **{k: v for k, v in components.items() if v})
+            with forge_lock(agent.client.base_url):
+                info = agent.client.set_model(
+                    title, arch=arch,
+                    **{k: v for k, v in components.items() if v})
             self._json({"ok": True,
                         "current_model": info.get("model") or title,
                         "arch": info.get("arch", arch),
@@ -5408,7 +5411,8 @@ class Handler(BaseHTTPRequestHandler):
             # a key the client left out is simply not passed
             components = {k: str(body[k]).strip()
                           for k in _COMPONENT_KEYS if k in body}
-            info = agent.client.configure(arch, **components)
+            with forge_lock(agent.client.base_url):
+                info = agent.client.configure(arch, **components)
             self.app.sd_state.invalidate()
             self._json({"ok": True, **info,
                         "profile": _public_profile(agent.client, arch)})

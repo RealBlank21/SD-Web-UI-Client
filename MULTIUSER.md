@@ -142,14 +142,44 @@ Phase 2 removes the shared Agent.
 - Per-user `openrouter_key` and `sd_url`. Remove `sd_url` from shared config.
 - Run every `sd_url` save through the decision-4 validator.
 - Surface "is your Forge reachable" in the user's own settings.
-- **Traps:** `Agent.__init__` calls `ensure_assistant(load_characters())`,
-  which *appends to `characters.json`* — a write on a construction path, and a
-  race across threads once N agents exist. Pull it into startup.
-  `SDState.__init__` takes an `agent` and reads `agent.client.base_url`, so it
-  must hang off a shared `SDClient` or it follows whichever user last switched.
+- **Traps:** `SDState.__init__` takes an `agent` and reads
+  `agent.client.base_url`, so it must hang off a shared `SDClient` or it
+  follows whichever user last switched.
 - No message truncation exists anywhere — `self.messages` grows unbounded. One
   user on a long chat is fine; N users on a box that also hosts Forge is how you
   get OOM-killed mid-generation.
+
+#### A Forge is single-tenant — shared-Forge serialisation  *(done)*
+
+Two users pointing at one WebUI share one global dial: the loaded checkpoint
+and its companion components, all in `/sdapi/v1/options`. Changing either is a
+POST *outside* Forge's generation queue. Uncoordinated:
+
+```
+user A   set_model(X) -> dial = X -> [ A's job runs on X ]
+user B   (reads a 3s-stale cache, believes the dial is Y)
+         -> [ B's job runs on X ]   wrong model, no error, and `gen.model`
+                                      records Y — the regen sheet then replays
+                                      a recipe that never ran
+```
+
+Forge's own queue already serialises the GPU work, so nothing here competes
+with it. `forge_lease` (`sd_client.py`) holds only the "choose the model, then
+run" window that actually leaks, keyed by a **normalised URL** — scheme/host/port
+case and trailing slash must not produce two locks for one server.
+
+It also force-refreshes the option cache on entry, which fixes the client-side
+half: two `SDClient` instances have independent 3-second caches, and
+`set_options` only invalidates the caller's, so they drift permanently.
+
+Both generation paths (txt2img, img2img), the regen path and the Settings
+model/component switches all take it. Cost is zero when two users want the same
+checkpoint — the dial is already correct. When they want different ones it is a
+model swap per generation, which is slow but correct. **That is the argument for
+one Forge per user**, not merely a nicety.
+
+Still open in Phase 3: warn when a second user claims a URL someone already
+holds. It needs per-user `sd_url` to be meaningful, so it lands with the rest.
 
 ### Phase 4 — gallery split
 

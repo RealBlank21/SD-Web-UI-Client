@@ -36,6 +36,7 @@ import json
 import re
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -1693,3 +1694,79 @@ if __name__ == "__main__":
         print(f"  {row['arch']:<7} cfg {row['cfg']:<5} steps {row['steps']:<4} "
               f"{row['sampler']}/{row['scheduler']}"
               + ("  [distilled]" if row["distilled"] else ""))
+
+
+# --------------------------------------------------------------------------
+# Shared-Forge serialisation
+#
+# Two users pointing at the same WebUI share one global dial: a single loaded
+# checkpoint plus its companion components, all living in the server's
+# /sdapi/v1/options. Switching either is a POST *outside* Forge's generation
+# queue, so without coordination this happens:
+#
+#   user A   set_model(X) -> dial = X -> [ A's job runs on X ]
+#   user B   (reads a 3s-stale cache, believes the dial is Y)
+#            -> [ B's job runs on X ]   wrong model, no error, and `gen.model`
+#                                        records Y — so the regen sheet replays
+#                                        a recipe that never ran
+#
+# Forge's own queue already serialises the GPU work; nothing here competes
+# with it. This only holds the dial still between "choose the model" and "run
+# the job", which is the window that actually leaks. Two users wanting the
+# *same* model pay nothing — the dial is already correct and set_model is
+# skipped.
+
+_FORGE_LOCKS: dict[str, threading.RLock] = {}
+_FORGE_LOCKS_GUARD = threading.Lock()
+
+
+def forge_key(base_url: str) -> str:
+    """Normalised identity for a Forge. Scheme/host/port case and a trailing
+    slash must not produce two locks for one server, or the guarantee quietly
+    evaporates for `http://Box:7860` vs `http://box:7860/`."""
+    u = (base_url or "").strip().rstrip("/").lower()
+    for scheme in ("http://", "https://"):
+        if u.startswith(scheme):
+            u = u[len(scheme):]
+            break
+    return u or "?"
+
+
+def forge_lock(base_url: str) -> threading.RLock:
+    """The lock guarding one Forge's global options.
+
+    Re-entrant because `configure()` and `set_model()` both end up calling
+    `options()`, and callers may reasonably wrap several SD operations in
+    one lease."""
+    key = forge_key(base_url)
+    with _FORGE_LOCKS_GUARD:
+        lock = _FORGE_LOCKS.get(key)
+        if lock is None:
+            lock = _FORGE_LOCKS[key] = threading.RLock()
+        return lock
+
+
+@contextmanager
+def forge_lease(client: "SDClient", model: str | None = None,
+                components: dict | None = None, arch: str | None = None,
+                set_model: bool = True):
+    """Hold a Forge's global dial steady across one generation.
+
+    Acquires the per-URL lock, drops this client's cached view of the
+    server's options so nothing downstream reads another user's leftovers,
+    then optionally sets the model. Yields the model that will actually run,
+    which may differ from `model` if the caller did not pin one."""
+    with forge_lock(client.base_url):
+        try:
+            client.options(force=True)     # cache is 3s; another user moved
+        except Exception:                  # noqa: BLE001 — soft, never fatal
+            pass
+        chosen = model or ""
+        if model and set_model:
+            client.set_model(model, arch=arch, **(components or {}))
+            chosen = client.current_model() or model
+        elif components:
+            client.configure(arch, **(components or {}))
+        if not chosen:
+            chosen = client.current_model() or ""
+        yield chosen
