@@ -3369,6 +3369,19 @@ class Handler(BaseHTTPRequestHandler):
     def _is_admin(self) -> bool:
         return self.app.is_admin(self._user())
 
+    @property
+    def agent(self) -> Agent:
+        """This request's Agent — the conversation of the signed-in user.
+
+        Every `self.agent` in the handler became this. The alternative
+        (a per-user attribute set at auth time) is the same lookup with more
+        ways to be stale."""
+        return self.app.agent_for(self._uid())
+
+    @property
+    def sd_state(self) -> SDState:
+        return self.agent.sd_state
+
     def _json(self, obj, code: int = 200, cache: str | None = None,
               headers: list | None = None):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -3469,17 +3482,17 @@ class Handler(BaseHTTPRequestHandler):
             if (qs.get("q") or [""])[0].strip():
                 self._json(search_images(folder,
                                          (qs.get("q") or [""])[0],
-                                         self.app.agent.timeline))
+                                         self.agent.timeline))
                 return
             data = gallery_listing(folder)
             if (qs.get("tree") or [""])[0]:
                 data["tree"] = gallery_tree()
             self._json(data)
         elif path == "/api/history":
-            self._json({"timeline": self.app.agent.timeline,
-                        "busy": self.app.agent.lock.locked(),
-                        "auto_images": self.app.agent.auto_images,
-                        "feedback": self.app.agent.feedback})
+            self._json({"timeline": self.agent.timeline,
+                        "busy": self.agent.lock.locked(),
+                        "auto_images": self.agent.auto_images,
+                        "feedback": self.agent.feedback})
         elif path == "/api/settings":
             self.api_settings()
         elif path == "/api/characters":
@@ -3504,7 +3517,7 @@ class Handler(BaseHTTPRequestHandler):
             if not rel or not out_file(rel):
                 self._json({"error": "image not found"}, 404)
                 return
-            agent = self.app.agent
+            agent = self.agent
             args, origin = gen_args_for(agent, rel)
             args.setdefault("prompt", "")
             # the sheet needs the architecture to pre-fill blank fields with
@@ -3514,7 +3527,7 @@ class Handler(BaseHTTPRequestHandler):
             if not model:
                 arch = agent.client.current_arch()
                 model = agent.client.current_model()
-            sd = self.app.sd_state.snapshot()
+            sd = self.sd_state.snapshot()
             self._json({"gen": args, "origin": origin.get("source", "png"),
                         "arch": arch, "model": model,
                         "profile": _public_profile(agent.client, arch),
@@ -3577,7 +3590,7 @@ class Handler(BaseHTTPRequestHandler):
             self.api_regenerate()
         elif path == "/api/chat/new":
             self._body()          # drain request body (keep-alive framing)
-            agent = self.app.agent
+            agent = self.agent
             if not agent.lock.acquire(blocking=False):
                 self._json({"error": "busy — a turn is already running"},
                            409)
@@ -3638,7 +3651,7 @@ class Handler(BaseHTTPRequestHandler):
             self.api_gallery_folder()
         elif path == "/api/delete_event":
             body = self._body()
-            tl = self.app.agent.timeline
+            tl = self.agent.timeline
             if isinstance(body.get("indices"), list):
                 idxs = set()
                 for v in body["indices"][:200]:
@@ -3651,14 +3664,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not idxs:
                     self._json({"error": "bad index"}, 400)
                     return
-                self.app.agent.timeline = [e for i, e in enumerate(tl)
+                self.agent.timeline = [e for i, e in enumerate(tl)
                                            if i not in idxs]
-                self.app.agent.clear_feedback()   # it rated what just went
-                self.app.agent._save_state()
+                self.agent.clear_feedback()   # it rated what just went
+                self.agent._save_state()
                 # the caller re-reads /api/history — every later index moved
                 self._json({"ok": True, "removed": len(idxs),
-                            "timeline": self.app.agent.timeline,
-                            "feedback": self.app.agent.feedback})
+                            "timeline": self.agent.timeline,
+                            "feedback": self.agent.feedback})
                 return
             try:
                 idx = int(body.get("index", -1))
@@ -3668,11 +3681,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "bad index"}, 400)
                 return
             evt = tl.pop(idx)
-            self.app.agent.clear_feedback()       # it rated what just went
-            self.app.agent._save_state()
+            self.agent.clear_feedback()       # it rated what just went
+            self.agent._save_state()
             self._json({"ok": True, "removed": evt.get("type"),
-                        "timeline": self.app.agent.timeline,
-                        "feedback": self.app.agent.feedback})
+                        "timeline": self.agent.timeline,
+                        "feedback": self.agent.feedback})
         elif path == "/api/edit_event":
             self.api_edit_event()
         elif path == "/api/regen_reply":
@@ -3691,7 +3704,7 @@ class Handler(BaseHTTPRequestHandler):
         what the user reads is what the model will see next.
         """
         body = self._body()
-        agent = self.app.agent
+        agent = self.agent
         tl = agent.timeline
         try:
             idx = int(body.get("index", -1))
@@ -3738,7 +3751,7 @@ class Handler(BaseHTTPRequestHandler):
             idx = int(body.get("index", -1))
         except (TypeError, ValueError):
             idx = -1
-        status, q = run_reply_regen(self.app.agent, idx)
+        status, q = run_reply_regen(self.agent, idx)
         if status == "nokey":
             self._json({"error": "no_api_key",
                         "message": "Add your OpenRouter API key in Settings "
@@ -3754,7 +3767,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_abort(self):
         """Stop the running turn and/or image job. Always safe to call."""
-        agent = self.app.agent
+        agent = self.agent
         agent.request_stop()
         self._json({"ok": True})
 
@@ -3793,7 +3806,7 @@ class Handler(BaseHTTPRequestHandler):
         if not rel or not out_file(rel):
             self._json({"error": "image not found"}, 404)
             return
-        agent = self.app.agent
+        agent = self.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
@@ -3858,7 +3871,7 @@ class Handler(BaseHTTPRequestHandler):
         if not text:
             self._json({"error": "empty message"}, 400)
             return
-        status, q = run_chat_turn(self.app.agent, text)
+        status, q = run_chat_turn(self.agent, text)
         if status == "nokey":
             self._json({"error": "no_api_key",
                         "message": "Add your OpenRouter API key in Settings "
@@ -3880,7 +3893,7 @@ class Handler(BaseHTTPRequestHandler):
         that any more, but it keeps the endpoint cheap to poke at.
         """
         cid = (parse_qs(urlparse(self.path).query).get("char") or [""])[0]
-        agent = self.app.agent
+        agent = self.agent
         cards = load_characters()
         if cid:
             cards = [c for c in cards if c.get("id") == cid]
@@ -3913,7 +3926,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         cid = str(body.get("char", "")).strip()
         chat_id = str(body.get("chat", "")).strip()
-        agent = self.app.agent
+        agent = self.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
@@ -3933,7 +3946,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         cid = str(body.get("char", "")).strip()
         chat_id = str(body.get("chat", "")).strip()
-        agent = self.app.agent
+        agent = self.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
@@ -3957,7 +3970,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(rating, str):
             self._json({"error": "rating must be a string"}, 400)
             return
-        agent = self.app.agent
+        agent = self.agent
         # a verdict on a chat with nothing in it is noise, and it would sit in
         # the archive until the first reply silently retired it
         if not any(e.get("type") in ("user", "reply") for e in agent.timeline):
@@ -3984,7 +3997,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(on, bool):
             self._json({"error": "on must be true or false"}, 400)
             return
-        agent = self.app.agent
+        agent = self.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
@@ -4000,9 +4013,9 @@ class Handler(BaseHTTPRequestHandler):
         The image-server half comes from the cached SDState snapshot, so this
         never waits on the WebUI — see SDState for why that matters.
         """
-        agent = self.app.agent
+        agent = self.agent
         force = "refresh" in (parse_qs(urlparse(self.path).query) or {})
-        sd = self.app.sd_state.snapshot(force=force)
+        sd = self.sd_state.snapshot(force=force)
         char = agent.char
         self._json({
             "sd_url": agent.client.base_url,
@@ -4034,7 +4047,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         force = "refresh" in (parse_qs(urlparse(self.path).query) or {})
         self._json(fetch_openrouter_models(
-            self.app.agent.cfg.get("openrouter_key", ""), force=force))
+            self.agent.cfg.get("openrouter_key", ""), force=force))
 
     # ------------------------------------------------------- characters
 
@@ -4084,14 +4097,14 @@ class Handler(BaseHTTPRequestHandler):
                 c["scenarios"] = [self._scenario_out(c["id"], s)
                                   for s in c["scenarios"]]
             try:
-                c["chats"] = len(self.app.agent._list_chats(c["id"]))
+                c["chats"] = len(self.agent._list_chats(c["id"]))
             except Exception:
                 c["chats"] = 0
             out.append(c)
         # favourites first, most recently pinned at the very top; the rest
         # keep creation order (sort is stable)
         out.sort(key=lambda c: (not c.get("fav"), -_fav_at(c)))
-        active = self.app.agent.char
+        active = self.agent.char
         self._json({"characters": out,
                     "active": active["id"] if active else ""})
 
@@ -4114,7 +4127,7 @@ class Handler(BaseHTTPRequestHandler):
         action = str(body.get("action") or "").strip()
         if action == "refresh":
             try:
-                self.app.agent.client.refresh_loras()
+                self.agent.client.refresh_loras()
             except Exception as e:                     # noqa: BLE001
                 self._json({"error": f"rescan failed: {e}"}, 502)
                 return
@@ -4156,7 +4169,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         # the active card's prompt block quotes trigger words and notes, so a
         # saved edit has to reach the system message without a restart
-        agent = self.app.agent
+        agent = self.agent
         if agent.messages and agent.messages[0].get("role") == "system":
             agent.messages[0] = agent._sys_msg()
         self._json({"ok": True, "loras": self._loras_merged(),
@@ -4164,7 +4177,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _safe_arch(self) -> str:
         try:
-            return self.app.agent.client.current_arch()
+            return self.agent.client.current_arch()
         except Exception:                              # noqa: BLE001
             return ""
 
@@ -4189,7 +4202,7 @@ class Handler(BaseHTTPRequestHandler):
         """GET browse Civitai; POST install one. Results are server-cached."""
         if self.command == "GET":
             qs = parse_qs(urlparse(self.path).query)
-            installed = set(_installed_loras(self.app.agent.client))
+            installed = set(_installed_loras(self.agent.client))
             try:
                 out = civitai_search(
                     (qs.get("q") or [""])[0],
@@ -4272,7 +4285,7 @@ class Handler(BaseHTTPRequestHandler):
             pass            # seeding is a nicety; never fail the install
 
         try:
-            self.app.agent.client.refresh_loras()
+            self.agent.client.refresh_loras()
         except Exception as e:                         # noqa: BLE001
             return self._json({"ok": True, "installed": info,
                                "warning": f"downloaded, but the server did "
@@ -4301,7 +4314,7 @@ class Handler(BaseHTTPRequestHandler):
         interesting cases: described-but-absent, and installed-but-undescribed.
         """
         lib = load_lora_library()
-        disk = _installed_loras(self.app.agent.client)
+        disk = _installed_loras(self.agent.client)
         rows: list[dict] = []
         for name in sorted(set(lib) | set(disk), key=str.lower):
             d = disk.get(name) or {}
@@ -4450,7 +4463,7 @@ class Handler(BaseHTTPRequestHandler):
             cards.append(card)
         save_characters(cards)
 
-        agent = self.app.agent
+        agent = self.agent
         if agent.char and agent.char["id"] == cid:
             agent.char = card                       # refresh live card
             if agent.messages and \
@@ -4466,7 +4479,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         cid = str(body.get("id", "")).strip()
         uid = self._uid()
-        agent = self.app.agent
+        agent = self.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
@@ -4528,7 +4541,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "that character belongs to someone else"},
                        403)
             return
-        agent = self.app.agent
+        agent = self.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
@@ -4583,7 +4596,7 @@ class Handler(BaseHTTPRequestHandler):
     def _folder_lock(self) -> bool:
         """Folder mutations share the agent lock so they never race a
         generation that is mid-write or mid-img2img-read."""
-        if not self.app.agent.lock.acquire(blocking=False):
+        if not self.agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return False
         return True
@@ -4598,7 +4611,7 @@ class Handler(BaseHTTPRequestHandler):
         if not rels:
             self._json({"error": "not found"}, 404)
             return
-        agent = self.app.agent
+        agent = self.agent
         removed, failed = [], False
         for rel in rels:
             f = out_file(rel)
@@ -4629,7 +4642,7 @@ class Handler(BaseHTTPRequestHandler):
         organize."""
         body = self._body()
         action = str(body.get("action", ""))
-        agent = self.app.agent
+        agent = self.agent
 
         if action == "move_images":
             if not self._folder_lock():
@@ -4850,7 +4863,7 @@ class Handler(BaseHTTPRequestHandler):
         way back from the UI — the only recovery was editing config.json on the
         server and restarting the unit.
         """
-        agent = self.app.agent
+        agent = self.agent
         if not agent.lock.acquire(blocking=False):
             return False, ("a turn is running — stop it before switching the "
                            "image server")
@@ -4873,7 +4886,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_settings(self):
         """GET returns masked settings; POST applies and persists them."""
-        agent = self.app.agent
+        agent = self.agent
         if self.command == "GET":
             cfg = agent.cfg
             key = cfg["openrouter_key"]
@@ -4883,7 +4896,7 @@ class Handler(BaseHTTPRequestHandler):
             guide = cfg.get("model_guide") or ""
             # from the snapshot, not from a live probe: this is the request the
             # Settings page waits on before it will paint anything at all
-            sd = self.app.sd_state.snapshot()
+            sd = self.sd_state.snapshot()
             self._json({"sd_url": cfg["sd_url"], "llm": cfg["llm_models"],
                         "key_masked": masked, "has_key": bool(key),
                         "system_prompt": override or DEFAULT_BASE_PROMPT,
@@ -4994,7 +5007,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_personas_list(self):
         self._json({"personas": load_personas(self._uid()),
-                    "active": self.app.agent.cfg.get("persona_id", "")})
+                    "active": self.agent.cfg.get("persona_id", "")})
 
     def api_personas_save(self):
         """Create (no id) or update (with id) a user persona."""
@@ -5027,7 +5040,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             lst.append(p)
         save_personas(self._uid(), lst)
-        agent = self.app.agent
+        agent = self.agent
         if agent.cfg.get("persona_id") == pid:
             # live persona edit — rebuild the running system message
             agent.apply_config(dict(agent.cfg))
@@ -5041,7 +5054,7 @@ class Handler(BaseHTTPRequestHandler):
                             for p in load_personas(self._uid())):
             self._json({"error": "persona not found"}, 404)
             return
-        agent = self.app.agent
+        agent = self.agent
         cfg = dict(agent.cfg)
         cfg["persona_id"] = pid
         save_config(cfg)
@@ -5057,7 +5070,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         lst = [p for p in lst if p.get("id") != pid]
         save_personas(self._uid(), lst)
-        agent = self.app.agent
+        agent = self.agent
         if agent.cfg.get("persona_id") == pid:
             cfg = dict(agent.cfg)
             cfg["persona_id"] = ""
@@ -5108,7 +5121,7 @@ class Handler(BaseHTTPRequestHandler):
             write_cover(f"sc-{cid}.{sid}", cover)
         if body.get("cover_remove"):
             remove_cover(f"sc-{cid}.{sid}")
-        agent = self.app.agent
+        agent = self.agent
         if agent.char and agent.char["id"] == cid:
             agent.char = card
             if agent.messages and \
@@ -5140,7 +5153,7 @@ class Handler(BaseHTTPRequestHandler):
         cards = [card if c.get("id") == cid else c for c in cards]
         save_characters(cards)
         remove_cover(f"sc-{cid}.{sid}")
-        agent = self.app.agent
+        agent = self.agent
         if agent.char and agent.char["id"] == cid:
             agent.char = card
             if agent.scenario_id == sid:
@@ -5155,7 +5168,7 @@ class Handler(BaseHTTPRequestHandler):
         The scenario's first message (if any) seeds the chat."""
         body = self._body()
         sid = str(body.get("scenario_id", "")).strip()
-        agent = self.app.agent
+        agent = self.agent
         if not agent.char:
             self._json({"error": "select a character first"}, 400)
             return
@@ -5186,7 +5199,7 @@ class Handler(BaseHTTPRequestHandler):
         and a "make the greeting shorter" turn had no way to exist.
         """
         body = self._body()          # read first — never leak the body when
-        agent = self.app.agent       # an early error returns on keep-alive
+        agent = self.agent       # an early error returns on keep-alive
         if not agent.has_key():
             self._json({"error": "no_api_key"}, 400)
             return
@@ -5266,7 +5279,7 @@ class Handler(BaseHTTPRequestHandler):
         the avatar (square, cropped client-side style) or an opening cover
         image. Saves into outputs/ (so it shows in the gallery + lightbox)
         and returns a data URL the form holds until Save."""
-        agent = self.app.agent
+        agent = self.agent
         body = self._body()          # read first — never leak the body when
         if not agent.lock.acquire(blocking=False):   # the busy 409 returns
             self._json({"error": "busy — a turn is already running"}, 409)
@@ -5366,7 +5379,7 @@ class Handler(BaseHTTPRequestHandler):
         if not title:
             self._json({"error": "no model given"}, 400)
             return
-        agent = self.app.agent
+        agent = self.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
@@ -5400,7 +5413,7 @@ class Handler(BaseHTTPRequestHandler):
         request, and a reload that does not fit reports "Failed to load model".
         """
         body = self._body()
-        agent = self.app.agent
+        agent = self.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
@@ -5413,7 +5426,7 @@ class Handler(BaseHTTPRequestHandler):
                           for k in _COMPONENT_KEYS if k in body}
             with forge_lock(agent.client.base_url):
                 info = agent.client.configure(arch, **components)
-            self.app.sd_state.invalidate()
+            self.sd_state.invalidate()
             self._json({"ok": True, **info,
                         "profile": _public_profile(agent.client, arch)})
         except SDWebUIError as e:
@@ -5441,13 +5454,15 @@ class App:
         adopt_legacy_state(self.owner_uid())  # Phase 1, once
         migrate_flat_chats(self.owner_uid())  # Phase A → B chat layout
         # ensure_assistant *writes* (it appends the assistant card). It used
-        # to run in Agent.__init__, which becomes a write on a construction
-        # path — and a cross-thread race — the moment there is one Agent per
-        # user. Startup is the only correct place for it.
+        # to run in Agent.__init__, which is a write on a construction path
+        # now that there is one Agent per user. Startup is the only correct
+        # place for it.
         ensure_assistant(load_characters(), self.owner_uid())
-        self.agent = Agent(load_config(), uid=self.owner_uid())
-        self.sd_state = SDState(self.agent)  # off-thread WebUI snapshot
-        self.agent.sd_state = self.sd_state  # so a URL switch can drop it
+        # One Agent per user, built lazily. Deliberately no `self.agent`
+        # alias: an attribute that looks process-wide but is really the
+        # owner's is exactly the bug Phase 2 is removing.
+        self.agents_lock = threading.Lock()
+        self.agents: dict[str, Agent] = {}
 
     def _sync_disk(self) -> None:
         """Re-read users.json / sessions.json when they changed on disk.
@@ -5502,14 +5517,96 @@ class App:
         return bool(user) and user.get("role") == ROLE_ADMIN
 
     def owner_uid(self) -> str:
-        """The user whose pre-multi-user state was adopted, and — until
-        Phase 2 gives every user their own Agent — whose chat tree the
-        single process-wide Agent is bound to. The first admin, always."""
+        """The user whose pre-multi-user state was adopted. The first
+        admin, always."""
         admins = [u for u in self.users if self.is_admin(u)
                   and not u.get("disabled")]
         if admins:
             return str(admins[0].get("id") or "u001")
         return str(self.users[0].get("id")) if self.users else "u001"
+
+    # ------------------------------------------------------- per-user agents
+    #
+    # An Agent is a conversation: messages, active character, active chat,
+    # timeline, feedback, and a lock so one user cannot double-submit. All of
+    # that is per-user state, which is why there used to be exactly one.
+    #
+    # Each Agent also holds its whole conversation in RAM and nothing trims it
+    # (see MULTIUSER.md Phase 3), so agents are evicted when idle rather than
+    # accumulated — otherwise N users on a box that also hosts Forge is how you
+    # get OOM-killed mid-generation. Eviction saves state first, and the
+    # Agent rehydrates from its own files on the next request.
+
+    AGENT_IDLE_SECS = 30 * 60
+    AGENT_MAX_RESIDENT = 8
+
+    def agent_for(self, uid: str) -> Agent:
+        """The Agent owning `uid`'s conversation, built on first use.
+
+        The lock is held across the build because Agent.__init__ does disk
+        I/O and calls ensure_assistant-adjacent loaders; two concurrent
+        first requests for the same user must not both construct one."""
+        with self.agents_lock:
+            agent = self.agents.get(uid)
+            if agent is not None:
+                agent.last_used = time.time()
+                return agent
+            self._evict_agents_locked(room=1)
+            agent = Agent(self.config_for(uid), uid=uid)
+            agent.last_used = time.time()
+            agent.sd_state = SDState(agent)  # so a URL switch can drop it
+            self.agents[uid] = agent
+            return agent
+
+    def config_for(self, uid: str) -> dict:
+        """Per-user config. Phase 2 splits the *Agent*; the settings dict is
+        still shared until Phase 3 moves keys into users/<uid>/config.json.
+        Every Agent therefore gets its own copy, so a future per-user field
+        does not leak between users through the shared dict."""
+        return load_config()
+
+    def _evict_agents_locked(self, room: int = 0) -> int:
+        """Drop idle agents, then enforce the residency cap. Caller holds
+        `agents_lock`. `room` accounts for the agent about to be created.
+
+        Never evict one mid-turn: dropping an Agent whose lock is held would
+        strand the running turn and orphan its thread."""
+        now = time.time()
+        for uid, a in list(self.agents.items()):
+            if a.lock.locked():
+                continue
+            if now - a.last_used >= self.AGENT_IDLE_SECS:
+                self._drop_agent_locked(uid)
+        cap = self.AGENT_MAX_RESIDENT
+        # `room` agents are about to be added, so the cap applies to the
+        # total after they land: evict while len + room would exceed it.
+        # Dropping to MAX+room-1 is deliberate — one agent is about to leave.
+        idle = sorted((a for a in self.agents.values()
+                       if not a.lock.locked()),
+                      key=lambda a: a.last_used)
+        dropped = 0
+        while len(self.agents) + room > cap and idle:
+            self._drop_agent_locked(idle.pop(0).uid)
+            dropped += 1
+        return dropped
+
+    def _drop_agent_locked(self, uid: str) -> None:
+        agent = self.agents.pop(uid, None)
+        if agent is None:
+            return
+        try:
+            agent._save_state()          # the conversation only lives in RAM
+        except Exception:                             # noqa: BLE001
+            pass
+
+    def evict_agents(self) -> int:
+        """Public sweep. Normally unnecessary — `agent_for` evicts as it
+        goes, which is the only moment the cap can bind."""
+        with self.agents_lock:
+            return self._evict_agents_locked()
+
+    def sd_state_for(self, uid: str) -> SDState:
+        return self.agent_for(uid).sd_state
 
 
 # ------------------------------------------------------------------- main
@@ -5626,7 +5723,7 @@ def main():
     srv.daemon_threads = True
     srv.app = App(password)
 
-    agent = srv.app.agent
+    agent = srv.app.agent_for(srv.app.owner_uid())
     cfg = agent.cfg
     try:
         model = agent.client.current_model()

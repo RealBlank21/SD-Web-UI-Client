@@ -1,6 +1,6 @@
 # Multi-user plan
 
-Status: **Phases 0-1 done.** This is the decision record plus the phase
+Status: **Phases 0-2 done.** This is the decision record plus the phase
 order it implies. Read this before changing anything in `server.py`'s auth or
 persistence paths.
 
@@ -123,19 +123,36 @@ marked `shared` so everyone gets a plain chat, which means only an admin can
 edit it. Fixing that properly needs per-user character storage, which is what
 Phase 1 gave up to make sharing work.
 
-**What Phase 1 deliberately did *not* do:** the Agent is still one
+**What Phase 1 deliberately did *not* do:** the Agent was still one
 process-wide instance bound to the first admin's `uid`, so a second user's
-chat requests still read and write the admin's chat tree. `Handler._uid()`
-says so in its docstring. Character reads are already per-user and filtered.
-Phase 2 removes the shared Agent.
+chat requests still read and wrote the admin's chat tree. Character reads were
+already per-user and filtered. Phase 2 removed the shared Agent.
 
-### Phase 2 — Agent per user
+### Phase 2 — Agent per user  *(done)*
 
-- `data/users/<uid>/agent` in a dict guarded by its own lock, created lazily.
-  The ~25 `self.app.agent.*` references become a per-request lookup.
+- `App.agents: dict[uid, Agent]` behind `agents_lock`, built lazily by
+  `App.agent_for(uid)`. The 62 `self.app.agent`/`self.app.sd_state`
+  references in the handler became `Handler.agent` / `Handler.sd_state`
+  properties that resolve per request.
+- **No `App.agent` alias.** An attribute that looks process-wide but is really
+  the owner's is precisely the bug this phase removes.
 - Per-Agent locks then do the right thing for free: a user cannot double-submit,
-  but two *different* users can run turns concurrently.
-- Attach `SDState` per-user; `apply_config` already resets it on URL change.
+  but two *different* users run turns concurrently.
+- Each Agent gets its own `SDState`; `apply_config` already resets it on URL
+  change.
+
+**Agents are evicted, not accumulated.** Each holds its entire conversation in
+RAM and nothing trims it, so `agent_for` drops agents idle past
+`AGENT_IDLE_SECS` (30 min) and enforces `AGENT_MAX_RESIDENT` (8) by LRU.
+Eviction saves state first — the conversation exists only in memory — and never
+touches an Agent whose lock is held, since dropping a mid-turn Agent would
+strand the turn and orphan its thread. The rebuilt Agent rehydrates from its own
+files.
+
+**Settings are still shared.** `App.config_for(uid)` returns `load_config()`, so
+every Agent gets its own copy of one global dict until Phase 3 moves keys into
+`users/<uid>/config.json`. The copy-per-agent part is deliberate: it means a
+future per-user field cannot leak between users through a shared dict.
 
 ### Phase 3 — BYOK + BYO Forge
 
