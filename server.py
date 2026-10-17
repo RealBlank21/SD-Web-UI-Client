@@ -696,10 +696,13 @@ def user_row(u: dict) -> dict:
     d = user_dir(uid)
     chats = sum(1 for _ in (d / "chats").glob("*/*.json")) if (
         d / "chats").is_dir() else 0
-    images = sum(1 for p in (OUT_DIR / uid).rglob("*")
-                 if p.is_file() and p.suffix.lower() in (".png", ".jpg",
-                                                         ".jpeg", ".webp")) \
-        if (OUT_DIR / uid).is_dir() else 0
+    # Excludes .thumbs — those are cached jpegs, and counting them made the
+    # admin's image count disagree with the gallery by a few hundred.
+    root = OUT_DIR / uid
+    images = sum(1 for p in root.rglob("*")
+                 if p.is_file() and not p.relative_to(root).parts[0].startswith(".")
+                 and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp")) \
+        if root.is_dir() else 0
     return {**public_user(u), "created": int(u.get("created") or 0),
             "disabled": bool(u.get("disabled")),
             "has_key": bool(key),
@@ -1390,6 +1393,10 @@ def card_owner(card: dict) -> str:
 def visible_characters(uid: str, is_admin: bool = False) -> list:
     """Cards `uid` may see: their own, plus any marked shared.
 
+    Shared is the normal case — the cast is common to everyone and ownership
+    governs who may *edit* a card. Private is the opt-out, set from the
+    character's Share toggle.
+
     Admins see everything (MULTIUSER.md decision 5 — full access), which is
     why `is_admin` is a parameter and not a lookup here: this module has no
     request context.
@@ -1404,7 +1411,9 @@ def visible_characters(uid: str, is_admin: bool = False) -> list:
             out.append(c)
             continue
         owner = card_owner(c)
-        if not owner or owner == uid or c.get("shared"):
+        # A card with no `shared` key predates sharing and was never private,
+        # so it counts as shared rather than disappearing from everyone's cast.
+        if not owner or owner == uid or c.get("shared", True):
             out.append(c)
     return out
 
@@ -1687,6 +1696,15 @@ def adopt_legacy_state(uid: str) -> None:
                 c["owner"] = uid
         save_characters(cards)
         moved.append("characters.json owners")
+    # Sharing is the default, so a card written before the flag was never
+    # private — it just has no `shared` key. Set it explicitly so the stored
+    # file says what the behaviour already was.
+    if cards and any("shared" not in c for c in cards if isinstance(c, dict)):
+        for c in cards:
+            if isinstance(c, dict):
+                c.setdefault("shared", True)
+        save_characters(cards)
+        moved.append("characters.json shared")
     if moved:
         print(f"  phase 1: adopted {', '.join(moved)} into users/{uid}")
 
@@ -4925,7 +4943,10 @@ class Handler(BaseHTTPRequestHandler):
         card = dict(existing) if existing else {
             "id": cid, "created": int(time.time()), "owner": uid}
         card["owner"] = card_owner(card) or uid
-        card["shared"] = bool(body.get("shared", card.get("shared", False)))
+        # Shared is the default; private is the opt-out. The cast is meant to
+        # be common to everyone, and ownership governs who may *edit* a card,
+        # not who may chat with it. `True` for a card that predates the flag.
+        card["shared"] = bool(body.get("shared", True))
         card["name"] = name
         card["appearance"] = str(body.get("appearance", "")).strip()[:4000]
         card["persona"] = str(body.get("persona", "")).strip()[:8000]

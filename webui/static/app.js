@@ -170,6 +170,7 @@ const els = {
   shDlTag: $("sh-dl-tag"), shDlArch: $("sh-dl-arch"), shDlSfw: $("sh-dl-sfw"),
   loraModal: $("lora-modal"), loraModalCard: $("lora-modal-card"),
   chTemp: $("ch-temp"), chMaxtok: $("ch-maxtok"),
+  chShared: $("ch-shared"),
   chDelete: $("ch-delete"),
   toast: $("toast"),
 };
@@ -3157,6 +3158,9 @@ function openCharForm(card) {
     ? card.size[0] + "x" + card.size[1] : "";
   els.chTemp.value = card && card.temp != null ? card.temp : "";
   els.chMaxtok.value = card && card.max_tokens != null ? card.max_tokens : "";
+  // A card written before sharing existed has no flag and was never private,
+  // so default the box to ticked — same rule the server reads.
+  els.chShared.checked = card ? (card.shared !== false) : true;
   fillModelSelect();
   els.chModel.value = card ? (card.checkpoint || "") : "";
   if (els.chModel.value === "" && card && card.checkpoint) {
@@ -3199,6 +3203,7 @@ async function saveCharForm() {
     size: size ? size.split("x").map(Number) : [],
     tags: els.chTags.value.split(",").map((s) => s.trim()).filter(Boolean),
     loras: chLoraSel.slice(0, 3),
+    shared: !!(els.chShared && els.chShared.checked),
   };
   if (!isNaN(temp)) payload.temp = Math.min(2, Math.max(0.1, temp));
   if (!isNaN(mtok)) payload.max_tokens = Math.min(8192, Math.max(16, mtok));
