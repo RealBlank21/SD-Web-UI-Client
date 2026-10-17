@@ -1,4 +1,4 @@
-/* Chatterbox — frontend logic (PWA) */
+/* Anima — frontend logic (PWA) */
 "use strict";
 
 /* ------------------------------------------------- version-skew guard (FIRST)

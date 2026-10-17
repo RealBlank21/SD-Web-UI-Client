@@ -1,4 +1,4 @@
-/* Chatterbox — mobile-first dark UI (PWA) */
+/* Anima — mobile-first dark UI (PWA) */
 
 :root {
   --bg: #0b0e15;
@@ -49,7 +49,7 @@ button:active { transform: scale(.97); }
 }
 /* The login card's mark is the app icon, not the old sparkle glyph. Served at
    192 and displayed at 64 so it stays crisp on a 3x screen; alt="" because the
-   "Chatterbox" heading right below it already names the app. */
+   "Anima" heading right below it already names the app. */
 .gate-mark {
   width: 64px; height: 64px; align-self: center; display: block;
   border-radius: 14px;

@@ -1,4 +1,4 @@
-# Chatterbox — deployment (Linux home server behind Caddy)
+# Anima — deployment (Linux home server behind Caddy)
 
 Standalone: no imports from the old project. Layout:
 

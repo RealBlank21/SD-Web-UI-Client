@@ -1,6 +1,6 @@
 {
-  "name": "Chatterbox",
-  "short_name": "Chatterbox",
+  "name": "Anima",
+  "short_name": "Anima",
   "description": "AI art agent — chat with an LLM that drives Stable Diffusion, plus a gallery of your generations.",
   "start_url": "/",
   "scope": "/",

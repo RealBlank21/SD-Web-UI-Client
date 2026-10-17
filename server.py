@@ -1,5 +1,5 @@
 """
-Chatterbox — standalone, deployable web app.
+Anima — standalone, deployable web app.
 
 A chat interface to an AI art agent (OpenRouter LLM with function calling
 driving a Stable Diffusion WebUI server) plus a gallery of generated images.
@@ -2693,7 +2693,7 @@ def chat_completion(api_key: str, llm: str, messages: list,
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "X-Title": "Chatterbox",
+        "X-Title": "Anima",
     }
     body: dict = {"model": llm, "messages": messages,
                   "temperature": temperature if temperature is not None
@@ -6321,7 +6321,7 @@ class App:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Chatterbox — standalone web app (chat + gallery + PWA)")
+        description="Anima — standalone web app (chat + gallery + PWA)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int,
                     default=int(os.environ.get("PORT", 8000)))
@@ -6428,7 +6428,7 @@ def main():
 
     w = 56
     print()
-    print("  ✦ CHATTERBOX — standalone web app")
+    print("  ✦ ANIMA — standalone web app")
     print("  " + "─" * w)
     live = [u for u in srv.app.users if not u.get("disabled")]
     print(f"  Accounts: {len(live)} "
