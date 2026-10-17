@@ -323,7 +323,40 @@ function showGate() {
   els.app.hidden = true;
   els.gate.hidden = false;
   els.gatePw.value = "";
+  forgetUser();
   setTimeout(() => els.gatePw.focus(), 50);
+}
+
+/** Drop everything scoped to whoever was signed in.
+ *
+ *  Not tidiness. `init()` is a one-shot (`if (inited) return`), so without
+ *  this, logging out and back in as somebody else re-showed the previous
+ *  user's rendered timeline — the DOM was hidden, never emptied. Same class
+ *  of bug as the cross-user reads Phase 1 closed, one layer up.
+ *
+ *  `me` goes null so the Admin tab disappears on logout rather than lingering
+ *  until the next person logs in. `galFolder` must reset too: the gallery
+ *  folder is a path in *their* outputs tree, and opening it as another user
+ *  would 404. */
+function forgetUser() {
+  me = null;
+  inited = false;
+  chars = [];
+  images = [];
+  personas = [];
+  activeCharId = "";
+  editCharId = null;
+  activePersonaId = "";
+  chLoraSel = [];
+  chLoraDirty = false;
+  galFolder = "";
+  galFolders = [];
+  galTree = [];
+  galSearchQuery = "";
+  galSearchInfo = null;
+  lbList = [];
+  lbIndex = -1;
+  busyStop = true;          // a turn still streaming belongs to the old user
 }
 
 function showApp() {
@@ -341,11 +374,16 @@ async function tryLogin() {
   els.gateBtn.disabled = true;
   els.gateErr.hidden = true;
   try {
-    await api("/api/login", {
+    const d = await api("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, password: pw }),
     });
+    // The server answers with the user, so the Admin tab follows a switch of
+    // accounts without a reload. Clear the old user's state first, then adopt
+    // the new identity — forgetUser nulls `me` on purpose.
+    forgetUser();
+    me = d.user || null;
     showApp();
   } catch (e) {
     els.gateErr.hidden = false;

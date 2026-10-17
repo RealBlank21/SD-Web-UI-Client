@@ -763,6 +763,14 @@ button.tagchip.on {
   border-top: 1px solid var(--line); background: var(--panel);
 }
 .ps-foot .danger-btn { width: 100%; }
+/* logging out is routine, not destructive — it used to be .danger-btn (red),
+   which read as "this will break something". */
+#sh-logout {
+  width: 100%; padding: 11px; border-radius: 10px; font-size: 13.5px;
+  background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+}
+#sh-logout:active { transform: scale(.99); }
+.ps-foot .hint { text-align: center; margin-bottom: 2px; }
 .sh-body { display: flex; flex-direction: column; gap: 6px; }
 .sh-body label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin-top: 12px; }
 .sh-body input, .sh-body select, .sh-body textarea {
