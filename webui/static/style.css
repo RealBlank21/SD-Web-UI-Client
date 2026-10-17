@@ -9,7 +9,7 @@
    change bumps it, same as any other asset. */
 @font-face {
   font-family: "Anima Display";
-  src: url("/static/anima-display.woff2?v=103") format("woff2");
+  src: url("/static/anima-display.woff2?v=104") format("woff2");
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -86,10 +86,10 @@ button:active { transform: scale(.97); }
 #gate::before {
   content: ""; position: absolute; inset: 0;
   /* Flat rather than a gradient, so every corner gets the same contrast
-     floor — but light enough that the photo still reads as a photo. */
+     floor — but light enough that the photo still reads as a photo. No
+     backdrop blur here: the photo was generated to be looked at, and the
+     card's own frost is the only softening. */
   background: rgba(6, 8, 13, .30);
-  backdrop-filter: blur(1px) saturate(135%);
-  -webkit-backdrop-filter: blur(1px) saturate(135%);
   pointer-events: none;
 }
 .gate-card {
@@ -99,8 +99,8 @@ button:active { transform: scale(.97); }
   display: flex; flex-direction: column; gap: 12px;
   /* glass */
   background: rgba(21, 25, 40, .46);
-  -webkit-backdrop-filter: blur(11px) saturate(155%);
-  backdrop-filter: blur(11px) saturate(155%);
+  -webkit-backdrop-filter: blur(5px) saturate(155%);
+  backdrop-filter: blur(5px) saturate(155%);
   border: 1px solid rgba(255, 255, 255, .13);
   border-radius: 20px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, .55),
@@ -114,11 +114,11 @@ button:active { transform: scale(.97); }
   border-radius: 14px;
   box-shadow: 0 4px 18px rgba(0, 0, 0, .45);
 }
-/* Logo left, wordmark right, on one row above the form. Everything below
-   stays centre-aligned — the card is a single centred column, so this row is
-   the only thing that splits left/right. */
+/* Logo left, wordmark right, on one row above the form — and the pair is
+   centred as a single lockup, because a row pinned to the left edge left the
+   whole card feeling lopsided. Everything below stays centre-aligned. */
 .gate-brand {
-  display: flex; align-items: center; gap: 13px;
+  display: flex; align-items: center; justify-content: center; gap: 13px;
   margin-bottom: 4px;
 }
 .gate-brand b {
