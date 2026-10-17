@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import base64
+import contextvars
 import hashlib
 import getpass
 import hmac
@@ -1368,6 +1369,43 @@ def adopt_legacy_state(uid: str) -> None:
     if CONFIG_FILE.exists() and not (d / "config.json").exists():
         shutil.copy2(CONFIG_FILE, d / "config.json")
         moved.append("config.json")
+    # Phase 4: images predate ownership, so everything loose in outputs/ belongs
+    # to the owner — the files *and* the character folders, which are where
+    # most of the library actually lives. Runs once: any entry already under
+    # outputs/<uid>/ was written by a per-user generation and is left alone.
+    out_owner = OUT_DIR / uid
+    img_exts = (".png", ".jpg", ".jpeg", ".webp")
+    loose = [p for p in OUT_DIR.iterdir()
+             if p.name != uid                       # never move the owner in
+             and not p.name.startswith(".")         # .thumbs etc stay put
+             and ((p.is_file() and p.suffix.lower() in img_exts)
+                  or p.is_dir())]
+    if loose:
+        out_owner.mkdir(parents=True, exist_ok=True)
+        n_files = 0
+        for p in loose:
+            # One stubborn entry must not abort the rest: a partial move is
+            # re-runnable (the merge branch below), an exception is not.
+            try:
+                dest = out_owner / p.name
+                if dest.exists() and p.is_dir():
+                    for sub in p.rglob("*"):
+                        if sub.is_file():
+                            d = dest / sub.relative_to(p)
+                            d.parent.mkdir(parents=True, exist_ok=True)
+                            if not d.exists():
+                                sub.replace(d)
+                                n_files += 1
+                    continue
+                if dest.exists():       # same-named file: keep both
+                    stem, dot, ext = p.name.rpartition(".")
+                    dest = out_owner / f"{stem}-moved{dot}"
+                p.replace(dest)
+                n_files += 1
+            except OSError:
+                continue
+        moved.append(f"{n_files} images")
+
     # Now that the live copy exists, the template should carry no secret.
     # load_config(uid) already blanks the key for a user with no file yet;
     # this is the belt to that braces — a template that still contains the
@@ -2324,7 +2362,7 @@ class Agent:
         def work():
             try:
                 out["result"] = execute_tool(self.client, name, args,
-                                             OUT_DIR)
+                                             user_out_dir(self.uid))
             except Exception as e:                     # noqa: BLE001 — report all
                 out["error"] = f"{type(e).__name__}: {e}"
 
@@ -2441,7 +2479,11 @@ def run_chat_turn(agent: Agent, user_text: str):
             agent.lock.release()
             q.put({"type": "done"})
 
-    threading.Thread(target=worker, daemon=True).start()
+    # A new thread starts with an empty context, so the outputs scope (and
+    # anything else request-scoped) would be lost mid-turn and images would
+    # land in the unscoped root. Copy it across explicitly.
+    ctx = contextvars.copy_context()
+    threading.Thread(target=ctx.run, args=(worker,), daemon=True).start()
     return ("ok", q)
 
 
@@ -2491,7 +2533,11 @@ def run_reply_regen(agent: Agent, idx: int):
             agent.lock.release()
             q.put({"type": "done"})
 
-    threading.Thread(target=worker, daemon=True).start()
+    # A new thread starts with an empty context, so the outputs scope (and
+    # anything else request-scoped) would be lost mid-turn and images would
+    # land in the unscoped root. Copy it across explicitly.
+    ctx = contextvars.copy_context()
+    threading.Thread(target=ctx.run, args=(worker,), daemon=True).start()
     return ("ok", q)
 
 
@@ -3024,7 +3070,88 @@ def _safe_rel(rel: str) -> str | None:
 
 
 def _out_root() -> Path:
-    return OUT_DIR.resolve()
+    """The outputs tree this request is scoped to.
+
+    Phase 4. Every user gets their own gallery under `outputs/<uid>/`, so one
+    person's delete or rename cannot touch another's images. An admin reading
+    their *own* gallery is scoped to their own uid like anyone else — the
+    `~<uid>/` prefix is what lets them reach another user's tree, which keeps
+    the common case looking exactly as it did pre-multi-user.
+
+    Reads go through ContextVars rather than a `uid` parameter threaded
+    through ~50 call sites, which would be a large diff for no gain and easy
+    to miss one — and a missed one is a cross-user read. Writes do not go
+    through here at all: they always target `user_out_dir(uid)`."""
+    uid = _scope_target()
+    return ((OUT_DIR / uid) if uid else OUT_DIR).resolve()
+
+
+def user_out_dir(uid: str) -> Path:
+    """Where a user's generations are written. Always `outputs/<uid>/`, for
+    admins too — an admin's own images then appear in the gallery as their own
+    folder rather than loose in the root."""
+    d = OUT_DIR / (uid or "u001")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+#: uid -> is_admin, rebuilt whenever users.json changes on disk. The outputs
+#: scoping needs it, and it sits in a module-level function with no request
+#: context to ask.
+_ADMIN_CACHE: dict[str, bool] = {}
+_OUT_UID = contextvars.ContextVar("out_uid", default="")
+_AS_UID = contextvars.ContextVar("as_uid", default="")
+
+
+def _is_admin_uid(uid: str) -> bool:
+    return _ADMIN_CACHE.get(uid, False)
+
+
+def _refresh_admins() -> None:
+    _ADMIN_CACHE.clear()
+    for u in load_users():
+        if u.get("role") == ROLE_ADMIN and not u.get("disabled"):
+            _ADMIN_CACHE[str(u.get("id"))] = True
+
+
+def scope_uid(uid: str) -> None:
+    """Point this request's outputs tree at `uid` and refresh the admin
+    cache. Called once per request from the handler."""
+    _refresh_admins()
+    _OUT_UID.set(uid or "")
+    _AS_UID.set("")
+
+
+def scope_as(uid: str, target: str, is_admin: bool) -> bool:
+    """Admin-only: view another user's gallery as `target`.
+
+    `~<uid>/...` in a rel path means "that user's tree", so an admin can
+    browse and mutate any user's gallery through the existing endpoints
+    without a parallel set of routes. Everyone else is refused — without
+    this, `~u001/secret.png` would be an ordinary folder name in their own
+    tree, which is harmless, but being explicit is cheaper to reason about.
+    """
+    if not is_admin or not target or target == uid:
+        return False
+    if not find_user(load_users(), target):
+        return False
+    _AS_UID.set(target)
+    return True
+
+
+def _scope_target() -> str:
+    return _AS_UID.get() or _OUT_UID.get()
+
+
+def split_scope(rel: str) -> tuple[str, str]:
+    """`~u002/folder/x.png` -> ("u002", "folder/x.png"), and a bare `~u002`
+    -> ("u002", "") meaning that user's gallery root. Anything else keeps the
+    request's own scope and an empty override."""
+    if rel and rel.startswith("~"):
+        uid, _, tail = rel[1:].partition("/")
+        if uid:
+            return uid, tail
+    return "", rel or ""
 
 
 def _resolve(rel: str) -> Path | None:
@@ -3034,7 +3161,7 @@ def _resolve(rel: str) -> Path | None:
     rel = _safe_rel(rel)
     if rel is None or rel == "":
         return None
-    p = (OUT_DIR / rel).resolve()
+    p = (_out_root() / rel).resolve()
     try:
         p.relative_to(_out_root())
     except ValueError:
@@ -3053,7 +3180,7 @@ def out_dir(rel: str) -> Path | None:
     rel = _safe_rel(rel if rel is not None else "")
     if rel is None:
         return None
-    p = (OUT_DIR / rel).resolve()
+    p = (_out_root() / rel).resolve()
     try:
         p.relative_to(_out_root())
     except ValueError:
@@ -3062,7 +3189,7 @@ def out_dir(rel: str) -> Path | None:
 
 
 def rel_of(path: Path) -> str:
-    """Path -> its rel path under outputs/."""
+    """Path -> its rel path under the scoped outputs root."""
     return path.resolve().relative_to(_out_root()).as_posix()
 
 
@@ -3122,7 +3249,7 @@ def _seed_from_name(name: str) -> str | None:
 
 
 def thumbnail(path: Path) -> Path | None:
-    tdir = OUT_DIR / ".thumbs"
+    tdir = _out_root() / ".thumbs"
     thumb = tdir / (path.stem + ".jpg")
     try:
         if thumb.exists() and thumb.stat().st_mtime >= path.stat().st_mtime:
@@ -3185,7 +3312,7 @@ def _count_images(folder: Path) -> int:
 
 def gallery_total() -> int:
     """Every image in the gallery, folders included."""
-    return _count_images(OUT_DIR)
+    return _count_images(_out_root())
 
 
 def gallery_tree() -> list[dict]:
@@ -3195,7 +3322,7 @@ def gallery_tree() -> list[dict]:
     own children (os.walk emits them a level at a time, which detaches them).
     """
     out = []
-    for root, dirs, _files in os.walk(OUT_DIR):
+    for root, dirs, _files in os.walk(_out_root()):
         depth = len(Path(root).relative_to(_out_root()).parts)
         for d in dirs:
             if d.startswith("."):
@@ -3561,6 +3688,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = unquote(urlparse(self.path).path)
+        # Outputs scope for this request. Before the auth gate it is unset,
+        # so any gallery code reached on a public path reads the unscoped
+        # root — which nothing public serves.
+        scope_uid("")
 
         # ---- public (no auth): app shell + manifest + service worker ----
         if path in ("/", "/index.html", "/app", "/app/"):
@@ -3596,15 +3727,17 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             self._denied()
             return
+        scope_uid(self._uid())     # gallery reads are per-user from here on
 
-        if path.startswith("/outputs/"):
-            f = out_file(path[len("/outputs/"):])
-            if f:
-                self._file(f, cache="private, max-age=86400")
-            else:
-                self.send_error(404)
-        elif path.startswith("/thumb/"):
-            f = out_file(path[len("/thumb/"):])
+        if path.startswith("/outputs/") or path.startswith("/thumb/"):
+            prefix = "/outputs/" if path.startswith("/outputs/") else "/thumb/"
+            as_uid, rel = split_scope(path[len(prefix):])
+            if as_uid:
+                # An admin browsing another user's gallery. A non-admin
+                # asking for `~u001/...` is simply looking for a folder that
+                # does not exist in their own tree.
+                scope_as(self._uid(), as_uid, self._is_admin())
+            f = out_file(rel)
             if not f:
                 self.send_error(404)
                 return
@@ -3617,7 +3750,10 @@ class Handler(BaseHTTPRequestHandler):
             self.api_llm_models()
         elif path == "/api/gallery":
             qs = parse_qs(urlparse(self.path).query)
-            folder = _safe_rel((qs.get("folder") or [""])[0])
+            as_uid, raw_folder = split_scope((qs.get("folder") or [""])[0])
+            if as_uid:
+                scope_as(self._uid(), as_uid, self._is_admin())
+            folder = _safe_rel(raw_folder)
             if folder is None:
                 self._json({"error": "bad folder"}, 400)
                 return
@@ -3683,6 +3819,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        scope_uid("")
 
         # ---- public ----
         if path == "/api/login":
@@ -3725,6 +3862,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             self._denied()
             return
+        scope_uid(self._uid())     # gallery reads are per-user from here on
 
         if path == "/api/chat":
             self.api_chat()
@@ -4765,7 +4903,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 failed = True
                 continue
-            t = OUT_DIR / ".thumbs" / (f.stem + ".jpg")
+            t = _out_root() / ".thumbs" / (f.stem + ".jpg")
             try:
                 if t.exists():
                     t.unlink()
@@ -4785,6 +4923,16 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         action = str(body.get("action", ""))
         agent = self.agent
+
+        # `folder` (and `parent`) may carry a `~<uid>/` prefix, which points
+        # the whole request at another user's gallery. Admin-only; set once so
+        # every branch below inherits it.
+        for key in ("folder", "parent"):
+            raw = str(body.get(key) or "")
+            if raw.startswith("~"):
+                as_uid, tail = split_scope(raw)
+                if as_uid and scope_as(self._uid(), as_uid, self._is_admin()):
+                    body[key] = tail
 
         if action == "move_images":
             if not self._folder_lock():
@@ -5490,7 +5638,7 @@ class Handler(BaseHTTPRequestHandler):
                 arch = agent.client.current_arch()
             try:
                 result = execute_tool(agent.client, "generate_image", args,
-                                      OUT_DIR)
+                                      user_out_dir(self._uid()))
             except Exception as e:                     # noqa: BLE001 — report
                 self._json({"error": scrub_paths(
                     f"{type(e).__name__}: {e}")}, 502)
