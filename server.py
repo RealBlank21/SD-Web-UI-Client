@@ -21,6 +21,7 @@ Usage:
 import argparse
 import base64
 import hashlib
+import getpass
 import hmac
 import json
 import os
@@ -153,6 +154,179 @@ def load_session_secret() -> bytes:
     secret = secrets.token_bytes(32)
     SESSION_FILE.write_bytes(secret)
     return secret
+
+
+# ------------------------------------------------------------------ users
+#
+# Multi-user identity (MULTIUSER.md, Phase 0). Before this the cookie was a
+# constant hmac(secret, b"auth") — a boolean for "anyone holding the password",
+# with no principal to key any data by. Now a request resolves to a real user
+# record, which is what Phases 1-5 hang per-user state off.
+
+USERS_FILE = DATA_DIR / "users.json"
+SESSIONS_FILE = DATA_DIR / "sessions.json"
+SESSION_TTL = 30 * 24 * 3600          # 30 days
+PBKDF2_ROUNDS = 200_000
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+
+# A login with no username is only unambiguous when there is exactly one
+# account. qa_probe.py and the manual driving recipe in AGENTS.md both post
+# {"password": ...} alone, so this keeps them working on a single-user box
+# while still refusing to guess on a multi-user one.
+SINGLE_USER_UNNAMED = object()
+
+
+def hash_password(pw: str) -> str:
+    """PBKDF2-HMAC-SHA256, stdlib only. `pbkdf2_sha256$rounds$salt$hash`."""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, PBKDF2_ROUNDS)
+    return "pbkdf2_sha256$%d$%s$%s" % (
+        PBKDF2_ROUNDS, salt.hex(), dk.hex())
+
+
+def verify_password(pw: str, stored: str) -> bool:
+    """Constant-time verify. Never raises on a malformed stored value —
+    a corrupt record reads as a wrong password, not as a 500."""
+    try:
+        algo, rounds, salt_hex, hash_hex = str(stored).split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", pw.encode(),
+                                 bytes.fromhex(salt_hex), int(rounds))
+        return hmac.compare_digest(dk.hex(), hash_hex)
+    except Exception:
+        return False
+
+
+def load_users() -> list:
+    if not USERS_FILE.exists():
+        return []
+    try:
+        d = json.loads(USERS_FILE.read_text(encoding="utf-8"))
+        return [u for u in d if isinstance(u, dict) and u.get("id")] \
+            if isinstance(d, list) else []
+    except Exception:
+        return []
+
+
+def save_users(users: list) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = USERS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(users, indent=1, ensure_ascii=False),
+                   encoding="utf-8")
+    tmp.replace(USERS_FILE)
+
+
+def load_sessions() -> dict:
+    if not SESSIONS_FILE.exists():
+        return {}
+    try:
+        d = json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_sessions(sess: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = SESSIONS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(sess, indent=1, ensure_ascii=False),
+                   encoding="utf-8")
+    tmp.replace(SESSIONS_FILE)
+
+
+def _token_key(token: str) -> str:
+    """Sessions are keyed by the *hash* of the token, so a readable
+    sessions.json does not hand an attacker live sessions."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def prune_sessions(sess: dict, now: int | None = None) -> dict:
+    now = int(time.time()) if now is None else now
+    return {k: v for k, v in sess.items()
+            if isinstance(v, dict)
+            and int(v.get("expires") or 0) > now}
+
+
+def new_session(sess: dict, uid: str) -> str:
+    """Mint a session for `uid`, pruning expired ones on the way."""
+    sess.clear()
+    sess.update(prune_sessions(sess))
+    token = secrets.token_urlsafe(32)
+    sess[_token_key(token)] = {"user": uid,
+                               "expires": int(time.time()) + SESSION_TTL}
+    save_sessions(sess)
+    return token
+
+
+def drop_session(sess: dict, token: str) -> None:
+    if sess.pop(_token_key(token), None) is not None:
+        save_sessions(sess)
+
+
+def find_user(users: list, ident: str) -> dict:
+    """Look up by id first, then by name (case-insensitive)."""
+    ident = (ident or "").strip()
+    for u in users:
+        if u.get("id") == ident:
+            return u
+    low = ident.lower()
+    for u in users:
+        if str(u.get("name") or "").strip().lower() == low:
+            return u
+    return {}
+
+
+def resolve_user(users: list, name: str) -> dict:
+    """The account a login is for, or {} when it can't be determined.
+
+    An empty name resolves only when there is exactly one account — see
+    SINGLE_USER_UNNAMED."""
+    if name.strip():
+        return find_user(users, name)
+    live = [u for u in users if not u.get("disabled")]
+    return live[0] if len(live) == 1 else {}
+
+
+def bootstrap_admin(password: str) -> dict:
+    """First boot: AGENT_PASSWORD becomes the first admin. Returns the user.
+
+    Only ever runs with no users.json — a later boot must not be able to
+    mint a new admin from the environment."""
+    users = load_users()
+    if users:
+        return {}
+    user = {"id": new_user_id(users), "name": "admin",
+            "role": ROLE_ADMIN, "pass_hash": hash_password(password),
+            "created": int(time.time()), "disabled": False}
+    save_users([user])
+    return user
+
+
+def _prompt_pw(prompt: str) -> str:
+    """Read a password twice and refuse a mismatch. CLI only."""
+    pw = getpass.getpass(prompt)
+    if pw != getpass.getpass("confirm: "):
+        raise SystemExit("passwords differ")
+    return pw
+
+
+def new_user_id(users: list) -> str:
+    used = {str(u.get("id")) for u in users}
+    for i in range(1, 1000):
+        cand = "u%03d" % i
+        if cand not in used:
+            return cand
+    return "u" + secrets.token_hex(4)
+
+
+def public_user(u: dict) -> dict:
+    """The user as the client is allowed to see it — never the hash."""
+    return {"id": str(u.get("id") or ""),
+            "name": str(u.get("name") or ""),
+            "role": str(u.get("role") or ROLE_USER),
+            "admin": u.get("role") == ROLE_ADMIN}
 
 
 # ------------------------------------------------- OpenRouter model catalogue
@@ -3032,10 +3206,14 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     def _authed(self) -> bool:
-        token = self._cookies().get(COOKIE, "")
-        expected = hmac.new(self.app.session_secret, b"auth",
-                            hashlib.sha256).hexdigest()
-        return bool(token) and hmac.compare_digest(token, expected)
+        return bool(self._user())
+
+    def _user(self) -> dict:
+        """The account making this request, or {} when there isn't one.
+
+        Phase 0 resolves identity only — the Agent is still process-wide.
+        Phases 1-2 key per-user state off this."""
+        return self.app.user_for_token(self._cookies().get(COOKIE, ""))
 
     def _json(self, obj, code: int = 200, cache: str | None = None,
               headers: list | None = None):
@@ -3091,7 +3269,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
             return
         if path == "/api/auth":
-            self._json({"authed": self._authed()})
+            u = self._user()
+            self._json({"authed": bool(u),
+                        "user": public_user(u) if u else None})
             return
         if path == "/favicon.ico":
             f = APP_DIR / "static" / "icon-192.png"
@@ -3198,20 +3378,35 @@ class Handler(BaseHTTPRequestHandler):
         # ---- public ----
         if path == "/api/login":
             body = self._body()
+            name = str(body.get("name") or body.get("user") or "")
             pw = str(body.get("password", ""))
-            if self.app.password and hmac.compare_digest(
-                    pw, self.app.password):
-                token = hmac.new(self.app.session_secret, b"auth",
-                                 hashlib.sha256).hexdigest()
-                self._json({"ok": True}, headers=[(
-                    "Set-Cookie",
-                    f"{COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; "
-                    "Max-Age=31536000")])
+            self.app._sync_disk()
+            user = resolve_user(self.app.users, name)
+            # A disabled account must fail the same way a wrong password
+            # does, or the error becomes an account-enumeration oracle.
+            ok = bool(user) and not user.get("disabled") and \
+                verify_password(pw, str(user.get("pass_hash") or ""))
+            if ok:
+                with self.app.sessions_lock:
+                    token = new_session(self.app.sessions,
+                                        str(user.get("id")))
+                self._json({"ok": True, "user": public_user(user)},
+                           headers=[(
+                               "Set-Cookie",
+                               f"{COOKIE}={token}; Path=/; HttpOnly; "
+                               f"SameSite=Lax; Max-Age={SESSION_TTL}")])
             else:
                 time.sleep(0.6)                       # slow brute force
-                self._json({"error": "wrong password"}, 401)
+                msg = "wrong password" if user else \
+                    "unknown user" if name.strip() else \
+                    "several accounts — enter your username"
+                self._json({"error": msg}, 401)
             return
         if path == "/api/logout":
+            token = self._cookies().get(COOKIE, "")
+            if token:
+                with self.app.sessions_lock:
+                    drop_session(self.app.sessions, token)
             self._json({"ok": True}, headers=[(
                 "Set-Cookie",
                 f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")])
@@ -5040,10 +5235,70 @@ class App:
     def __init__(self, password: str):
         self.password = password
         self.session_secret = load_session_secret()
+        # The store is process-wide and mutated by every login/logout, so it
+        # needs its own lock. Phases 1-2 add per-user agents to the same
+        # pattern; do not assume the GIL makes bare dict writes safe here.
+        self.sessions_lock = threading.Lock()
+        self.users = load_users()
+        self.sessions = prune_sessions(load_sessions())
+        self._stamps = {}
+        self._sync_disk()
         migrate_flat_chats()                 # Phase A → B chat layout
         self.agent = Agent(load_config())    # loads chat + character too
         self.sd_state = SDState(self.agent)  # off-thread WebUI snapshot
         self.agent.sd_state = self.sd_state  # so a URL switch can drop it
+
+    def _sync_disk(self) -> None:
+        """Re-read users.json / sessions.json when they changed on disk.
+
+        The admin CLI (--add-user, --passwd, --disable-user) edits these files
+        directly, and it is expected to run against a *live* server. Without
+        this the process keeps honouring a revoked session or a disabled
+        account from the copy it loaded at boot.
+
+        One stat per file per request; the parse only happens when the stamp
+        actually moved, so the common case stays cheap.
+        """
+        for path, attr in ((USERS_FILE, "users"), (SESSIONS_FILE, "sessions")):
+            try:
+                st = path.stat()
+                stamp = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                stamp = None
+            if self._stamps.get(attr) == stamp:
+                continue
+            self._stamps[attr] = stamp
+            if attr == "users":
+                self.users = load_users()
+            else:
+                # Disk is authoritative, and deliberately so: new_session
+                # flushes under the lock, so nothing minted in-process is
+                # missing — while a session the CLI just revoked *is* here,
+                # and merging memory back in would resurrect it.
+                with self.sessions_lock:
+                    self.sessions = prune_sessions(load_sessions())
+
+    def user_for_token(self, token: str) -> dict:
+        """Cookie token -> user record, or {} when expired/revoked/unknown."""
+        if not token:
+            return {}
+        self._sync_disk()
+        with self.sessions_lock:
+            rec = self.sessions.get(_token_key(token))
+            if not rec:
+                return {}
+            expires = int(rec.get("expires") or 0)
+            if expires <= int(time.time()):
+                self.sessions.pop(_token_key(token), None)
+                save_sessions(self.sessions)
+                return {}
+        user = find_user(self.users, str(rec.get("user") or ""))
+        # A disabled account loses access immediately, even if its cookie is
+        # still inside the TTL — that is the whole point of disabling one.
+        return {} if user.get("disabled") else user
+
+    def is_admin(self, user: dict) -> bool:
+        return bool(user) and user.get("role") == ROLE_ADMIN
 
 
 # ------------------------------------------------------------------- main
@@ -5054,18 +5309,104 @@ def main():
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int,
                     default=int(os.environ.get("PORT", 8000)))
+    # Account provisioning. Signup is closed by design (MULTIUSER.md #1), so
+    # the admin needs a way in that does not involve editing users.json.
+    ap.add_argument("--add-user", metavar="NAME",
+                    help="create an account and prompt for its password")
+    ap.add_argument("--admin", action="store_true",
+                    help="--add-user creates an admin, not a normal user")
+    ap.add_argument("--passwd", metavar="NAME",
+                    help="reset an existing account's password")
+    ap.add_argument("--disable-user", metavar="NAME",
+                    help="disable an account (keeps its data)")
+    ap.add_argument("--enable-user", metavar="NAME")
+    ap.add_argument("--list-users", action="store_true")
     args = ap.parse_args()
+
+    if args.list_users:
+        users = load_users()
+        if not users:
+            print("no accounts yet")
+            return
+        for u in users:
+            state = "disabled" if u.get("disabled") else u.get("role", "")
+            print(f"  {u.get('id'):>6}  {u.get('name'):<20} {state}")
+        return
+
+    if args.add_user or args.passwd:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        users = load_users()
+        if args.add_user:
+            name = args.add_user.strip()
+            if not name:
+                print("--add-user needs a name", file=sys.stderr)
+                sys.exit(1)
+            if find_user(users, name):
+                print(f"already exists: {name}", file=sys.stderr)
+                sys.exit(1)
+            pw = _prompt_pw(f"password for {name}: ")
+            role = ROLE_ADMIN if args.admin else ROLE_USER
+            u = {"id": new_user_id(users), "name": name, "role": role,
+                 "pass_hash": hash_password(pw), "created": int(time.time()),
+                 "disabled": False}
+            users.append(u)
+            save_users(users)
+            print(f"created {role} {u['id']} ({name})")
+            return
+        # --passwd
+        u = find_user(users, args.passwd.strip())
+        if not u:
+            print(f"no such account: {args.passwd}", file=sys.stderr)
+            sys.exit(1)
+        pw = _prompt_pw(f"new password for {u.get('name')}: ")
+        u["pass_hash"] = hash_password(pw)
+        save_users(users)
+        print(f"password updated for {u.get('id')}")
+        return
+
+    if args.disable_user or args.enable_user:
+        users = load_users()
+        name = args.disable_user or args.enable_user
+        u = find_user(users, name.strip())
+        if not u:
+            print(f"no such account: {name}", file=sys.stderr)
+            sys.exit(1)
+        u["disabled"] = bool(args.disable_user)
+        save_users(users)
+        # A disabled account must lose its live sessions too, or the cookie
+        # keeps working for the rest of its TTL. The server may be running;
+        # re-read rather than trusting a stale copy. App._sync_disk picks
+        # the change up on its next request.
+        if u["disabled"]:
+            sess = prune_sessions(load_sessions())
+            sess = {k: v for k, v in sess.items()
+                    if v.get("user") != u.get("id")}
+            save_sessions(sess)
+        print(f"{'disabled' if u['disabled'] else 'enabled'} "
+              f"{u.get('id')} ({u.get('name')})")
+        return
 
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     password = os.environ.get("AGENT_PASSWORD", "")
-    if not password:
-        print("ERROR: set AGENT_PASSWORD (the password/PIN for the app).\n"
-              "  e.g.  AGENT_PASSWORD=my-secret python server.py",
-              file=sys.stderr)
-        sys.exit(1)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # AGENT_PASSWORD is the bootstrap secret, not a gate. It is only read
+    # when there is no users.json, to mint the first admin — a later boot
+    # cannot mint an admin from the environment (bootstrap_admin returns {}
+    # once any account exists).
+    if not load_users():
+        if not password:
+            print("ERROR: no accounts yet — set AGENT_PASSWORD to create the "
+                  "first admin.\n  e.g.  AGENT_PASSWORD=my-secret "
+                  "python server.py", file=sys.stderr)
+            sys.exit(1)
+        admin = bootstrap_admin(password)
+        print(f"  bootstrapped admin account {admin['name']!r} "
+              f"(id {admin['id']}) — change it in Settings")
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -5085,8 +5426,9 @@ def main():
     print()
     print("  ✦ SD AGENT — standalone web app")
     print("  " + "─" * w)
-    print(f"  Auth    : password required"
-          f"{'' if password else '  (MISSING!)'}")
+    live = [u for u in srv.app.users if not u.get("disabled")]
+    print(f"  Accounts: {len(live)} "
+          f"({sum(1 for u in live if srv.app.is_admin(u))} admin)")
     print(f"  Key     : {'configured' if agent.has_key() else 'NOT set — add in Settings'}")
     print(f"  LLM     : {', '.join(cfg['llm_models'])}")
     print(f"  SysMsg  : {'custom' if cfg.get('system_prompt') else 'default'}")

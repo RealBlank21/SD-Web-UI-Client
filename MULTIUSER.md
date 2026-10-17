@@ -1,0 +1,153 @@
+# Multi-user plan
+
+Status: **Phase 0 in progress.** This is the decision record plus the phase
+order it implies. Read this before changing anything in `server.py`'s auth or
+persistence paths.
+
+## Why not a database
+
+The storage layer was never the bottleneck. Chats total 4.8 MB across 18
+characters; `characters.json` is 20 KB; `_list_chats` is a glob plus an mtime
+sort. There is no slow query here to optimise.
+
+What actually blocked multi-user:
+
+- **One `Agent` per process** — `App.__init__` built a single
+  `Agent(load_config())` holding `messages`, `char`, `chat_id` and `timeline`.
+  Two users meant two conversations in one set of variables.
+- **No identity** — auth was `hmac(secret, b"auth")`, a *constant*. A boolean
+  for "anyone holding the password", with no principal to key data by. Zero
+  occurrences of `user_id` anywhere in the codebase.
+- **Global config** — one `data/config.json` for SD URL, keys and prompt.
+
+The `Agent` class was already structurally a session object (its instance state
+is exactly the per-user field set); it was a singleton only by convention, and
+the Handler reaches it through just 25 `self.app.agent.*` references.
+
+A DB earns its keep later, if ever, at `feedback_log` aggregation across users,
+usage/quota stats, and conversation search. Then it should be **SQLite** — one
+box, WAL covers concurrent readers, real transactions. Postgres is ops cost for
+no benefit at this scale.
+
+## Decisions
+
+| # | Decision |
+|---|---|
+| 1 | Internet-facing behind Cloudflare + Caddy (`image.blanketcodestudio.com`). Accounts are **admin-provisioned**, no self-serve signup. |
+| 2 | **Bring your own key** — each user supplies their own OpenRouter key. |
+| 3 | **Bring your own Forge** — each user supplies their own `sd_url`. |
+| 4 | SSRF policy on user-supplied `sd_url`: block link-local/metadata and loopback, allow RFC1918 + Tailscale CGNAT (real Forges live there), admin bypass. |
+| 5 | Admin role has **full access** to every user's content and config. |
+| 6 | Characters are **owned but shareable** — `owner` + `shared`; queries are `owner == uid OR shared`. |
+| 7 | Storage is **per-user directories**: `data/users/<uid>/…`. |
+| 8 | Gallery is **per-user**, but the server retains every image; admin sees a cross-user view. |
+
+### Consequences worth knowing
+
+**Admin is omnipotent, so the audit log is load-bearing.** With decision 5 an
+admin editing a user's `sd_url` can redirect their Forge, and editing
+`characters` can touch their creative work. That is fine for a box you own —
+but "full access" with no trail is indistinguishable from a bug when someone
+asks about it later. Phase 5 adds an append-only `data/audit.jsonl`.
+
+**BYO Forge makes LoRA install admin-only.** Downloads go to `data/loras` on
+*this* box and rely on `--lora-dirs` in *this* box's `webui.settings.sh`. There
+is no path for pushing a LoRA file into a user's own Forge. Rather than let
+users hit the silent-failure mode AGENTS.md already warns about, LoRA install
+stays admin-only and the UI says so.
+
+**BYO Forge was mostly already built.** `Agent.apply_config` hot-swaps the
+`SDClient` and resets cached model lists on URL change; the settings endpoint
+already does probe-before-trust. But probe-before-trust proves *a Forge
+answered*, not *the URL was safe* — which is why decision 4 is a separate
+validator rather than a by-product of the probe.
+
+**Divergent Forge versions become normal.** `SDClient.arch_profile()`
+deliberately prefers the server's live `<arch>_t2i_*` options over
+`ARCH_PROFILES`, so Forge is the source of truth for steps and sampler. With N
+Forges at N versions, those defaults legitimately differ per user. Not a bug —
+but it means a prompt bug report from one user may not reproduce on another's
+Forge.
+
+**Shareable characters touch every character query.** Favourites, LoRA
+references and the favourite-first sort all have to respect the
+`owner OR shared` filter. This is the most-repeated piece of work in Phases
+1–2; worth a single helper rather than inline filters.
+
+## Phase order
+
+Phase 3 before 2 is deliberate — the fairness/ownership policy decides what
+"multi-user" feels like and is cheap once users have identities.
+
+### Phase 0 — identity  *(in progress)*
+
+- `data/users.json`: `id`, `name`, `pass_hash`, `role` (`admin`|`user`),
+  `created`, `disabled`.
+- PBKDF2-HMAC-SHA256 password hashing (`hashlib`, stdlib, no new dependency).
+  The current plaintext `AGENT_PASSWORD` compare is fine for one shared secret,
+  not for N.
+- Real per-user session tokens in `data/sessions.json`, replacing the constant
+  HMAC. Tokens stored hashed (sha256) as the lookup key, so a leaked session
+  file does not hand over live sessions.
+- `Handler._user()` resolves cookie → session → user record. `_authed()` stays
+  as a boolean wrapper so existing call sites are untouched.
+- Bootstrap: with no `users.json`, `AGENT_PASSWORD` creates the first admin.
+- **`POST /api/login` with no `name` still logs in when exactly one user
+  exists.** `qa_probe.py:276` and the manual driving recipe in AGENTS.md both
+  post `{"password": …}` only; that must keep working.
+
+### Phase 1 — storage relocation
+
+- Create `data/users/<uid>/` and move `characters.json` + `chat_state.json`
+  into the admin's directory (existing state inherits to the first admin).
+- Point every path helper at per-user files: `_char_dir`, `_chat_file`,
+  `_save_state_locked`, and the module-level loaders, which stop being global
+  and become `load_characters(uid)`, `load_personas(uid)`, etc.
+- Add `owner` and `shared` to character cards; migrate the existing cast to the
+  admin account.
+- Fix the non-atomic writes while the paths are being touched anyway:
+  `save_personas` (bare `write_text`) and the chat writes in
+  `_save_state_locked` (lines ~1597, ~1606). A crash mid-write truncates a
+  chat, which matters more with several users than with one.
+
+### Phase 2 — Agent per user
+
+- `data/users/<uid>/agent` in a dict guarded by its own lock, created lazily.
+  The ~25 `self.app.agent.*` references become a per-request lookup.
+- Per-Agent locks then do the right thing for free: a user cannot double-submit,
+  but two *different* users can run turns concurrently.
+- Attach `SDState` per-user; `apply_config` already resets it on URL change.
+
+### Phase 3 — BYOK + BYO Forge
+
+- Per-user `openrouter_key` and `sd_url`. Remove `sd_url` from shared config.
+- Run every `sd_url` save through the decision-4 validator.
+- Surface "is your Forge reachable" in the user's own settings.
+- **Traps:** `Agent.__init__` calls `ensure_assistant(load_characters())`,
+  which *appends to `characters.json`* — a write on a construction path, and a
+  race across threads once N agents exist. Pull it into startup.
+  `SDState.__init__` takes an `agent` and reads `agent.client.base_url`, so it
+  must hang off a shared `SDClient` or it follows whichever user last switched.
+- No message truncation exists anywhere — `self.messages` grows unbounded. One
+  user on a long chat is fine; N users on a box that also hosts Forge is how you
+  get OOM-killed mid-generation.
+
+### Phase 4 — gallery split
+
+- `outputs/<uid>/`; route generation saves by owner; admin-only cross-user
+  gallery index.
+
+### Phase 5 — audit log
+
+- Append-only `data/audit.jsonl`: actor, target, action, timestamp. Required by
+  decision 5, not optional.
+
+## Assumed unless overridden
+
+None of these block Phase 0:
+
+- Sessions persist across restart, 30-day expiry, individually revocable.
+- Existing data (4.8 MB chats, 764 MB LoRAs, the existing cast) inherits to
+  the first admin account.
+- Light per-account rate limiting only; the brute-force login sleep already
+  exists. No per-generation quota.

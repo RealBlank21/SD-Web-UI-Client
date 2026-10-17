@@ -54,13 +54,16 @@ button:active { transform: scale(.97); }
 }
 .gate-card b { font-size: 18px; }
 .gate-card p { font-size: 13px; color: var(--dim); }
-#gate-pw {
+/* both gate fields — the username and the password */
+#gate-user, #gate-pw {
   width: 100%; text-align: center; font-size: 16px; letter-spacing: .1em;
   background: var(--bg); color: var(--text);
   border: 1px solid var(--line); border-radius: 11px;
   padding: 12px; outline: none;
 }
-#gate-pw:focus { border-color: #4a3f78; }
+#gate-user, #gate-pw + input { margin-top: 10px; }
+#gate-user:focus, #gate-pw:focus { border-color: #4a3f78; }
+#gate-user { letter-spacing: .04em; }
 #gate-btn {
   padding: 12px; border-radius: 11px; font-size: 15px;
   background: linear-gradient(135deg, var(--accent), var(--accent2));

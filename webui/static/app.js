@@ -81,7 +81,8 @@ if ("serviceWorker" in navigator) {
 }
 
 const els = {
-  gate: $("gate"), gatePw: $("gate-pw"), gateBtn: $("gate-btn"),
+  gate: $("gate"), gateUser: $("gate-user"),
+  gatePw: $("gate-pw"), gateBtn: $("gate-btn"),
   gateErr: $("gate-err"), app: $("app"),
   viewChars: $("view-chars"), viewChat: $("view-chat"),
   pageGallery: $("page-gallery"),
@@ -333,17 +334,24 @@ function showApp() {
 async function tryLogin() {
   const pw = els.gatePw.value;
   if (!pw) return;
+  const name = (els.gateUser.value || "").trim();
   els.gateBtn.disabled = true;
   els.gateErr.hidden = true;
   try {
     await api("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: pw }),
+      body: JSON.stringify({ name, password: pw }),
     });
     showApp();
-  } catch {
+  } catch (e) {
     els.gateErr.hidden = false;
+    // api() throws "locked" on a 401 and re-shows the gate itself; anything
+    // else is the server's own message ("wrong password", "unknown user").
+    const m = e && e.message;
+    els.gateErr.textContent =
+      !m || m === "locked" || /^(HTTP|failed)/i.test(m)
+        ? "Wrong username or password" : m;
     els.gatePw.select();
   } finally {
     els.gateBtn.disabled = false;
@@ -351,8 +359,14 @@ async function tryLogin() {
 }
 
 els.gateBtn.addEventListener("click", tryLogin);
-els.gatePw.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") tryLogin();
+for (const f of [els.gateUser, els.gatePw]) {
+  f.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") tryLogin();
+  });
+}
+// Username first: a returning user should not have to reach for the tab.
+els.gateUser.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); els.gatePw.focus(); }
 });
 
 /* -------------------------------------------------------------- timeline */

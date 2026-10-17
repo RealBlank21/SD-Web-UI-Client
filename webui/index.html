@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=87">
+<link rel="stylesheet" href="/static/style.css?v=88">
 </head>
 <body>
 
@@ -20,11 +20,13 @@
   <div class="gate-card">
     <div class="gate-spark">✦</div>
     <b>SD Agent</b>
-    <p>Enter your password to continue</p>
+    <p>Enter your username and password</p>
+    <input type="text" id="gate-user" placeholder="Username"
+           autocomplete="username" autocapitalize="off" spellcheck="false">
     <input type="password" id="gate-pw" placeholder="Password"
            autocomplete="current-password" autocapitalize="off" spellcheck="false">
     <button id="gate-btn">Unlock</button>
-    <div id="gate-err" class="gate-err" hidden>Wrong password</div>
+    <div id="gate-err" class="gate-err" hidden>Wrong username or password</div>
   </div>
 </div>
 
@@ -700,6 +702,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=87"></script>
+<script src="/static/app.js?v=88"></script>
 </body>
 </html>
