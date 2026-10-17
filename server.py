@@ -181,6 +181,95 @@ def save_config(cfg: dict, uid: str = "") -> None:
     tmp.replace(CONFIG_FILE)
 
 
+# ------------------------------------------------------------ audit trail
+#
+# Decision 5 gave the admin role full access to every user's content and
+# config. That is fine for a box you own, but "full access" with no record is
+# indistinguishable from a bug when someone asks about it later — so every
+# admin action against another user, and every privilege-relevant action by a
+# normal user, is appended here.
+#
+# Append-only JSONL: one line per event, never rewritten. Truncated at
+# AUDIT_MAX on write rather than rotated, so the file stays greppable and
+# never needs a rotation that could lose the tail.
+
+AUDIT_FILE = DATA_DIR / "audit.jsonl"
+AUDIT_MAX = 20000
+#: Values worth logging. Anything not in here is ordinary use.
+AUDITED = {
+    # admin reaching into another user's space
+    "character.edit.other", "character.delete.other", "character.fav.other",
+    "scenario.other", "settings.other", "gallery.other",
+    # identity and credentials
+    "user.create", "user.passwd", "user.disable", "user.enable",
+    "login.fail", "login.ok",
+    # the privileged surface in general
+    "settings.sd_url", "settings.key", "system_prompt.set",
+    "model_guide.set", "character.delete",
+}
+
+
+def audit(actor: dict, action: str, target: str = "", detail: str = "") -> None:
+    """Append one event. Never raises — an unwritable audit log must not take
+    the request down with it, but the failure is worth seeing in stderr."""
+    if action not in AUDITED:
+        return
+    actor_id = str(actor.get("id") or "")
+    target_id = str(target or "")
+    # An admin acting on their own account is not privilege use — but only
+    # the cross-user actions are suppressed. Changing your own key or Forge
+    # is exactly the kind of thing the log exists to answer for.
+    if (action.endswith(".other") and actor.get("role") == ROLE_ADMIN
+            and target_id and target_id == actor_id):
+        return
+    try:
+        rec = {"ts": int(time.time()), "actor": actor_id,
+               "who": str(actor.get("name") or ""),
+               "admin": actor.get("role") == ROLE_ADMIN,
+               "action": action, "target": target_id, "detail": detail[:200]}
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(AUDIT_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if AUDIT_FILE.stat().st_size > 8 * 1024 * 1024:
+            _trim_audit()
+    except Exception as e:                             # noqa: BLE001
+        print(f"audit: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def _trim_audit() -> None:
+    """Keep the newest AUDIT_MAX lines. Rewritten atomically so a crash
+    mid-trim cannot leave a half-written file that breaks every future write."""
+    try:
+        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines(True)
+        keep = lines[-AUDIT_MAX:]
+        tmp = AUDIT_FILE.with_suffix(".tmp")
+        tmp.write_text("".join(keep), encoding="utf-8")
+        tmp.replace(AUDIT_FILE)
+    except Exception:                                 # noqa: BLE001
+        pass
+
+
+def read_audit(limit: int = 200, admin_only: bool = False) -> list:
+    """Newest first. `admin_only` hides the noise of ordinary use so the
+    entries that matter are visible without filtering."""
+    try:
+        lines = AUDIT_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if admin_only and not rec.get("admin"):
+            continue
+        out.append(rec)
+        if len(out) >= limit:
+            break
+    return out
+
+
 # ------------------------------------------------------------- SSRF guard
 #
 # `sd_url` is a URL the server fetches on a user's behalf, on a box that is
@@ -3751,8 +3840,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/gallery":
             qs = parse_qs(urlparse(self.path).query)
             as_uid, raw_folder = split_scope((qs.get("folder") or [""])[0])
-            if as_uid:
-                scope_as(self._uid(), as_uid, self._is_admin())
+            if as_uid and scope_as(self._uid(), as_uid, self._is_admin()):
+                audit(self._user(), "gallery.other", as_uid,
+                      raw_folder or "(root)")
             folder = _safe_rel(raw_folder)
             if folder is None:
                 self._json({"error": "bad folder"}, 400)
@@ -3773,6 +3863,8 @@ class Handler(BaseHTTPRequestHandler):
                         "feedback": self.agent.feedback})
         elif path == "/api/settings":
             self.api_settings()
+        elif path == "/api/audit":
+            self.api_audit()
         elif path == "/api/characters":
             self.api_characters_list()
         elif path == "/api/chats":
@@ -3846,6 +3938,8 @@ class Handler(BaseHTTPRequestHandler):
                 msg = "wrong password" if user else \
                     "unknown user" if name.strip() else \
                     "several accounts — enter your username"
+                audit({}, "login.fail", str(user.get("id") or ""),
+                      f"named {name.strip()!r}" if name.strip() else "no name")
                 self._json({"error": msg}, 401)
             return
         if path == "/api/logout":
@@ -4647,9 +4741,15 @@ class Handler(BaseHTTPRequestHandler):
         # editing it would rewrite their work and republish it under your
         # name. Admins bypass (MULTIUSER.md decision 5).
         if existing and not can_edit_card(uid, existing, self._is_admin()):
+            audit(self._user(), "character.edit.other",
+                  str(existing.get("owner") or ""), f"tried {cid}")
             self._json({"error": "that character belongs to someone else"},
                        403)
             return
+        if existing and self._is_admin() and \
+                card_owner(existing) != uid:
+            audit(self._user(), "character.edit.other",
+                  card_owner(existing), f"edited {cid}")
         if not existing:
             cid = slugify(name)
             while any(c.get("id") == cid for c in cards):
@@ -4792,6 +4892,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "character not found"}, 404)
             return
         if not can_edit_card(self._uid(), card, self._is_admin()):
+            audit(self._user(), "character.fav.other",
+                  card_owner(card), f"tried {cid}")
             self._json({"error": "that character belongs to someone else"},
                        403)
             return
@@ -4818,9 +4920,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "the assistant cannot be deleted"}, 400)
             return
         if not can_edit_card(self._uid(), card, self._is_admin()):
+            audit(self._user(), "character.delete.other",
+                  card_owner(card), f"tried {cid}")
             self._json({"error": "that character belongs to someone else"},
                        403)
             return
+        if self._is_admin() and card_owner(card) != self._uid():
+            audit(self._user(), "character.delete.other", card_owner(card),
+                  f"deleted {cid}")
         agent = self.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
@@ -5174,6 +5281,24 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             agent.lock.release()
 
+    def api_audit(self):
+        """GET the audit trail. Admin only — it names other people's accounts.
+
+        `?admin_only=1` hides ordinary use so privilege events stand out
+        without filtering."""
+        if not self._is_admin():
+            self._json({"error": "admins only"}, 403)
+            return
+        try:
+            limit = max(1, min(1000, int(
+                (parse_qs(urlparse(self.path).query).get("limit") or [200])[0])))
+        except (TypeError, ValueError):
+            limit = 200
+        only = (parse_qs(urlparse(self.path).query).get("admin_only")
+                or [""])[0] in ("1", "true", "yes")
+        self._json({"events": read_audit(limit=limit, admin_only=only),
+                    "file": AUDIT_FILE.name})
+
     def api_settings(self):
         """GET returns masked settings; POST applies and persists them."""
         agent = self.agent
@@ -5238,6 +5363,7 @@ class Handler(BaseHTTPRequestHandler):
                         "this image server. Generations serialise, and each of "
                         "you pays a model reload whenever you ask for a "
                         "different checkpoint.")
+            audit(self._user(), "settings.sd_url", self._uid(), url)
             cfg["sd_url"] = url
             if switched:
                 # persist the switch on its own: a later field in this same
@@ -5257,6 +5383,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "that doesn't look like an OpenRouter "
                                      "key (should start with sk-or-)"}, 400)
                 return
+            audit(self._user(), "settings.key", self._uid(),
+                  "set" if key else "cleared")
             cfg["openrouter_key"] = key
         if body.get("system_prompt_reset"):
             cfg["system_prompt"] = ""          # back to the built-in default
@@ -5267,6 +5395,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "system message too long "
                                      "(32000 characters max)"}, 400)
                 return
+            audit(self._user(), "system_prompt.set", self._uid(),
+                  f"{len(text)} chars")
             cfg["system_prompt"] = text        # empty = default
             sys_touched = True
         if body.get("model_guide_reset"):
@@ -5402,6 +5532,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "character not found"}, 404)
             return
         if not can_edit_card(self._uid(), card, self._is_admin()):
+            audit(self._user(), "scenario.other", card_owner(card),
+                  f"tried {cid}")
             self._json({"error": "that character belongs to someone else"},
                        403)
             return
@@ -5993,6 +6125,8 @@ def main():
                  "pass_hash": hash_password(pw), "created": int(time.time()),
                  "disabled": False}
             users.append(u)
+            audit({"id": "cli", "name": "cli", "role": ROLE_ADMIN},
+                  "user.create", u["id"], name)
             save_users(users)
             print(f"created {role} {u['id']} ({name})")
             return
@@ -6003,6 +6137,8 @@ def main():
             sys.exit(1)
         pw = _prompt_pw(f"new password for {u.get('name')}: ")
         u["pass_hash"] = hash_password(pw)
+        audit({"id": "cli", "name": "cli", "role": ROLE_ADMIN},
+              "user.passwd", str(u.get("id")), str(u.get("name") or ""))
         save_users(users)
         print(f"password updated for {u.get('id')}")
         return
@@ -6015,6 +6151,9 @@ def main():
             print(f"no such account: {name}", file=sys.stderr)
             sys.exit(1)
         u["disabled"] = bool(args.disable_user)
+        audit({"id": "cli", "name": "cli", "role": ROLE_ADMIN},
+              "user.disable" if u["disabled"] else "user.enable",
+              str(u.get("id")), str(u.get("name") or ""))
         save_users(users)
         # A disabled account must lose its live sessions too, or the cookie
         # keeps working for the rest of its TTL. The server may be running;

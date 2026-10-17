@@ -1,8 +1,8 @@
 # Multi-user plan
 
-Status: **Phases 0-3 done.** This is the decision record plus the phase
-order it implies. Read this before changing anything in `server.py`'s auth or
-persistence paths.
+Status: **Phases 0-4 done, 5 done — the plan is complete.** This is the
+decision record plus the phase order it implies. Read this before changing
+anything in `server.py`'s auth or persistence paths.
 
 ## Why not a database
 
@@ -223,10 +223,26 @@ people is legitimate.
 - `outputs/<uid>/`; route generation saves by owner; admin-only cross-user
   gallery index.
 
-### Phase 5 — audit log
+### Phase 5 — audit log  *(done)*
 
-- Append-only `data/audit.jsonl`: actor, target, action, timestamp. Required by
-  decision 5, not optional.
+- Append-only `data/audit.jsonl`: ts, actor, name, admin flag, action, target,
+  detail. Required by decision 5, not optional — an omnipotent admin with no
+  record is indistinguishable from a bug when someone asks about it later.
+- `audit(actor, action, target, detail)` records only the actions in
+  `AUDITED`, so ordinary use stays out of the way. It **never raises**: an
+  unwritable log prints to stderr and the request continues.
+- An admin acting on their *own* account is only suppressed for the
+  `.other` actions. Changing your own key or Forge is recorded — that is
+  precisely what you would want to answer for.
+- `GET /api/audit?limit=&admin_only=1`, admins only. `admin_only` hides the
+  noise of ordinary use so privilege events stand out.
+- Provisioning via the CLI audits as actor `cli`, since there is no session.
+- Trimmed to the newest `AUDIT_MAX` lines, rewritten atomically.
+
+Events recorded: login failures, account create/passwd/disable/enable, admin
+reaching into another user's card (edit, delete, favourite, scenario), admin
+browsing another user's gallery, and any change to `sd_url`, the OpenRouter key
+or the system prompt.
 
 ## Assumed unless overridden
 
