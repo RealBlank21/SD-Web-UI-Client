@@ -1,5 +1,20 @@
 /* Anima — mobile-first dark UI (PWA) */
 
+/* The login wordmark, and only that. Plus Jakarta Sans 700, SIL OFL 1.1
+   (https://fonts.google.com/specimen/Plus+Jakarta+Sans), Google's latin
+   subset, 12KB. Self-hosted rather than linked from a CDN: /login-bg is
+   world-readable, so a visitor who has not signed in yet should not be sent
+   to a third-party host to render the box they are being asked for a
+   password in. The ?v= is the same version token as style.css — a font
+   change bumps it, same as any other asset. */
+@font-face {
+  font-family: "Anima Display";
+  src: url("/static/anima-display.woff2?v=103") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --bg: #0b0e15;
   --panel: #131826;
@@ -93,13 +108,23 @@ button:active { transform: scale(.97); }
 }
 /* The login card's mark is the app icon, not the old sparkle glyph. Served at
    192 and displayed at 64 so it stays crisp on a 3x screen; alt="" because the
-   "Anima" heading right below it already names the app. */
+   "Anima" wordmark beside it already names the app. */
 .gate-mark {
-  width: 64px; height: 64px; align-self: center; display: block;
+  width: 64px; height: 64px; display: block; flex: none;
   border-radius: 14px;
   box-shadow: 0 4px 18px rgba(0, 0, 0, .45);
 }
-.gate-card b { font-size: 18px; }
+/* Logo left, wordmark right, on one row above the form. Everything below
+   stays centre-aligned — the card is a single centred column, so this row is
+   the only thing that splits left/right. */
+.gate-brand {
+  display: flex; align-items: center; gap: 13px;
+  margin-bottom: 4px;
+}
+.gate-brand b {
+  font-family: "Anima Display", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 28px; line-height: 1.1; letter-spacing: -.015em;
+}
 .gate-card p { font-size: 13px; color: var(--dim); }
 /* both gate fields — the username and the password */
 #gate-user, #gate-pw {
@@ -124,7 +149,6 @@ button:active { transform: scale(.97); }
   color: #14101f;
   box-shadow: 0 6px 20px rgba(140, 110, 220, .30);
 }
-.gate-card b { font-size: 19px; letter-spacing: .01em; }
 .gate-err { font-size: 12.5px; color: var(--err); }
 
 /* ------------------------------------------------------- view heads */

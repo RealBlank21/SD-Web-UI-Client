@@ -92,6 +92,7 @@ STATIC_MIME = {
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
     ".txt": "text/plain; charset=utf-8",
+    ".woff2": "font/woff2",
 }
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 SEARCH_LIMIT = 500                   # cap on hits from /api/gallery/search

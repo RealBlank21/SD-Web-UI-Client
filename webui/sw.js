@@ -1,11 +1,14 @@
 /* Anima service worker — app-shell caching for offline launch.
    Network-first for API/dynamic content; cache-first for static assets. */
 
-const CACHE = "sdagent-v102";
-const V = "?v=102";                   // keep in sync with index.html
+const CACHE = "sdagent-v103";
+const V = "?v=103";                   // keep in sync with index.html
 const SHELL = [
   "/", "/index.html", "/static/style.css" + V, "/static/app.js" + V,
   "/manifest.webmanifest", "/static/icon-192.png", "/static/icon-512.png",
+  // the login wordmark's face — the gate is the first thing an offline PWA
+  // launch draws, so it should not fall back to a system font
+  "/static/anima-display.woff2" + V,
 ];
 
 self.addEventListener("install", (e) => {
