@@ -4076,9 +4076,14 @@ class Handler(BaseHTTPRequestHandler):
             if not f:
                 self.send_error(404)
                 return
-            t = thumbnail(f)
-            self._file(t if t else f, cache="private, max-age=86400",
-                       mime="image/jpeg" if t else None)
+            if prefix == "/thumb/":
+                t = thumbnail(f)
+                self._file(t if t else f, cache="private, max-age=86400",
+                           mime="image/jpeg" if t else None)
+            else:
+                # /outputs/ is the original file, full resolution — chat
+                # cards, the lightbox and downloads all use it.
+                self._file(f, cache="private, max-age=86400")
         elif path == "/api/status":
             self.api_status()
         elif path == "/api/llm/models":
