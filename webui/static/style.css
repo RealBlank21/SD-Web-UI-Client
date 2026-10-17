@@ -36,16 +36,51 @@ button:active { transform: scale(.97); }
 
 /* ---------------------------------------------------------------- login */
 
+/* ---------------------------------------------------------------- login gate
+ *
+ * The backdrop is a randomly chosen image from data/login-bg/, served
+ * unauthenticated by GET /login-bg. That directory is curated by hand and
+ * deliberately separate from the gallery: this one is world-readable on a
+ * public host, so only images safe to show a stranger go in it.
+ *
+ * --gate-bg is injected by the route's own stylesheet rather than hardcoded
+ * here, so the gate still paints its gradient if the directory is empty.
+ */
 #gate {
   position: fixed; inset: 0; z-index: 100;
   display: flex; align-items: center; justify-content: center;
-  background: var(--bg); padding: 24px;
+  background: var(--bg);
+  /* Refetched on every load, so the backdrop differs each time. The route
+     204s when data/login-bg/ is empty, which leaves the gradient above
+     showing rather than a broken image. --gate-bg overrides it when set. */
+  background-image: var(--gate-bg, url("/login-bg"));
+  background-size: cover;
+  background-position: center;
+  padding: 24px;
+}
+/* Darken the photo enough that the card's text contrast does not depend on
+   what is behind it. A hard multiply rather than a gradient, so every corner
+   is guaranteed the same floor. */
+#gate::before {
+  content: ""; position: absolute; inset: 0;
+  background: rgba(6, 8, 13, .62);
+  backdrop-filter: blur(3px) saturate(120%);
+  -webkit-backdrop-filter: blur(3px) saturate(120%);
+  pointer-events: none;
 }
 .gate-card {
+  position: relative;          /* above the ::before scrim */
   width: 100%; max-width: 340px; text-align: center;
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: 18px; padding: 28px 22px;
+  padding: 28px 22px;
   display: flex; flex-direction: column; gap: 12px;
+  /* glass */
+  background: rgba(22, 26, 38, .55);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  backdrop-filter: blur(22px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, .13);
+  border-radius: 20px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .55),
+              inset 0 1px 0 rgba(255, 255, 255, .10);
 }
 /* The login card's mark is the app icon, not the old sparkle glyph. Served at
    192 and displayed at 64 so it stays crisp on a 3x screen; alt="" because the
@@ -60,18 +95,27 @@ button:active { transform: scale(.97); }
 /* both gate fields — the username and the password */
 #gate-user, #gate-pw {
   width: 100%; text-align: center; font-size: 16px; letter-spacing: .1em;
-  background: var(--bg); color: var(--text);
-  border: 1px solid var(--line); border-radius: 11px;
+  color: var(--text);
+  background: rgba(8, 10, 16, .45);          /* glass, not a solid block */
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 11px;
   padding: 12px; outline: none;
+  transition: border-color .18s, background .18s;
 }
 #gate-user, #gate-pw + input { margin-top: 10px; }
-#gate-user:focus, #gate-pw:focus { border-color: #4a3f78; }
+#gate-user:focus, #gate-pw:focus {
+  border-color: rgba(255, 255, 255, .34);
+  background: rgba(8, 10, 16, .62);
+}
+#gate-user::placeholder, #gate-pw::placeholder { color: rgba(255,255,255,.38); }
 #gate-user { letter-spacing: .04em; }
 #gate-btn {
-  padding: 12px; border-radius: 11px; font-size: 15px;
+  padding: 12px; border-radius: 11px; font-size: 15px; margin-top: 14px;
   background: linear-gradient(135deg, var(--accent), var(--accent2));
   color: #14101f;
+  box-shadow: 0 6px 20px rgba(140, 110, 220, .30);
 }
+.gate-card b { font-size: 19px; letter-spacing: .01em; }
 .gate-err { font-size: 12.5px; color: var(--err); }
 
 /* ------------------------------------------------------- view heads */

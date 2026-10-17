@@ -27,6 +27,7 @@ import hmac
 import ipaddress
 import json
 import os
+import random
 import re
 import secrets
 import shutil
@@ -74,6 +75,8 @@ from sd_client import LORA_WEIGHT_BAND, lora_referenceable, lora_tag
 APP_DIR = ROOT / "webui"
 DATA_DIR = ROOT / "data"
 OUT_DIR = ROOT / "outputs"
+#: Hand-curated, world-readable login backdrops. See _serve_login_bg.
+LOGIN_BG_DIR = DATA_DIR / "login-bg"
 CONFIG_FILE = DATA_DIR / "config.json"
 SESSION_FILE = DATA_DIR / "session_secret"
 STATE_FILE = DATA_DIR / "chat_state.json"
@@ -84,6 +87,8 @@ STATIC_MIME = {
     ".js": "text/javascript; charset=utf-8",
     ".webmanifest": "application/manifest+json",
     ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
     ".txt": "text/plain; charset=utf-8",
@@ -3936,7 +3941,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _file(self, path: Path, cache: str | None = None,
-              mime: str | None = None):
+              mime: str | None = None,
+              extra: list[tuple[str, str]] | None = None):
         try:
             data = path.read_bytes()
         except OSError:
@@ -3949,8 +3955,56 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", cache or "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for k, v in (extra or []):
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_login_bg(self, path: str):
+        """GET /login-bg — a randomly chosen login backdrop, unauthenticated.
+
+        Deliberately separate from the gallery. This host is public, so anything
+        served here is readable by anyone and crawlable; only images safe to show
+        a stranger belong in data/login-bg/, and the owner curates that by hand.
+
+        Picks at random per request but sends `no-cache` with an ETag, so the
+        browser revalidates each load (giving a new image) yet a repeat pick
+        costs a 304 rather than re-downloading the bytes.
+        """
+        picks = sorted(LOGIN_BG_DIR.glob("*.jpg")) if LOGIN_BG_DIR.is_dir() else []
+        if not picks:
+            # No curated images yet — 204 lets the gate keep its gradient instead
+            # of showing a broken background.
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        name = ""
+        if path.startswith("/login-bg/"):
+            want = _safe_name(path[len("/login-bg/"):])
+            chosen = next((p for p in picks if p.stem == want), None)
+            # An unknown or traversing name is a 404, not a silent fall back to
+            # a random pick — answering 200 to "../etc/passwd" hides probing and
+            # makes the response look like it meant something.
+            if not chosen:
+                self.send_error(404)
+                return
+            name = chosen.name
+        else:
+            name = random.choice(picks).name
+        f = LOGIN_BG_DIR / name
+        try:
+            etag = f'"{int(f.stat().st_mtime)}-{f.stat().st_size}"'
+        except OSError:
+            self.send_error(404)
+            return
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+        self._file(f, cache="no-cache", extra=[("ETag", etag)])
 
     def _denied(self):
         self._json({"error": "unauthorized"}, 401)
@@ -3983,6 +4037,9 @@ class Handler(BaseHTTPRequestHandler):
             u = self._user()
             self._json({"authed": bool(u),
                         "user": public_user(u) if u else None})
+            return
+        if path.startswith("/login-bg"):
+            self._serve_login_bg(path)
             return
         if path == "/favicon.ico":
             f = APP_DIR / "static" / "icon-192.png"
@@ -5469,6 +5526,7 @@ class Handler(BaseHTTPRequestHandler):
             return True, detail
         finally:
             agent.lock.release()
+
 
     def api_admin_users(self):
         """GET the account list, POST an account action.
