@@ -2425,6 +2425,20 @@ class Agent:
         reply = None
         char_temp = None
         char_mt = None
+        think: list[str] = []
+
+        def flush_think():
+            """Store this turn's reasoning, once, just above what it produced.
+
+            Pushed rather than carried on the reply event because most turns
+            that draw an image end with an empty assistant message and no
+            reply bubble at all — the thinking would have nowhere to live.
+            """
+            if not think:
+                return
+            self.push({"type": "think", "text": _join_think(think)}, emit)
+            think.clear()
+
         if self.char:
             try:
                 char_temp = float(self.char["temp"])  # type: ignore[arg-type]
@@ -2444,6 +2458,11 @@ class Agent:
                                          max_tokens=char_mt)
                 msg = data["choices"][0]["message"]
                 messages.append(_clean_assistant_msg(msg))
+                # kept out of the context (see _clean_assistant_msg) and shown
+                # as a collapsed block at the end of the turn
+                reasoned = _reasoning_text(msg)
+                if reasoned:
+                    think.append(reasoned)
 
                 tool_calls = msg.get("tool_calls") or []
                 if not tool_calls:
@@ -2483,6 +2502,7 @@ class Agent:
             else:
                 reply = "(stopped: too many tool rounds)"
         except LLMError as e:
+            flush_think()
             evt = {"type": "error", "text": f"✗ {e}"}
             self.push(evt, emit)
             return False
@@ -2492,6 +2512,10 @@ class Agent:
             # no bubble — the user asked to stop, not to read a half answer
             emit({"type": "stopped"})
             return False
+
+        # every turn shows its reasoning, including the ones that end on an
+        # image card with no text at all
+        flush_think()
 
         if reply:                                 # empty final reply: no bubble
             # "mi" = messages length after appending this assistant message,
@@ -2526,7 +2550,13 @@ class Agent:
         whatever followed it, and keeps what the re-answer itself produced
         (a freshly generated image, say) — `before` marks where that starts.
         """
-        self.timeline = self.timeline[:idx] + self.timeline[before:]
+        head = self.timeline[:idx]
+        # a reasoning block always sits immediately above the reply it led to,
+        # so this is the thinking behind the answer just replaced — the new
+        # turn pushed its own, and two of them would read as two attempts
+        if head and head[-1].get("type") == "think":
+            head = head[:-1]
+        self.timeline = head + self.timeline[before:]
         self.messages = messages
 
     def rollback_reply(self, before: int) -> None:
@@ -2682,6 +2712,41 @@ class Agent:
                    "models": result.get("models", [])}
             self.push(evt, emit)
         return result
+
+
+THINK_MAX = 6000          # chars of reasoning kept per turn
+
+
+def _reasoning_text(msg: dict) -> str:
+    """Whatever the provider calls thinking, as one plain string.
+
+    OpenRouter hands back `reasoning` as a string, and `reasoning_details` as
+    a list of parts for the providers that split thinking into chunks. Models
+    that do not reason return neither, and the turn simply shows no block.
+
+    Scrubbed like any other model output: this text goes to the client and
+    into the chat file, so it must not carry server paths.
+    """
+    out = str(msg.get("reasoning") or "").strip()
+    if not out and isinstance(msg.get("reasoning_details"), list):
+        out = "\n\n".join(
+            str(d.get("text") or "").strip()
+            for d in msg["reasoning_details"] if isinstance(d, dict)).strip()
+    return scrub_paths(out) if out else ""
+
+
+def _join_think(parts: list[str]) -> str:
+    """One turn's reasoning, one block.
+
+    A turn can take several rounds (call a tool, read the result, answer), and
+    each round thinks for itself. They are joined into a single collapsible
+    block with a rule between rounds — the user asked to *see* the thinking,
+    not to be walked through it round by round.
+    """
+    text = "\n\n———\n\n".join(p for p in parts if p).strip()
+    if len(text) > THINK_MAX:
+        text = text[:THINK_MAX].rstrip() + "\n\n…"
+    return text
 
 
 def chat_completion(api_key: str, llm: str, messages: list,

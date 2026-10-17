@@ -426,6 +426,47 @@ function addBubble(kind, text) {
   return m;
 }
 
+/* The model's own reasoning for a turn, collapsed to a one-liner.
+
+   It arrives as its own timeline event rather than riding along on the reply,
+   because a turn that ends on an image card has no reply bubble to hang it
+   on. Deliberately not a .msg: no long-press menu, nothing to edit or rewind
+   — it is there to be read, so it only opens and closes. */
+let thinkOpen = localStorage.getItem("thinkopen") === "1";
+
+function addThink(text) {
+  const box = el("div", "think");
+  const head = el("button", "think-head");
+  head.type = "button";
+  head.appendChild(el("span", "caret", "▾"));
+  head.appendChild(el("span", "tlabel", "Thinking"));
+  // its first line, so a long chat can be skimmed without opening every block
+  const first = String(text || "").trim().split("\n").find((l) => l.trim());
+  if (first) head.appendChild(el("span", "tprev", first.trim()));
+
+  const body = el("div", "think-body md");
+  body.dataset.raw = text;              // the unescaped original, as in .msg
+  body.innerHTML = mdToHtml(text);
+
+  const setOpen = (open) => {
+    box.classList.toggle("open", open);
+    body.hidden = !open;
+    head.setAttribute("aria-expanded", String(open));
+  };
+  head.addEventListener("click", () => {
+    // one choice applies to every block, now and after the next reload
+    thinkOpen = !box.classList.contains("open");
+    localStorage.setItem("thinkopen", thinkOpen ? "1" : "0");
+    setOpen(thinkOpen);
+  });
+
+  setOpen(thinkOpen);
+  box.appendChild(head);
+  box.appendChild(body);
+  els.msgs.appendChild(box);
+  return box;
+}
+
 const variantIndex = new Map();   // image rel path -> generation card record
 
 // '/outputs/<rel>' -> '<rel>'; a bare name passes through (older saves)
@@ -558,6 +599,7 @@ function renderHistory(timeline) {
   timeline.forEach((evt, i) => {
     if (evt.type === "user") { const m = addBubble("user", evt.text); m.dataset.idx = i; }
     else if (evt.type === "reply") { const m = addBubble("ai", evt.text); m.dataset.idx = i; }
+    else if (evt.type === "think") { addThink(evt.text); }
     else if (evt.type === "error") { const m = addBubble("error", evt.text); m.dataset.idx = i; }
     else if (evt.type === "tool_error") { const m = addBubble("error", `✗ ${evt.name} — ${evt.error}`); m.dataset.idx = i; }
     else if (evt.type === "generation") { addGeneration(evt, i); markToolDone(lastTool()); }
@@ -770,6 +812,11 @@ function handleEvent(evt) {
       stopProgressPolling();
       markToolDone(lastTool());
       tagIdx(addBubble("ai", evt.text), evt.idx);
+      break;
+    case "think":
+      // no index to tag: nothing here is addressable, and tagging it would
+      // only invite a delete the server has no answer for
+      addThink(evt.text);
       break;
     case "error":
       stopProgressPolling();
@@ -2457,7 +2504,6 @@ function renderLoras() {
 let dlItems = [];
 let dlCursor = "";
 let dlBusy = false;
-let dlQuery = "";
 
 async function searchLoras(reset) {
   if (dlBusy) return;
@@ -2466,7 +2512,7 @@ async function searchLoras(reset) {
   els.shDlState.textContent = "searching…";
   const q = els.shDlQ.value.trim();
   const tag = els.shDlTag.value.trim();
-  if (reset) { dlQuery = q + " " + tag; dlItems = []; dlCursor = ""; }
+  if (reset) { dlItems = []; dlCursor = ""; }
   try {
     const p = new URLSearchParams({
       q, sort: els.shDlSort.value, period: els.shDlPeriod.value, tag,
