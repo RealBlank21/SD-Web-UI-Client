@@ -294,6 +294,12 @@ _FORGE_DENY = (ipaddress.ip_network("127.0.0.0/8"),
                ipaddress.ip_network("169.254.0.0/16"),
                ipaddress.ip_network("0.0.0.0/8"))
 
+#: Hostname or literal IP. Deliberately permissive about *which* names exist
+#: (the resolution check below decides that) and strict about the shape, so
+#: "not a url" and "my forge" are rejected before anything is dialled.
+_FORGE_HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}"
+                            r"[A-Za-z0-9])?$")
+
 
 def _forge_ip_allowed(ip: ipaddress._BaseAddress) -> bool:
     if isinstance(ip, ipaddress.IPv6Address):
@@ -329,6 +335,11 @@ def validate_forge_url(url: str, is_admin: bool = False) -> tuple[bool, str]:
     host = parts.hostname
     if not host:
         return False, "no host in that address"
+    # A syntax check for *everyone*, admin included. The admin bypass is about
+    # the address range, not about accepting "not a url" — without this an
+    # operator typo was written straight into a new account's config.
+    if not _FORGE_HOST_RE.match(host):
+        return False, f"{host!r} is not a hostname or IP"
     if is_admin:
         return True, ""
     try:
@@ -551,8 +562,19 @@ def public_user(u: dict) -> dict:
 # command line cannot drift apart. The CLI is a thin wrapper over these.
 
 def create_user(name: str, password: str, role: str = ROLE_USER,
-                actor: dict | None = None) -> dict:
-    """Create an account. Raises ValueError on a bad or duplicate name."""
+                actor: dict | None = None, api_key: str = "",
+                sd_url: str = "") -> dict:
+    """Create an account. Raises ValueError on a bad or duplicate name.
+
+    `api_key` and `sd_url` are optional and both nullable — an admin can
+    provision someone else's BYOK credentials here instead of making them
+    paste two secrets into the app themselves. Omitted or empty means "leave
+    the template's defaults", which is a working account with no key.
+
+    The URL is validated with the admin bypass, because the operator owns the
+    box and may legitimately point someone at a Forge on an address the
+    per-user SSRF guard would refuse.
+    """
     name = (name or "").strip()
     if not name or len(name) > 40:
         raise ValueError("name must be 1-40 characters")
@@ -567,9 +589,31 @@ def create_user(name: str, password: str, role: str = ROLE_USER,
          "role": ROLE_ADMIN if role == ROLE_ADMIN else ROLE_USER,
          "pass_hash": hash_password(password),
          "created": int(time.time()), "disabled": False}
+    sd_url = (sd_url or "").strip().rstrip("/")
+    if sd_url:
+        ok, why = validate_forge_url(sd_url, is_admin=True)
+        if not ok:
+            raise ValueError(f"image server: {why}")
     users.append(u)
     save_users(users)
+    # Written as a partial config: load_config(uid) merges over the template,
+    # so only the fields actually supplied are pinned.
+    seeded = {}
+    if api_key.strip():
+        seeded["openrouter_key"] = api_key.strip()
+    if sd_url:
+        seeded["sd_url"] = sd_url
+    if seeded:
+        _write_json_atomic(user_state_file(u["id"], "config.json"), seeded,
+                            indent=2)
     audit(actor or CLI_ACTOR, "user.create", u["id"], name)
+    if seeded:
+        # Log only what was actually seeded. "key left unset" is not an action,
+        # and recording it buries the entries that are.
+        if api_key.strip():
+            audit(actor or CLI_ACTOR, "settings.key", u["id"], "set")
+        if sd_url:
+            audit(actor or CLI_ACTOR, "settings.sd_url", u["id"], sd_url)
     return u
 
 
@@ -5427,7 +5471,9 @@ class Handler(BaseHTTPRequestHandler):
                 u = create_user(str(body.get("name") or ""),
                                 str(body.get("password") or ""),
                                 str(body.get("role") or ROLE_USER),
-                                actor=self._user())
+                                actor=self._user(),
+                                api_key=str(body.get("api_key") or ""),
+                                sd_url=str(body.get("sd_url") or ""))
                 result = {"id": u["id"]}
             elif action == "passwd":
                 u = set_user_password(uid, str(body.get("password") or ""),
@@ -6262,6 +6308,10 @@ def main():
     # the admin needs a way in that does not involve editing users.json.
     ap.add_argument("--add-user", metavar="NAME",
                     help="create an account and prompt for its password")
+    ap.add_argument("--with-key", metavar="KEY",
+                    help="seed the new account's OpenRouter key")
+    ap.add_argument("--with-sd-url", metavar="URL",
+                    help="seed the new account's image server")
     ap.add_argument("--admin", action="store_true",
                     help="--add-user creates an admin, not a normal user")
     ap.add_argument("--passwd", metavar="NAME",
@@ -6290,7 +6340,9 @@ def main():
             if args.add_user:
                 pw = _prompt_pw(f"password for {args.add_user.strip()}: ")
                 u = create_user(args.add_user, pw,
-                                ROLE_ADMIN if args.admin else ROLE_USER)
+                                ROLE_ADMIN if args.admin else ROLE_USER,
+                                api_key=args.with_key or "",
+                                sd_url=args.with_sd_url or "")
                 print(f"created {u['role']} {u['id']} ({u['name']})")
             else:
                 pw = _prompt_pw("new password: ")

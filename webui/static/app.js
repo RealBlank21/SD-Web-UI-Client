@@ -1791,7 +1791,8 @@ function wireAdmin() {
   const mk = $("ad-create");
   if (mk) mk.addEventListener("click", adminCreate);
   const nm = $("ad-name"), pw = $("ad-pass");
-  for (const f of [nm, pw]) {
+  for (const f of [nm, pw, $("ad-key"), $("ad-url")]) {
+    if (!f) continue;
     if (!f) continue;
     f.addEventListener("keydown", (e) => {
       if (e.key === "Enter") adminCreate();
@@ -1805,10 +1806,20 @@ function adminCreate() {
   const name = ($("ad-name").value || "").trim();
   const pw = $("ad-pass").value || "";
   if (!name || !pw) { toast("name and password required", true); return; }
-  adminCall({ action: "create", name, password: pw,
-              role: $("ad-admin").checked ? "admin" : "user" }, "create")
-    .then(() => { $("ad-name").value = ""; $("ad-pass").value = "";
-                  $("ad-admin").checked = false; });
+  // Both optional: blank means "leave the template's default", which is a
+  // working account with no key that the user fills in themselves.
+  const body = { action: "create", name, password: pw,
+                 role: $("ad-admin").checked ? "admin" : "user" };
+  const key = ($("ad-key").value || "").trim();
+  const url = ($("ad-url").value || "").trim();
+  if (key) body.api_key = key;
+  if (url) body.sd_url = url;
+  adminCall(body, "create").then(() => {
+    for (const id of ["ad-name", "ad-pass", "ad-key", "ad-url"]) {
+      const f = $(id); if (f) f.value = "";
+    }
+    $("ad-admin").checked = false;
+  });
 }
 
 async function loadAudit() {

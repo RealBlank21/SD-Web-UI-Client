@@ -890,14 +890,35 @@ button.tagchip.on {
 }
 .ad-user .ad-meta .warn { color: #e0b04a; }
 .ad-user .ad-acts { display: flex; gap: 6px; margin-top: 9px; flex-wrap: wrap; }
-.ad-user .ad-acts button { padding: 7px 11px; font-size: 12.5px; }
-.ad-user .ad-acts .del { color: #e08a8a; }
+/* the global `button` rule is `background:none; border:0`, so every button in
+   this app is styled individually. These need the full treatment or they are
+   invisible — padding alone is not enough. */
+.ad-user .ad-acts button {
+  padding: 8px 12px; border-radius: 10px; font-size: 12.5px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line);
+}
+.ad-user .ad-acts button:active { transform: scale(.97); }
+.ad-user .ad-acts button:disabled { opacity: .45; cursor: default; }
+.ad-user .ad-acts button.del {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 30%, var(--line));
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+}
 
 .ad-check {
   display: flex; align-items: center; gap: 7px; font-size: 12.5px;
   color: var(--dim); white-space: nowrap;
 }
 .ad-check input { width: 16px; height: 16px; accent-color: var(--accent); }
+/* the create row, styled like the other settings save buttons */
+#ad-create {
+  padding: 10px 16px; border-radius: 10px; font-size: 13.5px; flex: none;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #14101f;
+}
+#ad-create:disabled { opacity: .5; }
+#ad-name, #ad-pass, #ad-url { flex: 1; min-width: 0; }
 
 .ad-audit { margin-top: 8px; display: flex; flex-direction: column; gap: 1px; }
 .ad-ev {
