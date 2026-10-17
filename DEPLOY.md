@@ -11,17 +11,25 @@ data/            created at runtime: config.json, session secret, chat state
 outputs/         generated images
 ```
 
-## 1. Upload to the server
+## 1. Get the code onto the server
+
+The app runs straight from a git checkout — there is no separate build or
+staging copy, and the systemd unit's paths point at that same checkout.
 
 ```bash
-rsync -av --exclude data --exclude outputs --exclude __pycache__ \
-    sd-agent-web/ user@server:/opt/sd-agent/
+git clone https://github.com/RealBlank21/SD-Web-UI-Client.git \
+    ~/storage/sd-agent
+cd ~/storage/sd-agent
 ```
+
+From then on, updates are `git pull` (or `python deploy/remote_pull.py` from
+the PC, which pulls, restarts and verifies). Never edit the checkout on the
+server — GitHub is the only sync channel.
 
 ## 2. Install
 
 ```bash
-cd /opt/sd-agent
+cd ~/storage/sd-agent
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
@@ -56,6 +64,11 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now sd-agent
 systemctl status sd-agent
 ```
+
+`WorkingDirectory`, `ExecStart` and `ReadWritePaths` must all point at the
+checkout, and `ReadWritePaths` must agree with `ProtectHome=read-only` — the
+app lives under `$HOME`, so that one path has to be carved back out or the
+service starts and then cannot write `data/` or `outputs/`.
 
 ## 5. Caddy reverse proxy
 
