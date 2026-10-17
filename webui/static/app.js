@@ -172,6 +172,8 @@ const els = {
   chTemp: $("ch-temp"), chMaxtok: $("ch-maxtok"),
   chShared: $("ch-shared"),
   chDelete: $("ch-delete"),
+  shInjChar: $("sh-inj-char"), shInjPersona: $("sh-inj-persona"),
+  shInjLora: $("sh-inj-lora"),
   toast: $("toast"),
 };
 
@@ -2121,6 +2123,11 @@ async function openSettings() {
       els.shGuide.value = cfg.model_guide || "";
       els.shGuideState.textContent = cfg.model_guide_custom ? "· custom" : "· model_guide.txt";
       els.shUsername.value = cfg.username || "";
+      // injection switches: absent in an older config means on
+      for (const [el, key] of INJ_TOGGLES) {
+        el.checked = cfg[key] !== false;
+        el.parentElement.classList.toggle("on", el.checked);
+      }
       savedComps = cfg.sd_components || {};
       renderComps(cfg.current_arch || s.current_arch || "");
     } catch (e) {
@@ -2906,9 +2913,12 @@ async function applyComps(arch, values) {
 }
 
 async function saveSettings(patch, btn, okMsg) {
-  const orig = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "Saving…";
+  // btn is optional — toggles that save the instant they flip have no button
+  const orig = btn ? btn.textContent : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+  }
   try {
     const d = await api("/api/settings", {
       method: "POST",
@@ -2921,8 +2931,10 @@ async function saveSettings(patch, btn, okMsg) {
   } catch (e) {
     if (e.message !== "locked") toast(e.message, true);
   } finally {
-    btn.disabled = false;
-    btn.textContent = orig;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
   }
 }
 
@@ -5150,6 +5162,21 @@ $("sh-save-username").addEventListener("click", () => {
   saveSettings({ username: els.shUsername.value.trim() },
     $("sh-save-username"), "Name saved");
 });
+/* Auto-injected tag switches (Settings > Generation > Text). Each saves the
+   moment it is flipped — a boolean has nothing to review, and the toast says
+   which way it went. */
+const INJ_TOGGLES = [
+  [els.shInjChar, "inject_char_tags", "Character tag injection"],
+  [els.shInjPersona, "inject_persona_tags", "Persona tag injection"],
+  [els.shInjLora, "inject_lora_tags", "LoRA tag injection"],
+];
+for (const [el, key, label] of INJ_TOGGLES) {
+  el.addEventListener("change", () => {
+    el.parentElement.classList.toggle("on", el.checked);
+    saveSettings({ [key]: el.checked }, null,
+      `${label} ${el.checked ? "on" : "off"}`);
+  });
+}
 $("sh-logout").addEventListener("click", async () => {
   try { await api("/api/logout", { method: "POST" }); } catch { /* ignore */ }
   showGate();

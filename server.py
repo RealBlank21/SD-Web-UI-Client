@@ -131,6 +131,14 @@ DEFAULT_CONFIG = {
     #           "sd_vae": "qwen_image_vae.safetensors",
     #           "low_bits": "float8-e4m3fn"}}
     "sd_components": {},
+    # Per-user switches for the tags the server adds to image prompts on its
+    # own (Settings > Generation > Text). Each one silences exactly one
+    # source; the model's own prompt text is never rewritten beyond that.
+    # Defaults are True and stay True for existing configs that predate the
+    # keys — load_config starts from this dict, so a missing key reads as on.
+    "inject_char_tags": True,     # active card's appearance tags
+    "inject_persona_tags": True,  # user persona's tags when the shot draws them
+    "inject_lora_tags": True,     # the card's <lora:…> activation tags
 }
 
 
@@ -1804,10 +1812,17 @@ class Agent:
             if ds:
                 block += f"\nDescription: {ds}"
             if ap:
-                block += ("\nAppearance — these tags are authoritative and the "
-                          "app injects them automatically into every image that "
-                          "draws the user, so you do not need to write them "
-                          "yourself:\n" + ap)
+                if self.cfg.get("inject_persona_tags", True):
+                    block += ("\nAppearance — these tags are authoritative and "
+                              "the app injects them automatically into every "
+                              "image that draws the user, so you do not need "
+                              "to write them yourself:\n" + ap)
+                else:
+                    # auto-injection is switched off, so the model has to
+                    # write them itself — leaving the "you do not need to"
+                    # sentence there would lose the user's look entirely
+                    block += ("\nAppearance — write these tags yourself into "
+                              "every image prompt that draws the user:\n" + ap)
             base += block
         else:
             user = (self.cfg.get("username") or "").strip()
@@ -1847,7 +1862,12 @@ class Agent:
         # above: a card can have a LoRA and no written appearance yet, and the
         # trigger word is exactly what the model needs in that case. The plain
         # assistant has no LoRAs, so it still contributes nothing.
-        if c:
+        # The block claims the LoRAs are "already loaded on every image" —
+        # true only while the server is the one writing the tags. With the
+        # injection switch off they are not applied, and a trigger word the
+        # model was told rides along automatically would prompt for weights
+        # that never load: the exact silently-wrong image the design avoids.
+        if c and self.cfg.get("inject_lora_tags", True):
             base += lora_prompt_block(self.lora_entries())
         sc = None
         if self.scenario_id and c:
@@ -2618,14 +2638,22 @@ class Agent:
             return result
         is_gen = name in GEN_TOOLS
         if is_gen and self.char:
-            # identity tags are authoritative — add them if the model forgot.
-            # The persona's look only joins a shot that actually draws the
-            # user; a lone "another's hand" or a "thighs framing viewer" tag
-            # must not pull their whole body into frame.
-            args["prompt"] = ensure_tags(args.get("prompt", ""),
-                                         self.char_tags(),
-                                         self.persona_appearance(),
-                                         args.get("negative_prompt", ""))
+            # Each tag source the server adds on its own is individually
+            # switchable (Settings > Generation > Text); a switch that is off
+            # contributes nothing, and with both tag sources off the prompt is
+            # sent exactly as the model wrote it.
+            inj_char = self.cfg.get("inject_char_tags", True)
+            inj_view = self.cfg.get("inject_persona_tags", True)
+            if inj_char or inj_view:
+                # identity tags are authoritative — add them if the model
+                # forgot. The persona's look only joins a shot that actually
+                # draws the user; a lone "another's hand" or a "thighs framing
+                # viewer" tag must not pull their whole body into frame.
+                args["prompt"] = ensure_tags(
+                    args.get("prompt", ""),
+                    self.char_tags() if inj_char else "",
+                    self.persona_appearance() if inj_view else "",
+                    args.get("negative_prompt", ""))
             # preferred checkpoint applies when the model didn't pick one
             cp = (self.char.get("checkpoint") or "").strip()
             if cp and not args.get("model"):
@@ -2645,24 +2673,32 @@ class Agent:
             # reordered or dropped by the count reconciliation. The model's
             # arch is resolved here, after any card checkpoint switch, because
             # it decides which LoRAs can load at all.
-            larch = self.client.arch_for(args["model"]) \
-                if args.get("model") else self.client.current_arch()
-            entries = card_loras(self.char, larch,
-                                _installed_loras(self.client))
-            tags, applied, skipped = lora_tag_list(entries)
-            # Strip whatever the model wrote either way. It is never told a
-            # LoRA exists, so any tag in its output is invented — and an
-            # invented name fails silently in Forge, producing an image that
-            # looks fine and is missing the character.
-            args["prompt"], _ = apply_lora_tags(args.get("prompt", ""), tags)
-            args["_loras"] = [{"name": e["name"], "weight": e["weight"]}
-                              for e in applied]
-            notes_l = list(skipped)
-            total = sum(e["weight"] for e in applied)
-            if total > LORA_SUM_WARN:
-                notes_l.append(f"LoRA weights total {total:.2f} — above "
-                               f"{LORA_SUM_WARN}, expect a blended look")
-            args["_lora_notes"] = notes_l
+            if self.cfg.get("inject_lora_tags", True):
+                larch = self.client.arch_for(args["model"]) \
+                    if args.get("model") else self.client.current_arch()
+                entries = card_loras(self.char, larch,
+                                    _installed_loras(self.client))
+                tags, applied, skipped = lora_tag_list(entries)
+                args["prompt"], _ = apply_lora_tags(args.get("prompt", ""),
+                                                    tags)
+                args["_loras"] = [{"name": e["name"], "weight": e["weight"]}
+                                  for e in applied]
+                notes_l = list(skipped)
+                total = sum(e["weight"] for e in applied)
+                if total > LORA_SUM_WARN:
+                    notes_l.append(f"LoRA weights total {total:.2f} — above "
+                                   f"{LORA_SUM_WARN}, expect a blended look")
+                args["_lora_notes"] = notes_l
+            else:
+                # Strip whatever the model wrote. It is never told a LoRA
+                # exists, so any tag in its output is invented — and an
+                # invented name fails silently in Forge, producing an image
+                # that looks fine and is missing the character. Stripping is
+                # not part of the injection toggle: it guards against
+                # hallucination, not for it, so it stays on even with LoRA
+                # injection off. (With injection on, apply_lora_tags strips
+                # before it appends.)
+                args["prompt"], _ = strip_lora_tags(args.get("prompt", ""))
         emit({"type": "tool_start", "name": name})
         out = {"result": None, "error": None}
 
@@ -5705,6 +5741,10 @@ class Handler(BaseHTTPRequestHandler):
                         "model_guide": guide or default_guide_text(),
                         "model_guide_custom": bool(guide),
                         "username": cfg.get("username", ""),
+                        "inject_char_tags": cfg.get("inject_char_tags", True),
+                        "inject_persona_tags":
+                            cfg.get("inject_persona_tags", True),
+                        "inject_lora_tags": cfg.get("inject_lora_tags", True),
                         "sd_components": cfg.get("sd_components") or {},
                         "current_arch": sd["current_arch"],
                         "sd_ok": sd["sd_ok"], "sd_error": sd["error"],
@@ -5799,6 +5839,10 @@ class Handler(BaseHTTPRequestHandler):
             guide_touched = True
         if "username" in body:
             cfg["username"] = str(body["username"]).strip()[:60]
+        for key in ("inject_char_tags", "inject_persona_tags",
+                    "inject_lora_tags"):
+            if key in body:
+                cfg[key] = bool(body[key])
         if "sd_components" in body:
             comps = body["sd_components"]
             if not isinstance(comps, dict):

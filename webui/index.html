@@ -375,6 +375,14 @@
         </div>
         <div class="hint">One <span class="mono">### checkpoint.safetensors</span> block per model: prompt, then <span class="mono">Negative prompt:</span>, then <span class="mono">Steps:</span> / <span class="mono">CFG scale:</span> / <span class="mono">Sampler:</span>. Saving stores an override in the config — model_guide.txt itself is left untouched, so reset always brings the file back. Applies from the next message on.</div>
       </details>
+
+      <label>Auto-injected tags</label>
+      <div class="row">
+        <label class="tgl"><input type="checkbox" id="sh-inj-char" checked> Character</label>
+        <label class="tgl"><input type="checkbox" id="sh-inj-persona" checked> Persona</label>
+        <label class="tgl"><input type="checkbox" id="sh-inj-lora" checked> LoRAs</label>
+      </div>
+      <div class="hint">Tags the server adds to every image prompt on its own. <span class="mono">Character</span> — the active card's appearance tags. <span class="mono">Persona</span> — your persona's tags, on shots that draw you. <span class="mono">LoRAs</span> — the card's <span class="mono">&lt;lora:…&gt;</span> tags; off also stops the model being told their trigger words. Off sends the model's prompt as written. Applies from the next image on.</div>
     </div>
     <div class="gen-pane" data-gpane="image" hidden>
       <label>SD WebUI server URL <span class="dim" id="sh-sdok"></span></label>
