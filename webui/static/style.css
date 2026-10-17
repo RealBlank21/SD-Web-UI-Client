@@ -731,6 +731,19 @@ button.tagchip.on {
 }
 .subtabs button.on { background: var(--panel2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
 
+/* the nested row inside Settings → Generation. Smaller and on a different
+   background so it reads as a level below the main one, and without the
+   outer margins (it already sits inside .ps-body's padding). */
+.subtabs.sub {
+  margin: 12px 0 4px; background: var(--panel2);
+  position: sticky; top: 0; z-index: 2;
+}
+.subtabs.sub button { font-size: 12.5px; padding: 7px 2px; }
+.subtabs.sub button.on { background: var(--bg); }
+/* .sh-body is a flex column, so the panes need to be allowed to keep their
+   own height rather than being squeezed by the sticky nav above them. */
+.gen-pane { display: flex; flex-direction: column; gap: 6px; flex: none; }
+
 /* two-choice segmented control (Settings → Visuals: lightbox mode) */
 .seg {
   display: flex; gap: 2px; padding: 4px;

@@ -1649,6 +1649,23 @@ function ddInit() {
 
 /* settings — full page with Chatterbox-style sub-tabs */
 
+/** Second-level tabs inside Settings -> Generation. Separate from setPsTab
+ *  because they address [data-gpane] divs within one pane, not whole
+ *  sections — and they restore their own scroll position independently. */
+function setGenTab(name) {
+  for (const b of document.querySelectorAll("#ps-gen-tabs button")) {
+    b.classList.toggle("on", b.dataset.gtab === name);
+  }
+  for (const s of document.querySelectorAll("[data-gpane]")) {
+    s.hidden = s.dataset.gpane !== name;
+  }
+  // Each pane fetches its own content on first open: the model picker needs
+  // its catalogue and the LoRA list is the pane. The image pane needs
+  // nothing — paintImageTab is repainted by the status poll.
+  if (name === "text") loadLlmModels(false);
+  if (name === "lora") loadLoras();
+}
+
 function setPsTab(name) {
   for (const b of document.querySelectorAll("#ps-tabs button")) {
     b.classList.toggle("on", b.dataset.tab === name);
@@ -1657,9 +1674,13 @@ function setPsTab(name) {
     s.hidden = s.dataset.pane !== name;
   }
   document.querySelector(".ps-body").scrollTop = 0;
-  if (name === "llm") loadLlmModels(false);     // the picker needs the list
-  if (name === "loras") loadLoras();            // the list is the pane's content
-  if (name === "admin") loadAdmin();            // likewise
+  if (name === "admin") loadAdmin();
+  // Re-enter Generation on the sub-tab the user was last on. Snapping back
+  // to Text every time reads as if their selection had been lost.
+  if (name === "gen") {
+    const on = document.querySelector("#ps-gen-tabs button.on");
+    setGenTab(on ? on.dataset.gtab : "text");
+  }
 }
 
 /* ---------------------------------------------------------------- admin
@@ -4816,6 +4837,12 @@ els.input.addEventListener("keydown", (e) => {
 $("ps-back").addEventListener("click", () => { els.pageSettings.hidden = true; });
 for (const b of document.querySelectorAll("#ps-tabs button")) {
   b.addEventListener("click", () => setPsTab(b.dataset.tab));
+}
+for (const b of document.querySelectorAll("#ps-gen-tabs button")) {
+  b.addEventListener("click", () => {
+    setGenTab(b.dataset.gtab);
+    document.querySelector(".ps-body").scrollTop = 0;
+  });
 }
 
 // --- LoRAs ---

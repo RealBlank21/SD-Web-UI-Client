@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=90">
+<link rel="stylesheet" href="/static/style.css?v=91">
 </head>
 <body>
 
@@ -305,9 +305,7 @@
   </div>
   <nav class="subtabs" id="ps-tabs">
     <button class="on" data-tab="persona">Persona</button>
-    <button data-tab="llm">LLM</button>
-    <button data-tab="image">Image</button>
-    <button data-tab="loras">LoRAs</button>
+    <button data-tab="gen">Generation</button>
     <button data-tab="visuals">Appearance</button>
     <button data-tab="admin" id="ps-admin-tab" hidden>Admin</button>
   </nav>
@@ -323,7 +321,13 @@
       <div class="hint">A persona tells the AI who you are — name, background, how you speak. The selected one is sent with every chat. Long-press a persona to edit or delete it.</div>
     </section>
 
-    <section class="sh-body" data-pane="llm" hidden>
+    <section class="sh-body" data-pane="gen" hidden>
+      <nav class="subtabs sub" id="ps-gen-tabs">
+      <button class="on" data-gtab="text">Text</button>
+      <button data-gtab="image">Image</button>
+      <button data-gtab="lora">LoRA</button>
+    </nav>
+    <div class="gen-pane" data-gpane="text" hidden>
       <label>OpenRouter API key <span class="dim" id="sh-keymask"></span></label>
       <input id="sh-key" type="password" class="mono" placeholder="sk-or-…"
              autocomplete="off" spellcheck="false" autocapitalize="off">
@@ -364,9 +368,8 @@
         </div>
         <div class="hint">One <span class="mono">### checkpoint.safetensors</span> block per model: prompt, then <span class="mono">Negative prompt:</span>, then <span class="mono">Steps:</span> / <span class="mono">CFG scale:</span> / <span class="mono">Sampler:</span>. Saving stores an override in the config — model_guide.txt itself is left untouched, so reset always brings the file back. Applies from the next message on.</div>
       </details>
-    </section>
-
-    <section class="sh-body" data-pane="image" hidden>
+    </div>
+    <div class="gen-pane" data-gpane="image" hidden>
       <label>SD WebUI server URL <span class="dim" id="sh-sdok"></span></label>
       <input id="sh-sd" class="mono" spellcheck="false" autocomplete="off" autocapitalize="off"
              placeholder="http://100.93.220.68:7860">
@@ -387,9 +390,8 @@
         <button id="sh-comp-save">Save components</button>
         <button id="sh-comp-apply" class="primary">Apply now</button>
       </div>
-    </section>
-
-    <section class="sh-body" data-pane="loras" hidden>
+    </div>
+    <div class="gen-pane" data-gpane="lora" hidden>
       <label>LoRAs <span class="dim" id="sh-loracount"></span></label>
       <div class="lora-tools">
         <input id="sh-lora-q" class="mono wide" spellcheck="false" autocomplete="off"
@@ -437,11 +439,8 @@
         <button id="sh-dl-more" hidden>Load more</button>
         <div class="hint">Tag is CivitAI's own tagging — an unknown tag is ignored and you get everything back, so check the results actually changed. Downloads land in the app's own <span class="mono">data/loras</span> folder, which the SD server also scans. Every file is checksummed before being kept, and the list above refreshes the moment one lands.</div>
       </details>
-    </section>
-
-    <div id="lora-modal" hidden>
-      <div id="lora-modal-card"></div>
     </div>
+    </section>
 
     <section class="sh-body" data-pane="visuals" hidden>
       <label>Characters <span class="dim">— how the list is laid out</span></label>
@@ -735,6 +734,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=90"></script>
+<script src="/static/app.js?v=91"></script>
 </body>
 </html>
