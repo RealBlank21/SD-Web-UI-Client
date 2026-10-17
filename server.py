@@ -3971,7 +3971,13 @@ class Handler(BaseHTTPRequestHandler):
         browser revalidates each load (giving a new image) yet a repeat pick
         costs a 304 rather than re-downloading the bytes.
         """
-        picks = sorted(LOGIN_BG_DIR.glob("*.jpg")) if LOGIN_BG_DIR.is_dir() else []
+        allp = sorted(LOGIN_BG_DIR.glob("*.jpg")) if LOGIN_BG_DIR.is_dir() else []
+        # ?orient=portrait|landscape — the gate's CSS orientation media query
+        # picks the URL, so the browser decides and no JS is involved. Falls
+        # back to the full pool when a user has only one orientation.
+        want = (parse_qs(urlparse(self.path).query).get("orient") or [""])[0]
+        picks = ([p for p in allp if f"-{want}." in p.name]
+                 if want in ("portrait", "landscape") else allp) or allp
         if not picks:
             # No curated images yet — 204 lets the gate keep its gradient instead
             # of showing a broken background.

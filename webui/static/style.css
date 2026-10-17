@@ -52,11 +52,18 @@ button:active { transform: scale(.97); }
   background: var(--bg);
   /* Refetched on every load, so the backdrop differs each time. The route
      204s when data/login-bg/ is empty, which leaves the gradient above
-     showing rather than a broken image. --gate-bg overrides it when set. */
-  background-image: var(--gate-bg, url("/login-bg"));
+     showing rather than a broken image. --gate-bg overrides it when set.
+
+     Orientation is a media query rather than JS: the browser picks the URL
+     itself, so it costs nothing, works before app.js runs, and re-fetches
+     when a phone is rotated. */
+  background-image: var(--gate-bg, url("/login-bg?orient=landscape"));
   background-size: cover;
   background-position: center;
   padding: 24px;
+}
+@media (orientation: portrait) {
+  #gate { background-image: var(--gate-bg, url("/login-bg?orient=portrait")); }
 }
 /* Darken the photo enough that the card's text contrast does not depend on
    what is behind it. A hard multiply rather than a gradient, so every corner
