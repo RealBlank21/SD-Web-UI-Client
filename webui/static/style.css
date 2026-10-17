@@ -47,10 +47,13 @@ button:active { transform: scale(.97); }
   border-radius: 18px; padding: 28px 22px;
   display: flex; flex-direction: column; gap: 12px;
 }
-.gate-spark {
-  font-size: 40px; line-height: 1;
-  background: linear-gradient(135deg, var(--accent), var(--accent2));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
+/* The login card's mark is the app icon, not the old sparkle glyph. Served at
+   192 and displayed at 64 so it stays crisp on a 3x screen; alt="" because the
+   "SD Agent" heading right below it already names the app. */
+.gate-mark {
+  width: 64px; height: 64px; align-self: center; display: block;
+  border-radius: 14px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .45);
 }
 .gate-card b { font-size: 18px; }
 .gate-card p { font-size: 13px; color: var(--dim); }
