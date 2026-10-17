@@ -4441,6 +4441,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         q = Queue()
         agent.stop_flag.clear()
+        # A new thread starts with an empty context, so the outputs scope
+        # (and anything else request-scoped) would be lost and
+        # run_regeneration would look the image up in the unscoped root —
+        # "image not found" for every user, whose rel paths are relative to
+        # outputs/<uid>/. Copy the request context across; the nested thread
+        # gets its own copy because a Context cannot be entered from two
+        # threads at once.
+        wctx = contextvars.copy_context()
+        rctx = contextvars.copy_context()
 
         def worker():
             out = {"evt": None, "error": None}
@@ -4452,7 +4461,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:            # noqa: BLE001 — report all
                     out["error"] = f"{type(e).__name__}: {e}"
 
-            th = threading.Thread(target=work, daemon=True)
+            th = threading.Thread(target=rctx.run, args=(work,), daemon=True)
             th.start()
             try:
                 while th.is_alive():
@@ -4491,7 +4500,8 @@ class Handler(BaseHTTPRequestHandler):
                 agent.lock.release()
                 q.put({"type": "done"})
 
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=wctx.run, args=(worker,),
+                         daemon=True).start()
         self._sse_stream(q)
 
     def api_chat(self):
