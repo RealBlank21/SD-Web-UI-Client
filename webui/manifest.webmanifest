@@ -1,6 +1,6 @@
 {
-  "name": "SD Agent",
-  "short_name": "SD Agent",
+  "name": "Chatterbox",
+  "short_name": "Chatterbox",
   "description": "AI art agent — chat with an LLM that drives Stable Diffusion, plus a gallery of your generations.",
   "start_url": "/",
   "scope": "/",

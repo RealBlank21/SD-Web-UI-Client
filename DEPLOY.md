@@ -1,4 +1,4 @@
-# SD Agent — deployment (Linux home server behind Caddy)
+# Chatterbox — deployment (Linux home server behind Caddy)
 
 Standalone: no imports from the old project. Layout:
 

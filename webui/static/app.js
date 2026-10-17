@@ -1,4 +1,4 @@
-/* SD Agent — frontend logic (PWA) */
+/* Chatterbox — frontend logic (PWA) */
 "use strict";
 
 /* ------------------------------------------------- version-skew guard (FIRST)
