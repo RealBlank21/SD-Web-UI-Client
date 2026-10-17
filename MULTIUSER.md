@@ -1,6 +1,6 @@
 # Multi-user plan
 
-Status: **Phase 0 in progress.** This is the decision record plus the phase
+Status: **Phases 0-1 done.** This is the decision record plus the phase
 order it implies. Read this before changing anything in `server.py`'s auth or
 persistence paths.
 
@@ -79,7 +79,7 @@ references and the favourite-first sort all have to respect the
 Phase 3 before 2 is deliberate — the fairness/ownership policy decides what
 "multi-user" feels like and is cheap once users have identities.
 
-### Phase 0 — identity  *(in progress)*
+### Phase 0 — identity  *(done)*
 
 - `data/users.json`: `id`, `name`, `pass_hash`, `role` (`admin`|`user`),
   `created`, `disabled`.
@@ -96,7 +96,7 @@ Phase 3 before 2 is deliberate — the fairness/ownership policy decides what
   exists.** `qa_probe.py:276` and the manual driving recipe in AGENTS.md both
   post `{"password": …}` only; that must keep working.
 
-### Phase 1 — storage relocation
+### Phase 1 — storage relocation  *(done)*
 
 - Create `data/users/<uid>/` and move `characters.json` + `chat_state.json`
   into the admin's directory (existing state inherits to the first admin).
@@ -107,8 +107,27 @@ Phase 3 before 2 is deliberate — the fairness/ownership policy decides what
   admin account.
 - Fix the non-atomic writes while the paths are being touched anyway:
   `save_personas` (bare `write_text`) and the chat writes in
-  `_save_state_locked` (lines ~1597, ~1606). A crash mid-write truncates a
-  chat, which matters more with several users than with one.
+  `_save_state_locked`. A crash mid-write truncates a chat, which matters
+  more with several users than with one.
+
+**Decisions 6 and 7 genuinely conflict, and characters are the exception.**
+Sharing is inherently cross-user: a card living in A's private directory
+cannot be offered to B, and there is only one `assistant` id so per-user
+assistant cards are impossible. So `characters.json` stays a single global
+file with `owner` + `shared`, and every read goes through
+`visible_characters(uid, is_admin)`. Decision 7 still holds for chats, chat
+state, personas and config.
+
+The wart that leaves: the assistant card is owned by the first admin and
+marked `shared` so everyone gets a plain chat, which means only an admin can
+edit it. Fixing that properly needs per-user character storage, which is what
+Phase 1 gave up to make sharing work.
+
+**What Phase 1 deliberately did *not* do:** the Agent is still one
+process-wide instance bound to the first admin's `uid`, so a second user's
+chat requests still read and write the admin's chat tree. `Handler._uid()`
+says so in its docstring. Character reads are already per-user and filtered.
+Phase 2 removes the shared Agent.
 
 ### Phase 2 — Agent per user
 

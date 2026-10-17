@@ -250,12 +250,16 @@ def prune_sessions(sess: dict, now: int | None = None) -> dict:
 
 
 def new_session(sess: dict, uid: str) -> str:
-    """Mint a session for `uid`, pruning expired ones on the way."""
-    sess.clear()
-    sess.update(prune_sessions(sess))
+    """Mint a session for `uid`, dropping expired ones on the way.
+
+    Prune *before* mutating. Clearing first and pruning the empty dict would
+    look correct and quietly log every other user out on every login."""
     token = secrets.token_urlsafe(32)
-    sess[_token_key(token)] = {"user": uid,
-                               "expires": int(time.time()) + SESSION_TTL}
+    pruned = prune_sessions(sess)
+    pruned[_token_key(token)] = {"user": uid,
+                                 "expires": int(time.time()) + SESSION_TTL}
+    sess.clear()
+    sess.update(pruned)
     save_sessions(sess)
     return token
 
@@ -950,36 +954,128 @@ def _clean_feedback(raw) -> dict:
             "reply": str(raw.get("reply") or "")[:300]}
 
 
-def load_characters() -> list:
-    if not CHARS_FILE.exists():
+# ------------------------------------------------------------------ users
+#
+# Per-user storage (MULTIUSER.md, Phase 1). Chats, chat state, personas and
+# config go under data/users/<uid>/, so backup and delete are per-user
+# operations rather than per-file archaeology. The Agent is still a
+# process-wide singleton until Phase 2 — only its *storage* is per-user.
+#
+# Characters are the exception and stay in ONE global file. They are
+# shareable (MULTIUSER.md decision 6), and sharing is inherently cross-user:
+# a card living in A's private directory cannot be offered to B. Splitting
+# them per-user and adding a separate shared pool would be strictly more code
+# for the same behaviour. So characters.json carries `owner` + `shared` and
+# every read goes through visible_characters(). Decisions 6 and 7 genuinely
+# conflict here; this is the resolution, and it means decision 7 holds for
+# everything that can actually be isolated.
+
+
+def user_dir(uid: str) -> Path:
+    return DATA_DIR / "users" / (uid or "u001")
+
+
+def user_state_file(uid: str, name: str) -> Path:
+    return user_dir(uid) / name
+
+
+def _write_json_atomic(path: Path, payload, indent=None) -> None:
+    """tmp + replace. Every state write goes through this: a bare
+    write_text truncated by a crash mid-write loses the whole file, and
+    under multi-user that is one user's chat, not a scratch file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=indent, ensure_ascii=False),
+                   encoding="utf-8")
+    tmp.replace(path)
+
+
+def _read_json_list(path: Path) -> list:
+    if not path.exists():
         return []
     try:
-        d = json.loads(CHARS_FILE.read_text(encoding="utf-8"))
+        d = json.loads(path.read_text(encoding="utf-8"))
         return d if isinstance(d, list) else []
     except Exception:
         return []
 
 
+def load_characters() -> list:
+    return _read_json_list(CHARS_FILE)
+
+
 def save_characters(chars: list) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = CHARS_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(chars, indent=2, ensure_ascii=False),
-                   encoding="utf-8")
-    tmp.replace(CHARS_FILE)
+    _write_json_atomic(CHARS_FILE, chars, indent=2)
 
 
-def ensure_assistant(chars: list) -> list:
+def card_owner(card: dict) -> str:
+    return str(card.get("owner") or "")
+
+
+def visible_characters(uid: str, is_admin: bool = False) -> list:
+    """Cards `uid` may see: their own, plus any marked shared.
+
+    Admins see everything (MULTIUSER.md decision 5 — full access), which is
+    why `is_admin` is a parameter and not a lookup here: this module has no
+    request context.
+
+    The filter lives in one place rather than at every call site, because
+    forgetting it in one place is a cross-tenant read."""
+    out = []
+    for c in load_characters():
+        if not isinstance(c, dict) or not c.get("id"):
+            continue
+        if is_admin:
+            out.append(c)
+            continue
+        owner = card_owner(c)
+        if not owner or owner == uid or c.get("shared"):
+            out.append(c)
+    return out
+
+
+def owned_by(uid: str) -> list:
+    """Just `uid`'s own cards — what the edit/delete endpoints act on."""
+    return [c for c in load_characters()
+            if isinstance(c, dict) and c.get("id") and card_owner(c) == uid]
+
+
+def can_edit_card(uid: str, card: dict, is_admin: bool = False) -> bool:
+    """Owned cards are editable; a shared card is read-only for everyone but
+    its owner. Admins bypass (MULTIUSER.md decision 5: full access)."""
+    if is_admin:
+        return True
+    return card_owner(card) == uid
+
+
+def ensure_assistant(chars: list, uid: str = "") -> list:
     """Guarantee the plain assistant card exists, appending it if missing.
 
     Empty persona / appearance / greeting on purpose: `_sys_msg` skips the
     character block entirely for a card with nothing in it, so this chats
     exactly like the free chat it replaced — no roleplay, no injected tags.
     Editable like any other card; deleting it just brings it back.
+
+    `shared` is set on purpose. Characters live in one global file with an
+    owner, and there is only one assistant *id*, so per-user assistant cards
+    are impossible. Without `shared` the plain chat would be visible only to
+    whoever happened to create it, and every other user would open the app to
+    an empty cast. Consequence to know about: it is owned by the first admin,
+    so editing it is owner-only until Phase 2. The clean fix is per-user
+    character storage, which is what Phase 1 traded away to make sharing work.
     """
-    if any(c.get("id") == ASSISTANT_ID for c in chars):
-        return chars
+    for c in chars:
+        if c.get("id") == ASSISTANT_ID:
+            if not c.get("shared"):
+                c["shared"] = True          # late adopters still see it
+                try:
+                    save_characters(chars)
+                except OSError:
+                    pass
+            return chars
     chars.append({"id": ASSISTANT_ID, "created": int(time.time()),
-                  "name": "Assistant", "system": True,
+                  "name": "Assistant", "system": True, "shared": True,
+                  "owner": uid,
                   "appearance": "", "persona": "", "greeting": "",
                   "checkpoint": "", "size": [], "temp": None,
                   "max_tokens": None, "loras": [], "tags": []})
@@ -1120,27 +1216,54 @@ CHAR_MAKER_PROMPT = (
 PERSONAS_FILE = DATA_DIR / "personas.json"
 
 
-def load_personas() -> list:
-    if not PERSONAS_FILE.exists():
-        return []
-    try:
-        d = json.loads(PERSONAS_FILE.read_text(encoding="utf-8"))
-        return d if isinstance(d, list) else []
-    except Exception:
-        return []
+def load_personas(uid: str) -> list:
+    return _read_json_list(user_state_file(uid, "personas.json"))
 
 
-def save_personas(lst: list) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    PERSONAS_FILE.write_text(json.dumps(lst, ensure_ascii=False),
-                             encoding="utf-8")
+def save_personas(uid: str, lst: list) -> None:
+    _write_json_atomic(user_state_file(uid, "personas.json"), lst)
 
 
-def migrate_flat_chats() -> None:
+def adopt_legacy_state(uid: str) -> None:
+    """One-time Phase 1 move of pre-multi-user state into a user's directory.
+
+    The existing chat history, personas and restart mirror predate ownership,
+    so they belong to the first admin. Runs every boot but is a no-op once
+    the per-user files exist, and it refuses to overwrite anything."""
+    d = user_dir(uid)
+    d.mkdir(parents=True, exist_ok=True)
+    moved = []
+    for legacy, dest in ((STATE_FILE, "chat_state.json"),
+                         (PERSONAS_FILE, "personas.json")):
+        if legacy.exists() and not (d / dest).exists():
+            legacy.replace(d / dest)
+            moved.append(dest)
+    # chats/ is the whole directory, so it moves as one unit.
+    legacy_chats = CHATS_DIR
+    if legacy_chats.is_dir() and not (d / "chats").exists():
+        legacy_chats.replace(d / "chats")
+        moved.append("chats/")
+    # Character cards stay global (see the note above user_dir), but they
+    # gain an owner the first time so the visibility filter has something
+    # to match on.
+    cards = load_characters()
+    if cards and any(not card_owner(c) for c in cards if isinstance(c, dict)):
+        for c in cards:
+            if isinstance(c, dict) and not card_owner(c):
+                c["owner"] = uid
+        save_characters(cards)
+        moved.append("characters.json owners")
+    if moved:
+        print(f"  phase 1: adopted {', '.join(moved)} into users/{uid}")
+
+
+def migrate_flat_chats(uid: str) -> None:
     """Phase A → B: move single-file chats/<char>.json into per-chat files."""
+    chats_dir = user_dir(uid) / "chats"
+    default_file = chats_dir / "default.json"
     try:
-        for f in CHATS_DIR.glob("*.json"):
-            if f == DEFAULT_CHAT_FILE:
+        for f in chats_dir.glob("*.json"):
+            if f == default_file:
                 continue                     # legacy free chat, not a card
             cid = f.stem
             if not CHAR_ID_RE.match(cid):
@@ -1149,7 +1272,7 @@ def migrate_flat_chats() -> None:
                 d = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            cid_dir = CHATS_DIR / cid
+            cid_dir = chats_dir / cid
             cid_dir.mkdir(parents=True, exist_ok=True)
             chat_id = new_chat_id()
             payload = {
@@ -1170,8 +1293,12 @@ def migrate_flat_chats() -> None:
 class Agent:
     """Conversation + SD client, driven by user-supplied config."""
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, uid: str = ""):
         self.cfg = cfg
+        # Whose chat tree this Agent persists to. Phase 1: still a single
+        # process-wide Agent, bound to the first admin's id. Phase 2 gives
+        # each user their own instance.
+        self.uid = uid or "u001"
         self.client = SDClient(base_url=cfg["sd_url"])
         self.char = None                 # active character card or None
         self.chat_id = ""                # active chat id (bound chats)
@@ -1179,14 +1306,13 @@ class Agent:
         self.auto_images = True          # per-chat: may the model use image tools?
         self.feedback = {}               # verdict on the conversation as it
         self.feedback_log = []           # stands; verdicts it has moved past
-        self._home = DEFAULT_CHAT_FILE   # where the active chat persists
+        self._home = self.default_chat_file()  # where the active chat persists
         self.messages = [self._sys_msg()]
         self.timeline = []
         self.lock = threading.Lock()     # one turn at a time
         self.stop_flag = threading.Event()  # set by /api/abort
         self.status_cb = None            # set while a turn streams
         self._save_lock = threading.Lock()   # chat-file writes
-        ensure_assistant(load_characters())     # the plain chat is a card too
         self._load_state()
         self._rehydrate_char()
 
@@ -1197,7 +1323,8 @@ class Agent:
         pid = (self.cfg.get("persona_id") or "").strip()
         if not pid:
             return {}
-        return next((p for p in load_personas() if p.get("id") == pid), {})
+        return next((p for p in load_personas(self.uid)
+                     if p.get("id") == pid), {})
 
     def persona_appearance(self) -> str:
         """The user's booru-tag look, auto-injected when a shot draws them."""
@@ -1430,15 +1557,31 @@ class Agent:
 
     # --------------------------------------------------------- characters
 
+    @property
+    def chats_dir(self) -> Path:
+        """This user's chat tree. The layout inside it is unchanged
+        (`chats/<char>/<chat_id>.json`) — the user directory supplies the
+        isolation, so Phase 1 does not have to reshape every chat path."""
+        return user_dir(self.uid) / "chats"
+
+    @property
+    def state_file(self) -> Path:
+        """The restart mirror. Per-user: it records who was last looking at
+        which chat, which is meaningless across users."""
+        return user_dir(self.uid) / "chat_state.json"
+
+    def default_chat_file(self) -> Path:
+        return self.chats_dir / "default.json"
+
     def _chat_file(self, cid: str, chat_id: str = "") -> Path:
         """Phase B: per-chat files under chats/<char>/<chat_id>.json.
         Without a chat id this resolves the legacy single-file location."""
         if chat_id:
-            return CHATS_DIR / cid / f"{chat_id}.json"
-        return CHATS_DIR / f"{cid}.json"
+            return self.chats_dir / cid / f"{chat_id}.json"
+        return self.chats_dir / f"{cid}.json"
 
     def _char_dir(self, cid: str) -> Path:
-        return CHATS_DIR / cid
+        return self.chats_dir / cid
 
     def _list_chats(self, cid: str) -> list[Path]:
         """Chat files of a character, newest first."""
@@ -1563,9 +1706,9 @@ class Agent:
                 self._fresh_chat()
         else:
             self.chat_id = ""
-            self._home = DEFAULT_CHAT_FILE
+            self._home = self.default_chat_file()
             self._apply_chat_payload(self._load_chat_payload(
-                DEFAULT_CHAT_FILE))
+                self.default_chat_file()))
         self._save_state()
 
     def bind_active_chat(self, card: dict) -> None:
@@ -1656,7 +1799,7 @@ class Agent:
 
         def drop_legacy():
             try:
-                DEFAULT_CHAT_FILE.unlink(missing_ok=True)
+                self.default_chat_file().unlink(missing_ok=True)
             except OSError:
                 pass
 
@@ -1671,14 +1814,14 @@ class Agent:
                 return
             self.chat_id = new_chat_id()
             self._home = self._chat_file(cid, self.chat_id)
-            self._apply_chat_payload(self._load_chat_payload(DEFAULT_CHAT_FILE))
+            self._apply_chat_payload(self._load_chat_payload(self.default_chat_file()))
             self._save_state()        # writes chats/<cid>/<chat_id>.json
             drop_legacy()
             return
 
-        if self._list_chats(cid) or not DEFAULT_CHAT_FILE.exists():
+        if self._list_chats(cid) or not self.default_chat_file().exists():
             return                     # already migrated, or nothing to move
-        payload = self._load_chat_payload(DEFAULT_CHAT_FILE)
+        payload = self._load_chat_payload(self.default_chat_file())
         if not (payload.get("messages") or payload.get("timeline")):
             return
         chat_id = new_chat_id()
@@ -1725,7 +1868,7 @@ class Agent:
             self._save_state()
         else:
             # mirror references a character that no longer exists — unbind
-            self._home = DEFAULT_CHAT_FILE
+            self._home = self.default_chat_file()
             self.chat_id = ""
 
     # -------------------------------------------------------- persistence
@@ -1775,22 +1918,19 @@ class Agent:
                        "auto_images": self.auto_images,
                        "feedback": self.feedback,
                        "timeline": self.timeline}
-            CHATS_DIR.mkdir(parents=True, exist_ok=True)
-            DEFAULT_CHAT_FILE.write_text(
-                json.dumps(payload, ensure_ascii=False),
-                encoding="utf-8")
-        STATE_FILE.write_text(
-            json.dumps(mirror, ensure_ascii=False), encoding="utf-8")
+            self.chats_dir.mkdir(parents=True, exist_ok=True)
+            _write_json_atomic(self.default_chat_file(), payload)
+        _write_json_atomic(self.state_file, mirror)
 
     def _load_state(self):
         """Startup: restore the active chat from the restart mirror."""
         self.chat_id = ""
         self.auto_images = True
-        if not STATE_FILE.exists():
-            self._home = DEFAULT_CHAT_FILE
+        if not self.state_file.exists():
+            self._home = self.default_chat_file()
             return
         try:
-            d = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            d = json.loads(self.state_file.read_text(encoding="utf-8"))
             self._state_char_id = d.get("character_id", "")
             self.chat_id = d.get("chat_id", "")
             self.scenario_id = str(d.get("scenario_id") or "")
@@ -1806,7 +1946,7 @@ class Agent:
         elif self._state_char_id:
             self._home = None            # resolved by _rehydrate_char
         else:
-            self._home = DEFAULT_CHAT_FILE
+            self._home = self.default_chat_file()
 
     # -------------------------------------------------------------- turn
 
@@ -3215,6 +3355,18 @@ class Handler(BaseHTTPRequestHandler):
         Phases 1-2 key per-user state off this."""
         return self.app.user_for_token(self._cookies().get(COOKIE, ""))
 
+    def _uid(self) -> str:
+        """Id of the account making this request.
+
+        Phase 1 caveat: per-user *storage* is live, but the Agent is still a
+        single process-wide instance, so a second user's requests read and
+        write the first user's chat. Character reads are already filtered by
+        owner. Phase 2 removes this by giving each user their own Agent."""
+        return str(self._user().get("id") or "u001")
+
+    def _is_admin(self) -> bool:
+        return self.app.is_admin(self._user())
+
     def _json(self, obj, code: int = 200, cache: str | None = None,
               headers: list | None = None):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -3907,10 +4059,15 @@ class Handler(BaseHTTPRequestHandler):
         return s
 
     def api_characters_list(self):
-        cards = ensure_assistant(load_characters())
+        uid = self._uid()
+        # ensure_assistant is a write, so it runs at startup, not on a read
+        # path that N users hit at once. Here we only filter to what this
+        # user may see: their own cards plus shared ones.
+        cards = visible_characters(uid, self._is_admin())
         out = []
         for c in cards:
             c = dict(c)
+            c["owned"] = can_edit_card(uid, c, self._is_admin())
             av = self._avatar_path(c["id"])
             if av:
                 try:
@@ -4186,16 +4343,26 @@ class Handler(BaseHTTPRequestHandler):
         if not name:
             self._json({"error": "name required"}, 400)
             return
+        uid = self._uid()
         cards = load_characters()
         cid = str(body.get("id", "")).strip()
         existing = next((c for c in cards if c.get("id") == cid), None) \
             if cid else None
+        # Someone else's shared card is read-only: you can chat with it, but
+        # editing it would rewrite their work and republish it under your
+        # name. Admins bypass (MULTIUSER.md decision 5).
+        if existing and not can_edit_card(uid, existing, self._is_admin()):
+            self._json({"error": "that character belongs to someone else"},
+                       403)
+            return
         if not existing:
             cid = slugify(name)
             while any(c.get("id") == cid for c in cards):
                 cid = cid[:35] + "-" + secrets.token_hex(2)
         card = dict(existing) if existing else {
-            "id": cid, "created": int(time.time())}
+            "id": cid, "created": int(time.time()), "owner": uid}
+        card["owner"] = card_owner(card) or uid
+        card["shared"] = bool(body.get("shared", card.get("shared", False)))
         card["name"] = name
         card["appearance"] = str(body.get("appearance", "")).strip()[:4000]
         card["persona"] = str(body.get("persona", "")).strip()[:8000]
@@ -4289,20 +4456,21 @@ class Handler(BaseHTTPRequestHandler):
                 agent.messages[0] = agent._sys_msg()
         # migration: the first created character adopts the unbound chat
         if not existing and agent.char is None and agent.timeline \
-                and agent._home == DEFAULT_CHAT_FILE:
+                and agent._home == agent.default_chat_file():
             agent.bind_active_chat(card)
         self._json({"ok": True, "id": cid})
 
     def api_character_select(self):
         body = self._body()
         cid = str(body.get("id", "")).strip()
+        uid = self._uid()
         agent = self.app.agent
         if not agent.lock.acquire(blocking=False):
             self._json({"error": "busy — a turn is already running"}, 409)
             return
         try:
             if cid:
-                card = next((c for c in load_characters()
+                card = next((c for c in visible_characters(uid, self._is_admin())
                              if c.get("id") == cid), None)
                 if not card:
                     self._json({"error": "character not found"}, 404)
@@ -4317,13 +4485,20 @@ class Handler(BaseHTTPRequestHandler):
             agent.lock.release()
 
     def api_character_favourite(self):
-        """Pin a character to the top of the list, or unpin it."""
+        """Pin a character to the top of the list, or unpin it.
+
+        `fav` lives on the card, so pinning someone else's shared card would
+        reorder *their* list. Owner-only (admins excepted)."""
         body = self._body()
         cid = str(body.get("id", "")).strip()
         cards = load_characters()
         card = next((c for c in cards if c.get("id") == cid), None)
         if not card:
             self._json({"error": "character not found"}, 404)
+            return
+        if not can_edit_card(self._uid(), card, self._is_admin()):
+            self._json({"error": "that character belongs to someone else"},
+                       403)
             return
         want = body.get("favourite")
         on = (not card.get("fav")) if want is None else bool(want)
@@ -4340,11 +4515,16 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         cid = str(body.get("id", "")).strip()
         cards = load_characters()
-        if not any(c.get("id") == cid for c in cards):
+        card = next((c for c in cards if c.get("id") == cid), None)
+        if not card:
             self._json({"error": "character not found"}, 404)
             return
         if cid == ASSISTANT_ID:
             self._json({"error": "the assistant cannot be deleted"}, 400)
+            return
+        if not can_edit_card(self._uid(), card, self._is_admin()):
+            self._json({"error": "that character belongs to someone else"},
+                       403)
             return
         agent = self.app.agent
         if not agent.lock.acquire(blocking=False):
@@ -4811,7 +4991,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(out)
 
     def api_personas_list(self):
-        self._json({"personas": load_personas(),
+        self._json({"personas": load_personas(self._uid()),
                     "active": self.app.agent.cfg.get("persona_id", "")})
 
     def api_personas_save(self):
@@ -4821,7 +5001,7 @@ class Handler(BaseHTTPRequestHandler):
         if not name:
             self._json({"error": "name required"}, 400)
             return
-        lst = load_personas()
+        lst = load_personas(self._uid())
         pid = str(body.get("id", "")).strip()
         existing = next((p for p in lst if p.get("id") == pid), None) \
             if pid else None
@@ -4844,7 +5024,7 @@ class Handler(BaseHTTPRequestHandler):
             lst = [p if x.get("id") == pid else x for x in lst]
         else:
             lst.append(p)
-        save_personas(lst)
+        save_personas(self._uid(), lst)
         agent = self.app.agent
         if agent.cfg.get("persona_id") == pid:
             # live persona edit — rebuild the running system message
@@ -4855,7 +5035,8 @@ class Handler(BaseHTTPRequestHandler):
     def api_persona_select(self):
         body = self._body()
         pid = str(body.get("id", "")).strip()
-        if pid and not any(p.get("id") == pid for p in load_personas()):
+        if pid and not any(p.get("id") == pid
+                            for p in load_personas(self._uid())):
             self._json({"error": "persona not found"}, 404)
             return
         agent = self.app.agent
@@ -4868,12 +5049,12 @@ class Handler(BaseHTTPRequestHandler):
     def api_persona_delete(self):
         body = self._body()
         pid = str(body.get("id", "")).strip()
-        lst = load_personas()
+        lst = load_personas(self._uid())
         if not any(p.get("id") == pid for p in lst):
             self._json({"error": "persona not found"}, 404)
             return
         lst = [p for p in lst if p.get("id") != pid]
-        save_personas(lst)
+        save_personas(self._uid(), lst)
         agent = self.app.agent
         if agent.cfg.get("persona_id") == pid:
             cfg = dict(agent.cfg)
@@ -4892,6 +5073,11 @@ class Handler(BaseHTTPRequestHandler):
         if not card:
             self._json({"error": "character not found"}, 404)
             return
+        if not can_edit_card(self._uid(), card, self._is_admin()):
+            self._json({"error": "that character belongs to someone else"},
+                       403)
+            return
+
         name = str(body.get("name", "")).strip()
         if not name:
             self._json({"error": "name required"}, 400)
@@ -4939,6 +5125,11 @@ class Handler(BaseHTTPRequestHandler):
         if not card:
             self._json({"error": "character not found"}, 404)
             return
+        if not can_edit_card(self._uid(), card, self._is_admin()):
+            self._json({"error": "that character belongs to someone else"},
+                       403)
+            return
+
         scenarios = list(card.get("scenarios") or [])
         if not any(s.get("id") == sid for s in scenarios):
             self._json({"error": "scenario not found"}, 404)
@@ -5090,7 +5281,7 @@ class Handler(BaseHTTPRequestHandler):
             card = None
             cid = str(body.get("char_id", "")).strip()
             if cid:
-                card = next((c for c in load_characters()
+                card = next((c for c in visible_characters(self._uid(), self._is_admin())
                              if c.get("id") == cid), None)
             args: dict = {"prompt": prompt,
                           "negative_prompt":
@@ -5243,8 +5434,14 @@ class App:
         self.sessions = prune_sessions(load_sessions())
         self._stamps = {}
         self._sync_disk()
-        migrate_flat_chats()                 # Phase A → B chat layout
-        self.agent = Agent(load_config())    # loads chat + character too
+        adopt_legacy_state(self.owner_uid())  # Phase 1, once
+        migrate_flat_chats(self.owner_uid())  # Phase A → B chat layout
+        # ensure_assistant *writes* (it appends the assistant card). It used
+        # to run in Agent.__init__, which becomes a write on a construction
+        # path — and a cross-thread race — the moment there is one Agent per
+        # user. Startup is the only correct place for it.
+        ensure_assistant(load_characters(), self.owner_uid())
+        self.agent = Agent(load_config(), uid=self.owner_uid())
         self.sd_state = SDState(self.agent)  # off-thread WebUI snapshot
         self.agent.sd_state = self.sd_state  # so a URL switch can drop it
 
@@ -5299,6 +5496,16 @@ class App:
 
     def is_admin(self, user: dict) -> bool:
         return bool(user) and user.get("role") == ROLE_ADMIN
+
+    def owner_uid(self) -> str:
+        """The user whose pre-multi-user state was adopted, and — until
+        Phase 2 gives every user their own Agent — whose chat tree the
+        single process-wide Agent is bound to. The first admin, always."""
+        admins = [u for u in self.users if self.is_admin(u)
+                  and not u.get("disabled")]
+        if admins:
+            return str(admins[0].get("id") or "u001")
+        return str(self.users[0].get("id")) if self.users else "u001"
 
 
 # ------------------------------------------------------------------- main
