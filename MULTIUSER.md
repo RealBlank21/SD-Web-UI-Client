@@ -1,6 +1,6 @@
 # Multi-user plan
 
-Status: **Phases 0-2 done.** This is the decision record plus the phase
+Status: **Phases 0-3 done.** This is the decision record plus the phase
 order it implies. Read this before changing anything in `server.py`'s auth or
 persistence paths.
 
@@ -149,22 +149,41 @@ touches an Agent whose lock is held, since dropping a mid-turn Agent would
 strand the turn and orphan its thread. The rebuilt Agent rehydrates from its own
 files.
 
-**Settings are still shared.** `App.config_for(uid)` returns `load_config()`, so
-every Agent gets its own copy of one global dict until Phase 3 moves keys into
-`users/<uid>/config.json`. The copy-per-agent part is deliberate: it means a
-future per-user field cannot leak between users through a shared dict.
+`App.config_for(uid)` returns `load_config(uid)` — this user alone. Phase 3
+made the settings dict per-user; see below.
 
-### Phase 3 — BYOK + BYO Forge
+### Phase 3 — BYOK + BYO Forge  *(done)*
 
-- Per-user `openrouter_key` and `sd_url`. Remove `sd_url` from shared config.
-- Run every `sd_url` save through the decision-4 validator.
-- Surface "is your Forge reachable" in the user's own settings.
-- **Traps:** `SDState.__init__` takes an `agent` and reads
-  `agent.client.base_url`, so it must hang off a shared `SDClient` or it
-  follows whichever user last switched.
-- No message truncation exists anywhere — `self.messages` grows unbounded. One
-  user on a long chat is fine; N users on a box that also hosts Forge is how you
-  get OOM-killed mid-generation.
+- Per-user `openrouter_key` and `sd_url` in `users/<uid>/config.json`.
+  `data/config.json` is now the **template** a new account starts from, read
+  only.
+- `load_config(uid)` blanks `openrouter_key` when the user has no file yet, so
+  a new account inherits the tuned prompts and defaults but never someone
+  else's credentials. The template is also stripped of the key during
+  migration — belt to that braces.
+- The SSRF validator (`validate_forge_url`) runs on every `sd_url` save,
+  before any connection is attempted.
+- `App.forge_others_on(url, uid)` drives the shared-Forge note.
+
+#### SSRF policy, and what it costs
+
+Allow RFC1918 (`10/8`, `172.16/12`, `192.168/16`) and Tailscale's
+`100.64.0.0/10`, because that is where a real Forge lives. Block loopback,
+link-local (which is where `169.254.169.254` and cloud instance credentials
+are), `0.0.0.0`, and every non-HTTP scheme. Admins bypass — the operator owns
+the machine.
+
+It resolves DNS before allowing a host, because a name that looks harmless can
+point anywhere; checking only the literal would make the guard decoration. The
+residual DNS-rebinding window is why accounts are admin-provisioned rather than
+open. Fail-closed: an unresolvable host is refused.
+
+**Two consequences worth knowing.** A Forge at a **public IP** is refused for
+non-admins, so "BYO Forge" genuinely means a Forge on the user's own
+tailnet/LAN. And on this box the only reachable Forge answers on loopback and
+`0.0.0.0`, both of which are blocked — a non-admin must use
+`192.168.0.109` or the Tailscale `100.93.220.68` address instead. That is the
+intended posture, but it is a real onboarding step.
 
 #### A Forge is single-tenant — shared-Forge serialisation  *(done)*
 
@@ -195,8 +214,9 @@ checkpoint — the dial is already correct. When they want different ones it is 
 model swap per generation, which is slow but correct. **That is the argument for
 one Forge per user**, not merely a nicety.
 
-Still open in Phase 3: warn when a second user claims a URL someone already
-holds. It needs per-user `sd_url` to be meaningful, so it lands with the rest.
+The second user onto an address is told so at save time, by name, with the
+trade-off stated — a warning rather than a block, because one box serving two
+people is legitimate.
 
 ### Phase 4 — gallery split
 

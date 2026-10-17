@@ -23,6 +23,7 @@ import base64
 import hashlib
 import getpass
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -36,6 +37,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
+import urllib.parse
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
@@ -125,27 +127,145 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_config() -> dict:
-    cfg = dict(DEFAULT_CONFIG)
-    if CONFIG_FILE.exists():
-        try:
-            user = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if isinstance(user, dict):
-                cfg.update({k: v for k, v in user.items() if k in cfg})
-        except Exception:
-            pass
+def _normalise_config(cfg: dict) -> dict:
     if isinstance(cfg["llm_models"], str):
         cfg["llm_models"] = [m.strip() for m in cfg["llm_models"].split(",")
                              if m.strip()]
     return cfg
 
 
-def save_config(cfg: dict) -> None:
+def load_config(uid: str = "") -> dict:
+    """A user's settings.
+
+    `data/config.json` is now the *template*, not the live config: it is
+    seeded from DEFAULT_CONFIG and read only. Each user's own live copy
+    lives in `users/<uid>/config.json`.
+
+    With no uid this still returns the template, which is what the operator
+    sees and what a new account starts from.
+    """
+    cfg = dict(DEFAULT_CONFIG)
+    if CONFIG_FILE.exists():
+        try:
+            base = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(base, dict):
+                cfg.update({k: v for k, v in base.items() if k in cfg})
+        except Exception:
+            pass
+    if uid:
+        path = user_state_file(uid, "config.json")
+        if path.exists():
+            try:
+                mine = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(mine, dict):
+                    cfg.update({k: v for k, v in mine.items() if k in cfg})
+            except Exception:
+                pass
+        else:
+            # First run for this account. Start from the tuned prompts and
+            # defaults, but never inherit someone else's credentials — BYOK
+            # (MULTIUSER.md decision 2) means the key is the user's own.
+            cfg["openrouter_key"] = ""
+    return _normalise_config(cfg)
+
+
+def save_config(cfg: dict, uid: str = "") -> None:
+    if uid:
+        _write_json_atomic(user_state_file(uid, "config.json"), cfg, indent=2)
+        return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False),
                    encoding="utf-8")
     tmp.replace(CONFIG_FILE)
+
+
+# ------------------------------------------------------------- SSRF guard
+#
+# `sd_url` is a URL the server fetches on a user's behalf, on a box that is
+# publicly reachable. Account provisioning gates *who* may set one; this gates
+# *what* they may set it to. Probe-before-trust does not help here — it proves
+# a Forge answered, not that the address was safe.
+#
+# Policy (MULTIUSER.md decision 4): allow RFC1918 and Tailscale's CGNAT range,
+# because that is where a real Forge lives; block loopback and link-local,
+# which is where cloud instance metadata and the box's own services are.
+# Admins bypass — the operator owns the machine.
+
+#: Tailscale hands out 100.64.0.0/10 (RFC 6598), which overlaps nothing in
+#: RFC1918 but is exactly where a Forge on a tailnet will be.
+FORGE_OK_NETS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                 "100.64.0.0/10")
+_FORGE_OK = tuple(ipaddress.ip_network(n) for n in FORGE_OK_NETS)
+#: 169.254.0.0/16 covers both link-local and the cloud metadata address
+#: (169.254.169.254 on AWS/GCP/Azure) — the credential-theft target.
+_FORGE_DENY = (ipaddress.ip_network("127.0.0.0/8"),
+               ipaddress.ip_network("169.254.0.0/16"),
+               ipaddress.ip_network("0.0.0.0/8"))
+
+
+def _forge_ip_allowed(ip: ipaddress._BaseAddress) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address):
+        # ::1 and fe80::/10 are loopback and link-local; everything else v6 is
+        # refused rather than guessed at, since no current Forge lives there.
+        return False
+    if any(ip in n for n in _FORGE_DENY):
+        return False
+    return any(ip in n for n in _FORGE_OK)
+
+
+def validate_forge_url(url: str, is_admin: bool = False) -> tuple[bool, str]:
+    """(ok, reason). `reason` is phrased for the person who typed the URL.
+
+    Resolves the host before allowing it, because a name that looks harmless
+    can point anywhere — checking only the literal would make the whole guard
+    decoration. The residual DNS-rebinding window (resolve here, connect to a
+    different address later) is why accounts are admin-provisioned rather than
+    open; fixing it properly needs a pinned-IP connection, which is more than
+    this deserves."""
+    url = (url or "").strip()
+    if not url:
+        return False, "no address given"
+    if "://" not in url:
+        url = "http://" + url
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError as e:
+        return False, f"that is not a URL: {e}"
+    if parts.scheme not in ("http", "https"):
+        return False, (f"{parts.scheme or 'that'}:// is not supported — use "
+                       "http or https")
+    host = parts.hostname
+    if not host:
+        return False, "no host in that address"
+    if is_admin:
+        return True, ""
+    try:
+        infos = socket.getaddrinfo(host, parts.port or
+                                   (443 if parts.scheme == "https" else 7860),
+                                   proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        return False, f"could not resolve {host}: {e.strerror or e}"
+    if not infos:
+        return False, f"could not resolve {host}"
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr.split("%")[0])
+        except ValueError:
+            return False, f"{host} resolved to something unusable ({addr})"
+        if not _forge_ip_allowed(ip):
+            if ip.is_loopback:
+                return False, (f"{host} is this machine — point at your own "
+                               "Forge, not the app's host")
+            if ip in ipaddress.ip_network("169.254.0.0/16"):
+                return False, (f"{host} resolves to {ip}, a link-local "
+                               "address — that range includes cloud instance "
+                               "metadata and is never a Forge")
+            return False, (f"{host} resolves to {ip}, which is outside the "
+                           "allowed private ranges (10/8, 172.16/12, "
+                           "192.168/16, 100.64/10)")
+    return True, ""
 
 
 def load_session_secret() -> bytes:
@@ -1241,6 +1361,28 @@ def adopt_legacy_state(uid: str) -> None:
             moved.append(dest)
     # chats/ is the whole directory, so it moves as one unit.
     legacy_chats = CHATS_DIR
+    # Phase 3: the live config becomes the owner's own, key and all. It stays
+    # where it is as the template new accounts start from — but that means a
+    # fresh account must not inherit the key, which load_config(uid) enforces
+    # by blanking it when the per-user file does not yet exist.
+    if CONFIG_FILE.exists() and not (d / "config.json").exists():
+        shutil.copy2(CONFIG_FILE, d / "config.json")
+        moved.append("config.json")
+    # Now that the live copy exists, the template should carry no secret.
+    # load_config(uid) already blanks the key for a user with no file yet;
+    # this is the belt to that braces — a template that still contains the
+    # operator's key is one bug away from handing it to the next signup.
+    if CONFIG_FILE.exists():
+        try:
+            tmpl = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(tmpl, dict) and tmpl.get("openrouter_key"):
+                owner_cfg = d / "config.json"
+                if owner_cfg.exists():
+                    tmpl["openrouter_key"] = ""
+                    _write_json_atomic(CONFIG_FILE, tmpl, indent=2)
+                    moved.append("config.json key stripped from template")
+        except Exception:                                 # noqa: BLE001
+            pass
     if legacy_chats.is_dir() and not (d / "chats").exists():
         legacy_chats.replace(d / "chats")
         moved.append("chats/")
@@ -4915,6 +5057,7 @@ class Handler(BaseHTTPRequestHandler):
         sys_touched = False
         guide_touched = False
         switched = None
+        shared_note = ""
         if "sd_url" in body:
             url = str(body["sd_url"]).strip().rstrip("/")
             if url and not url.startswith(("http://", "https://")):
@@ -4922,17 +5065,37 @@ class Handler(BaseHTTPRequestHandler):
             if not re.match(r"^https?://[\w.\-]+(:\d+)?(/[\w./\-]*)?$", url):
                 self._json({"error": "invalid URL"}, 400)
                 return
+            # Probe-before-trust proves a Forge answered; it says nothing
+            # about whether the address was safe to fetch. This is a
+            # publicly reachable box, and the fetch is on the user's behalf,
+            # so check first — before the connection is ever made.
+            ok_url, why = validate_forge_url(url, self._is_admin())
+            if not ok_url:
+                self._json({"error": why}, 400)
+                return
             if url != agent.client.base_url:
+                others = self.app.forge_others_on(url, self._uid())
                 switched = self._switch_sd_url(url)
                 if not switched[0]:                  # refused — keep the old
                     self._json({"error": switched[1]}, 502)
                     return
+                if others:
+                    # Not an error: two people on one box is legitimate. But
+                    # it serialises their generations behind a single global
+                    # checkpoint dial, so say so rather than let them find out
+                    # from a mysteriously wrong image.
+                    who = ", ".join(others)
+                    shared_note = (
+                        f"{who} {'already uses' if len(others) == 1 else 'already use'} "
+                        "this image server. Generations serialise, and each of "
+                        "you pays a model reload whenever you ask for a "
+                        "different checkpoint.")
             cfg["sd_url"] = url
             if switched:
                 # persist the switch on its own: a later field in this same
                 # body could still be rejected, and the file must never
                 # disagree with the client that is already live
-                save_config(cfg)
+                save_config(cfg, self._uid())
         if "llm" in body:
             models = [m.strip() for m in str(body["llm"]).split(",")
                       if m.strip()]
@@ -4986,12 +5149,14 @@ class Handler(BaseHTTPRequestHandler):
                 if entry:
                     clean[str(arch).strip()[:16].lower()] = entry
             cfg["sd_components"] = clean
-        save_config(cfg)
+        save_config(cfg, self._uid())
         if switched is not None:
             # already applied live in _switch_sd_url; apply_config below is a
             # no-op for the client and keeps the system message in step
             out = {"ok": True, "sd_switched": True, "sd_url": cfg["sd_url"],
                    "sd_model": switched[1]}
+            if shared_note:
+                out["note"] = shared_note
         else:
             out = {"ok": True}
         agent.apply_config(cfg)
@@ -5057,7 +5222,7 @@ class Handler(BaseHTTPRequestHandler):
         agent = self.agent
         cfg = dict(agent.cfg)
         cfg["persona_id"] = pid
-        save_config(cfg)
+        save_config(cfg, self._uid())
         agent.apply_config(cfg)
         self._json({"ok": True, "active": pid})
 
@@ -5074,7 +5239,7 @@ class Handler(BaseHTTPRequestHandler):
         if agent.cfg.get("persona_id") == pid:
             cfg = dict(agent.cfg)
             cfg["persona_id"] = ""
-            save_config(cfg)
+            save_config(cfg, self._uid())
             agent.apply_config(cfg)
         self._json({"ok": True, "personas": lst,
                     "active": agent.cfg.get("persona_id", "")})
@@ -5559,11 +5724,12 @@ class App:
             return agent
 
     def config_for(self, uid: str) -> dict:
-        """Per-user config. Phase 2 splits the *Agent*; the settings dict is
-        still shared until Phase 3 moves keys into users/<uid>/config.json.
-        Every Agent therefore gets its own copy, so a future per-user field
-        does not leak between users through the shared dict."""
-        return load_config()
+        """This user's settings, from users/<uid>/config.json.
+
+        `data/config.json` is the template a new account starts from, minus
+        the key — BYOK means the OpenRouter key is the user's own, so nobody
+        inherits someone else's."""
+        return load_config(uid)
 
     def _evict_agents_locked(self, room: int = 0) -> int:
         """Drop idle agents, then enforce the residency cap. Caller holds
@@ -5607,6 +5773,27 @@ class App:
 
     def sd_state_for(self, uid: str) -> SDState:
         return self.agent_for(uid).sd_state
+
+    def forge_others_on(self, url: str, exclude_uid: str = "") -> list[str]:
+        """Names of other enabled users already pointed at this Forge.
+
+        Deliberately not an error — one box serving two people is legitimate.
+        It just means they share a global checkpoint dial, so generations
+        serialise and asking for a different checkpoint costs a reload. Forge's
+        own queue keeps the GPU safe; `forge_lease` keeps the dial correct.
+        See MULTIUSER.md, "A Forge is single-tenant"."""
+        from sd_client import forge_key
+        key = forge_key(url)
+        if not key or key == "?":
+            return []
+        out = []
+        for u in self.users:
+            uid = str(u.get("id") or "")
+            if u.get("disabled") or uid == exclude_uid:
+                continue
+            if forge_key(load_config(uid).get("sd_url") or "") == key:
+                out.append(str(u.get("name") or uid))
+        return out
 
 
 # ------------------------------------------------------------------- main
