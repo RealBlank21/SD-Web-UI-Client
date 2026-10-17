@@ -202,6 +202,7 @@ AUDITED = {
     "scenario.other", "settings.other", "gallery.other",
     # identity and credentials
     "user.create", "user.passwd", "user.disable", "user.enable",
+    "user.delete",
     "login.fail", "login.ok",
     # the privileged surface in general
     "settings.sd_url", "settings.key", "system_prompt.set",
@@ -380,6 +381,8 @@ SESSION_TTL = 30 * 24 * 3600          # 30 days
 PBKDF2_ROUNDS = 200_000
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"
+#: Audit actor for actions with no session — the account CLI.
+CLI_ACTOR = {"id": "cli", "name": "cli", "role": ROLE_ADMIN}
 
 # A login with no username is only unambiguous when there is exactly one
 # account. qa_probe.py and the manual driving recipe in AGENTS.md both post
@@ -542,6 +545,123 @@ def public_user(u: dict) -> dict:
             "name": str(u.get("name") or ""),
             "role": str(u.get("role") or ROLE_USER),
             "admin": u.get("role") == ROLE_ADMIN}
+
+
+# The account operations live here, not in the CLI, so the admin UI and the
+# command line cannot drift apart. The CLI is a thin wrapper over these.
+
+def create_user(name: str, password: str, role: str = ROLE_USER,
+                actor: dict | None = None) -> dict:
+    """Create an account. Raises ValueError on a bad or duplicate name."""
+    name = (name or "").strip()
+    if not name or len(name) > 40:
+        raise ValueError("name must be 1-40 characters")
+    if any(ord(c) < 32 for c in name):
+        raise ValueError("name has control characters")
+    if not password:
+        raise ValueError("password required")
+    users = load_users()
+    if find_user(users, name):
+        raise ValueError(f"already exists: {name}")
+    u = {"id": new_user_id(users), "name": name,
+         "role": ROLE_ADMIN if role == ROLE_ADMIN else ROLE_USER,
+         "pass_hash": hash_password(password),
+         "created": int(time.time()), "disabled": False}
+    users.append(u)
+    save_users(users)
+    audit(actor or CLI_ACTOR, "user.create", u["id"], name)
+    return u
+
+
+def set_user_password(uid: str, password: str,
+                      actor: dict | None = None) -> dict:
+    users = load_users()
+    u = find_user(users, (uid or "").strip())
+    if not u:
+        raise ValueError(f"no such account: {uid}")
+    if not password:
+        raise ValueError("password required")
+    u["pass_hash"] = hash_password(password)
+    save_users(users)
+    audit(actor or CLI_ACTOR, "user.passwd", str(u.get("id")),
+          str(u.get("name") or ""))
+    return u
+
+
+def set_user_disabled(uid: str, disabled: bool,
+                     actor: dict | None = None) -> dict:
+    users = load_users()
+    u = find_user(users, (uid or "").strip())
+    if not u:
+        raise ValueError(f"no such account: {uid}")
+    # An admin who disables the last admin locks everyone out of the admin UI
+    # and the account CLI is the only way back, so say so rather than allow it.
+    if disabled and u.get("role") == ROLE_ADMIN and not u.get("disabled"):
+        others = [x for x in users
+                  if x.get("role") == ROLE_ADMIN and not x.get("disabled")
+                  and x.get("id") != u.get("id")]
+        if not others:
+            raise ValueError("cannot disable the last admin")
+    u["disabled"] = bool(disabled)
+    save_users(users)
+    audit(actor or CLI_ACTOR,
+          "user.disable" if disabled else "user.enable",
+          str(u.get("id")), str(u.get("name") or ""))
+    if disabled:
+        # Drop live sessions, or the cookie keeps working for the rest of
+        # its TTL. Re-read rather than trusting a stale copy.
+        sess = prune_sessions(load_sessions())
+        sess = {k: v for k, v in sess.items()
+                if v.get("user") != u.get("id")}
+        save_sessions(sess)
+    return u
+
+
+def delete_user(uid: str, actor: dict | None = None) -> dict:
+    """Remove an account and everything it owned."""
+    users = load_users()
+    u = find_user(users, (uid or "").strip())
+    if not u:
+        raise ValueError(f"no such account: {uid}")
+    if u.get("role") == ROLE_ADMIN and not u.get("disabled"):
+        others = [x for x in users if x.get("role") == ROLE_ADMIN
+                  and x.get("id") != u.get("id")]
+        if not others:
+            raise ValueError("cannot delete the last admin")
+    tid = str(u.get("id"))
+    users = [x for x in users if x.get("id") != tid]
+    save_users(users)
+    audit(actor or CLI_ACTOR, "user.delete", tid,
+          str(u.get("name") or ""))
+    # Their state goes too: chats, personas, config, and their gallery. The
+    # character store is global, so cards they own are orphaned rather than
+    # removed — deliberately, since other users may share them.
+    shutil.rmtree(user_dir(tid), ignore_errors=True)
+    shutil.rmtree(OUT_DIR / tid, ignore_errors=True)
+    sess = prune_sessions(load_sessions())
+    save_sessions({k: v for k, v in sess.items() if v.get("user") != tid})
+    return u
+
+
+def user_row(u: dict) -> dict:
+    """A user as the admin list shows it: safe fields plus the facts that
+    decide whether the account works (key present, Forge reachable-ish)."""
+    uid = str(u.get("id") or "")
+    cfg = load_config(uid)
+    key = str(cfg.get("openrouter_key") or "")
+    d = user_dir(uid)
+    chats = sum(1 for _ in (d / "chats").glob("*/*.json")) if (
+        d / "chats").is_dir() else 0
+    images = sum(1 for p in (OUT_DIR / uid).rglob("*")
+                 if p.is_file() and p.suffix.lower() in (".png", ".jpg",
+                                                         ".jpeg", ".webp")) \
+        if (OUT_DIR / uid).is_dir() else 0
+    return {**public_user(u), "created": int(u.get("created") or 0),
+            "disabled": bool(u.get("disabled")),
+            "has_key": bool(key),
+            "key_masked": (key[:7] + "…" + key[-4:]) if len(key) > 14 else "",
+            "sd_url": str(cfg.get("sd_url") or ""),
+            "chats": chats, "images": images}
 
 
 # ------------------------------------------------- OpenRouter model catalogue
@@ -3865,6 +3985,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_settings()
         elif path == "/api/audit":
             self.api_audit()
+        elif path == "/api/admin/users":
+            self.api_admin_users()
         elif path == "/api/characters":
             self.api_characters_list()
         elif path == "/api/chats":
@@ -4014,6 +4136,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_image_generate()
         elif path == "/api/settings":
             self.api_settings()
+        elif path == "/api/admin/users":
+            self.api_admin_users()
         elif path == "/api/model":
             self.api_model()
         elif path == "/api/model/components":
@@ -5281,6 +5405,56 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             agent.lock.release()
 
+    def api_admin_users(self):
+        """GET the account list, POST an account action.
+
+        Admin-only. The operations themselves are the same functions the
+        `--add-user` / `--passwd` / `--disable-user` CLI calls, so the UI and
+        the command line cannot drift apart."""
+        if not self._is_admin():
+            self._json({"error": "admins only"}, 403)
+            return
+        self.app._sync_disk()
+        if self.command == "GET":
+            self._json({"users": [user_row(u) for u in self.app.users],
+                        "me": self._uid()})
+            return
+        body = self._body()
+        action = str(body.get("action") or "")
+        uid = str(body.get("id") or "")
+        try:
+            if action == "create":
+                u = create_user(str(body.get("name") or ""),
+                                str(body.get("password") or ""),
+                                str(body.get("role") or ROLE_USER),
+                                actor=self._user())
+                result = {"id": u["id"]}
+            elif action == "passwd":
+                u = set_user_password(uid, str(body.get("password") or ""),
+                                      actor=self._user())
+                result = {"id": u["id"]}
+            elif action in ("disable", "enable"):
+                u = set_user_disabled(uid, action == "disable",
+                                       actor=self._user())
+                result = {"id": u["id"]}
+            elif action == "delete":
+                # An admin deleting themselves locks the admin UI and the UI
+                # is the fast path — the CLI still works, but make them mean it.
+                if uid == self._uid():
+                    raise ValueError("you cannot delete your own account here")
+                u = delete_user(uid, actor=self._user())
+                result = {"id": u["id"]}
+            else:
+                self._json({"error": f"unknown action {action!r}"}, 400)
+                return
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
+        self.app._sync_disk()
+        self._json({"ok": True, **result,
+                    "users": [user_row(x) for x in self.app.users],
+                    "me": self._uid()})
+
     def api_audit(self):
         """GET the audit trail. Admin only — it names other people's accounts.
 
@@ -6095,6 +6269,8 @@ def main():
     ap.add_argument("--disable-user", metavar="NAME",
                     help="disable an account (keeps its data)")
     ap.add_argument("--enable-user", metavar="NAME")
+    ap.add_argument("--delete-user", metavar="NAME",
+                    help="delete an account and everything it owned")
     ap.add_argument("--list-users", action="store_true")
     args = ap.parse_args()
 
@@ -6110,62 +6286,35 @@ def main():
 
     if args.add_user or args.passwd:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        users = load_users()
-        if args.add_user:
-            name = args.add_user.strip()
-            if not name:
-                print("--add-user needs a name", file=sys.stderr)
-                sys.exit(1)
-            if find_user(users, name):
-                print(f"already exists: {name}", file=sys.stderr)
-                sys.exit(1)
-            pw = _prompt_pw(f"password for {name}: ")
-            role = ROLE_ADMIN if args.admin else ROLE_USER
-            u = {"id": new_user_id(users), "name": name, "role": role,
-                 "pass_hash": hash_password(pw), "created": int(time.time()),
-                 "disabled": False}
-            users.append(u)
-            audit({"id": "cli", "name": "cli", "role": ROLE_ADMIN},
-                  "user.create", u["id"], name)
-            save_users(users)
-            print(f"created {role} {u['id']} ({name})")
-            return
-        # --passwd
-        u = find_user(users, args.passwd.strip())
-        if not u:
-            print(f"no such account: {args.passwd}", file=sys.stderr)
+        try:
+            if args.add_user:
+                pw = _prompt_pw(f"password for {args.add_user.strip()}: ")
+                u = create_user(args.add_user, pw,
+                                ROLE_ADMIN if args.admin else ROLE_USER)
+                print(f"created {u['role']} {u['id']} ({u['name']})")
+            else:
+                pw = _prompt_pw("new password: ")
+                u = set_user_password(args.passwd, pw)
+                print(f"password updated for {u['id']}")
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
             sys.exit(1)
-        pw = _prompt_pw(f"new password for {u.get('name')}: ")
-        u["pass_hash"] = hash_password(pw)
-        audit({"id": "cli", "name": "cli", "role": ROLE_ADMIN},
-              "user.passwd", str(u.get("id")), str(u.get("name") or ""))
-        save_users(users)
-        print(f"password updated for {u.get('id')}")
         return
 
-    if args.disable_user or args.enable_user:
-        users = load_users()
-        name = args.disable_user or args.enable_user
-        u = find_user(users, name.strip())
-        if not u:
-            print(f"no such account: {name}", file=sys.stderr)
+    if args.disable_user or args.enable_user or args.delete_user:
+        name = args.disable_user or args.enable_user or args.delete_user
+        try:
+            if args.delete_user:
+                u = delete_user(name)
+                print(f"deleted {u.get('id')} ({u.get('name')}) and its data")
+            else:
+                dis = bool(args.disable_user)
+                u = set_user_disabled(name, dis)
+                print(f"{'disabled' if dis else 'enabled'} "
+                      f"{u.get('id')} ({u.get('name')})")
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
             sys.exit(1)
-        u["disabled"] = bool(args.disable_user)
-        audit({"id": "cli", "name": "cli", "role": ROLE_ADMIN},
-              "user.disable" if u["disabled"] else "user.enable",
-              str(u.get("id")), str(u.get("name") or ""))
-        save_users(users)
-        # A disabled account must lose its live sessions too, or the cookie
-        # keeps working for the rest of its TTL. The server may be running;
-        # re-read rather than trusting a stale copy. App._sync_disk picks
-        # the change up on its next request.
-        if u["disabled"]:
-            sess = prune_sessions(load_sessions())
-            sess = {k: v for k, v in sess.items()
-                    if v.get("user") != u.get("id")}
-            save_sessions(sess)
-        print(f"{'disabled' if u['disabled'] else 'enabled'} "
-              f"{u.get('id')} ({u.get('name')})")
         return
 
     for stream in (sys.stdout, sys.stderr):

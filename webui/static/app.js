@@ -179,6 +179,7 @@ let busy = false;
 let statusTimer = null;   // progress polling while generating
 let toastTimer = null;
 let authed = false;
+let me = null;            // {id, name, role, admin} from /api/auth
 let chars = [];           // character cards
 let activeCharId = "";
 
@@ -329,6 +330,7 @@ function showApp() {
   els.gate.hidden = true;
   els.app.hidden = false;
   init();
+  initAdmin();          // the Admin tab exists only for admins
 }
 
 async function tryLogin() {
@@ -1657,6 +1659,182 @@ function setPsTab(name) {
   document.querySelector(".ps-body").scrollTop = 0;
   if (name === "llm") loadLlmModels(false);     // the picker needs the list
   if (name === "loras") loadLoras();            // the list is the pane's content
+  if (name === "admin") loadAdmin();            // likewise
+}
+
+/* ---------------------------------------------------------------- admin
+ *
+ * Account management and the audit trail. The tab is unhidden at runtime
+ * only when /api/auth says this user is an admin — hiding it in markup
+ * would leak that the page exists, and it is not a security boundary
+ * anyway: every call here is 403 without the role.
+ */
+
+function initAdmin() {
+  const tab = document.getElementById("ps-admin-tab");
+  if (tab) tab.hidden = !(me && me.admin);
+}
+
+function ago(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 90) return "just now";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+}
+
+async function loadAdmin() {
+  const box = $("ad-users"), audit = $("ad-audit");
+  if (box) box.innerHTML = '<div class="hint">loading…</div>';
+  try {
+    const d = await api("/api/admin/users");
+    renderAdminUsers(d.users || [], d.me);
+  } catch (e) {
+    if (box) box.innerHTML = "";
+    if (box) box.appendChild(el("div", "hint", e.message || "could not load"));
+  }
+  loadAudit();
+}
+
+function renderAdminUsers(users, meId) {
+  const box = $("ad-users");
+  box.innerHTML = "";
+  for (const u of users) {
+    const row = el("div", "ad-user" + (u.disabled ? " off" : ""));
+    const top = el("div", "ad-top");
+    top.appendChild(el("b", "", null,
+                       [u.name, el("span", "", u.id)]));
+    if (u.admin) top.appendChild(el("span", "ad-badge admin", "admin"));
+    if (u.disabled) top.appendChild(el("span", "ad-badge off", "disabled"));
+    row.appendChild(top);
+
+    const meta = el("div", "ad-meta");
+    const bits = [
+      u.has_key ? ("key " + (u.key_masked || "set")) : "no OpenRouter key",
+      u.sd_url || "no image server",
+      u.chats + " chat" + (u.chats === 1 ? "" : "s"),
+      u.images + " image" + (u.images === 1 ? "" : "s"),
+      "added " + ago(u.created),
+    ];
+    for (const b of bits) {
+      const span = el("span", "", b);
+      // The two things that stop an account working, called out rather than
+      // left for the admin to infer from a grey row.
+      if (!u.has_key) span.className = "warn";
+      meta.appendChild(span);
+    }
+    row.appendChild(meta);
+
+    const acts = el("div", "ad-acts");
+    const mk = (label, cls, fn) => {
+      const b = el("button", cls || "", label);
+      b.addEventListener("click", fn);
+      return b;
+    };
+    acts.appendChild(mk("Reset password", "", () => adminPasswd(u)));
+    acts.appendChild(mk(u.disabled ? "Enable" : "Disable", "",
+                        () => adminToggle(u)));
+    if (u.id !== meId) {
+      acts.appendChild(mk("Delete", "del", () => adminDelete(u)));
+    } else {
+      const b = el("button", "", "You");
+      b.disabled = true;
+      acts.appendChild(b);
+    }
+    row.appendChild(acts);
+    box.appendChild(row);
+  }
+}
+
+async function adminCall(body, what) {
+  try {
+    const d = await api("/api/admin/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    renderAdminUsers(d.users || [], d.me);
+    loadAudit();
+    toast(what + " ok");
+  } catch (e) {
+    toast(e.message || what + " failed", true);
+    // A refusal often means the server state moved (e.g. it just removed the
+    // last admin), so re-read rather than leaving a stale list on screen.
+    loadAdmin();
+  }
+}
+
+function adminPasswd(u) {
+  const pw = prompt(`New password for ${u.name}:`);
+  if (!pw) return;
+  adminCall({ action: "passwd", id: u.id, password: pw },
+            "password change");
+}
+
+function adminToggle(u) {
+  const act = u.disabled ? "enable" : "disable";
+  if (act === "disable" && !confirm(
+      `Disable ${u.name}?\n\nThey are signed out immediately and cannot ` +
+      `sign back in until re-enabled. Their data is kept.`)) return;
+  adminCall({ action: act, id: u.id }, act);
+}
+
+function adminDelete(u) {
+  if (!confirm(
+      `Delete ${u.name}?\n\nThis removes their account, chats, personas ` +
+      `and every image they generated. Character cards they own stay, since ` +
+      `others may share them. This cannot be undone.`)) return;
+  adminCall({ action: "delete", id: u.id }, "delete");
+}
+
+function wireAdmin() {
+  const mk = $("ad-create");
+  if (mk) mk.addEventListener("click", adminCreate);
+  const nm = $("ad-name"), pw = $("ad-pass");
+  for (const f of [nm, pw]) {
+    if (!f) continue;
+    f.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") adminCreate();
+    });
+  }
+  const only = $("ad-audit-adminonly");
+  if (only) only.addEventListener("change", loadAudit);
+}
+
+function adminCreate() {
+  const name = ($("ad-name").value || "").trim();
+  const pw = $("ad-pass").value || "";
+  if (!name || !pw) { toast("name and password required", true); return; }
+  adminCall({ action: "create", name, password: pw,
+              role: $("ad-admin").checked ? "admin" : "user" }, "create")
+    .then(() => { $("ad-name").value = ""; $("ad-pass").value = "";
+                  $("ad-admin").checked = false; });
+}
+
+async function loadAudit() {
+  const box = $("ad-audit"), count = $("ad-audit-count");
+  const only = $("ad-audit-adminonly");
+  if (!box) return;
+  try {
+    const q = only && only.checked ? "&admin_only=1" : "";
+    const d = await api("/api/audit?limit=60" + q);
+    const evs = d.events || [];
+    if (count) count.textContent = evs.length ? "· " + evs.length : "";
+    box.innerHTML = "";
+    if (!evs.length) {
+      box.appendChild(el("div", "hint", "nothing recorded yet"));
+      return;
+    }
+    for (const e of evs) box.appendChild(el("div", "ad-ev" + (e.admin ? " priv" : ""),
+      null, [
+        el("div", "ad-when", ago(e.ts) + " · " + (e.who || e.actor)),
+        el("div", "ad-what", e.action + (e.target ? " → " + e.target : "")),
+        e.detail ? el("div", "ad-det", e.detail) : null,
+      ]));
+  } catch (e) {
+    box.innerHTML = "";
+    box.appendChild(el("div", "hint", e.message || "could not load"));
+  }
 }
 
 /* ------------------------------------- LLM chain (OpenRouter model picker) */
@@ -5396,6 +5574,8 @@ ddInit();                            // themed dropdowns over native popups
 (async function bootstrap() {
   try {
     const a = await api("/api/auth");
+    me = a.user || null;
+    wireAdmin();
     if (a.authed) showApp();
     else showGate();
   } catch {

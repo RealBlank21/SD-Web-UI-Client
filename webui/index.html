@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>SD Agent</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/style.css?v=88">
+<link rel="stylesheet" href="/static/style.css?v=89">
 </head>
 <body>
 
@@ -309,6 +309,7 @@
     <button data-tab="image">Image</button>
     <button data-tab="loras">LoRAs</button>
     <button data-tab="visuals">Appearance</button>
+    <button data-tab="admin" id="ps-admin-tab" hidden>Admin</button>
   </nav>
   <div class="ps-body">
     <section class="sh-body" data-pane="persona">
@@ -468,6 +469,29 @@
         <button data-lbmode="scroll">Scroll</button>
       </div>
       <div class="hint">Slideshow pages one image at a time. Scroll stacks the view as a vertical feed — flick up or down to browse, and moving back never waits on a reload.</div>
+    </section>
+
+    <!-- admin-only; the tab is unhidden at runtime when /api/auth says so -->
+    <section class="sh-body" data-pane="admin" hidden>
+      <label>Accounts</label>
+      <div id="ad-users" class="ad-users"><div class="hint">loading…</div></div>
+
+      <label>Add an account</label>
+      <div class="row">
+        <input id="ad-name" placeholder="Username" autocomplete="off"
+               autocapitalize="off" maxlength="40">
+        <label class="ad-check"><input type="checkbox" id="ad-admin"> admin</label>
+      </div>
+      <div class="row">
+        <input id="ad-pass" type="password" placeholder="Password"
+               autocomplete="new-password">
+        <button id="ad-create">Create</button>
+      </div>
+      <div class="hint">They bring their own OpenRouter key and their own image server — set both in their Settings. New accounts start with no key, so they cannot chat until they add one.</div>
+
+      <label>Audit trail <span class="dim" id="ad-audit-count"></span></label>
+      <label class="ad-check"><input type="checkbox" id="ad-audit-adminonly" checked> only privileged actions</label>
+      <div id="ad-audit" class="ad-audit"><div class="hint">loading…</div></div>
     </section>
   </div>
   <div class="ps-foot">
@@ -702,6 +726,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=88"></script>
+<script src="/static/app.js?v=89"></script>
 </body>
 </html>
