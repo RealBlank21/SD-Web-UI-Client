@@ -359,6 +359,7 @@ function forgetUser() {
   lbList = [];
   lbIndex = -1;
   busyStop = true;          // a turn still streaming belongs to the old user
+  liveThink = liveReply = null;
 }
 
 function showApp() {
@@ -433,27 +434,36 @@ function addBubble(kind, text) {
    It arrives as its own timeline event rather than riding along on the reply,
    because a turn that ends on an image card has no reply bubble to hang it
    on. Deliberately not a .msg: no long-press menu, nothing to edit or rewind
-   — it is there to be read, so it only opens and closes. */
+   — it is there to be read, so it only opens and closes.
+
+   `streaming` builds it open, because a block that is being written to has
+   nothing to be collapsed *about* yet — and it closes again when the round
+   ends, back to the reader's own choice. */
 let thinkOpen = localStorage.getItem("thinkopen") === "1";
 
-function addThink(text) {
+function buildThink(text, streaming) {
   const box = el("div", "think");
   const head = el("button", "think-head");
   head.type = "button";
   head.appendChild(el("span", "caret", "▾"));
   head.appendChild(el("span", "tlabel", "Thinking"));
   // its first line, so a long chat can be skimmed without opening every block
-  const first = String(text || "").trim().split("\n").find((l) => l.trim());
-  if (first) head.appendChild(el("span", "tprev", first.trim()));
+  const prev = el("span", "tprev");
+  head.appendChild(prev);
 
   const body = el("div", "think-body md");
-  body.dataset.raw = text;              // the unescaped original, as in .msg
-  body.innerHTML = mdToHtml(text);
 
   const setOpen = (open) => {
     box.classList.toggle("open", open);
     body.hidden = !open;
     head.setAttribute("aria-expanded", String(open));
+  };
+  const setText = (t, md) => {
+    body.dataset.raw = t;               // the unescaped original, as in .msg
+    if (md) body.innerHTML = mdToHtml(t);
+    else body.textContent = t;
+    const first = String(t || "").trim().split("\n").find((l) => l.trim());
+    prev.textContent = first ? first.trim() : "";
   };
   head.addEventListener("click", () => {
     // one choice applies to every block, now and after the next reload
@@ -462,11 +472,17 @@ function addThink(text) {
     setOpen(thinkOpen);
   });
 
-  setOpen(thinkOpen);
   box.appendChild(head);
   box.appendChild(body);
   els.msgs.appendChild(box);
-  return box;
+  setOpen(streaming || thinkOpen);
+  setText(text || "", !streaming);
+  if (streaming) box.classList.add("streaming");
+  return { box, setOpen, setText, raw: text || "" };
+}
+
+function addThink(text) {
+  return buildThink(text, false).box;
 }
 
 const variantIndex = new Map();   // image rel path -> generation card record
@@ -598,6 +614,9 @@ function addCoverCard(evt) {
 function renderHistory(timeline) {
   els.msgs.textContent = "";
   variantIndex.clear();
+  // whatever was mid-write belongs to the chat being left behind, and its
+  // nodes are about to be detached
+  liveThink = liveReply = null;
   timeline.forEach((evt, i) => {
     if (evt.type === "user") { const m = addBubble("user", evt.text); m.dataset.idx = i; }
     else if (evt.type === "reply") { const m = addBubble("ai", evt.text); m.dataset.idx = i; }
@@ -766,6 +785,93 @@ function consumeSSE(resp, handler) {
 
 let evtCounter = 0;       // fallback index for streamed-only events
 
+/* ---------------------------------------------------------- live streaming
+ *
+ * The reply and the reasoning both arrive in pieces and are drawn as they
+ * come. Two rules make that bearable:
+ *
+ *  - plain text while a message is being written, markdown once it lands.
+ *    The renderer is re-run once, at the end, not on every token: a half-typed
+ *    ** or ``` flickers as a broken element for as long as it is open.
+ *  - the finished event is the truth. A streamed reply is only a preview of
+ *    the `reply` that follows it, so the bubble is re-rendered from that and
+ *    a round's reasoning from `think_end` — which is also where the server's
+ *    scrub and length cap land.
+ */
+let liveReply = null;     // the reply bubble currently being written into
+let liveThink = null;     // the reasoning block currently being written into
+let lastStreamScroll = 0;
+
+function streamScroll() {
+  // deltas arrive far faster than the screen refreshes; one scrollTo queued
+  // per token is a lot of work for no movement
+  const now = performance.now();
+  if (now - lastStreamScroll < 100) return;
+  lastStreamScroll = now;
+  scrollDown(true);
+}
+
+function pushDelta(text) {
+  if (!liveReply) {
+    const m = el("div", "msg ai streaming");
+    m.dataset.raw = "";
+    els.msgs.appendChild(m);
+    liveReply = m;
+  }
+  liveReply.dataset.raw += text;
+  liveReply.textContent = liveReply.dataset.raw;
+  streamScroll();
+}
+
+/* Adopts the streamed bubble for the reply that just landed, or returns null
+ * when nothing was streamed and the caller should add its own. */
+function endReply(evt) {
+  const m = liveReply;
+  liveReply = null;
+  if (!m) return null;
+  m.classList.remove("streaming");
+  m.classList.add("md");
+  m.dataset.raw = evt.text;
+  m.innerHTML = mdToHtml(evt.text);
+  return m;
+}
+
+/* Throws away a streamed bubble the turn is not going to keep: the model
+ * announced a tool call instead of answering, or the user stopped it. */
+function dropReply() {
+  if (liveReply) { liveReply.remove(); liveReply = null; }
+}
+
+function startThink() {
+  endThink();
+  liveThink = buildThink("", true);
+  streamScroll();
+}
+
+function pushThink(text) {
+  if (!liveThink) startThink();
+  liveThink.raw += text;
+  liveThink.setText(liveThink.raw, false);
+  streamScroll();
+}
+
+function endThink(text) {
+  const t = liveThink;
+  liveThink = null;
+  if (!t) return;
+  if (typeof text === "string" && text) t.raw = text;
+  t.box.classList.remove("streaming");
+  t.setText(t.raw, true);
+  t.setOpen(thinkOpen);        // back to the reader's own choice
+}
+
+/* Nothing is streaming any more: whatever is half-written is not what the
+ * server kept. */
+function dropStream() {
+  endThink();
+  dropReply();
+}
+
 /* Streamed events carry the index the server gave them ('idx'). Counting
  * them here instead would drift: tool_start / progress / status are streamed
  * but never stored, so a local counter overshoots and every later delete
@@ -790,7 +896,24 @@ function handleEvent(evt) {
       pillProgress(evt.progress || 0, t);
       break;
     }
+    case "think":
+      // no index to tag: nothing here is addressable, and tagging it would
+      // only invite a delete the server has no answer for
+      startThink();
+      break;
+    case "think_delta":
+      pushThink(evt.text);
+      break;
+    case "think_end":
+      endThink(evt.text);
+      break;
+    case "delta":
+      pushDelta(evt.text);
+      break;
     case "tool_start":
+      // text written alongside a tool call is never a reply — the server
+      // keeps none of it, so neither do we
+      dropStream();
       markToolDone(lastTool());
       addToolStart(evt.name);
       pill(evt.name + "…", false);
@@ -810,36 +933,39 @@ function handleEvent(evt) {
       addBubble("error", `✗ ${evt.name} — ${evt.error}`);
       tagIdx(els.msgs.lastChild, evt.idx);
       break;
-    case "reply":
+    case "reply": {
       stopProgressPolling();
+      endThink();
       markToolDone(lastTool());
-      tagIdx(addBubble("ai", evt.text), evt.idx);
+      const m = endReply(evt) || addBubble("ai", evt.text);
+      tagIdx(m, evt.idx);
       break;
-    case "think":
-      // no index to tag: nothing here is addressable, and tagging it would
-      // only invite a delete the server has no answer for
-      addThink(evt.text);
-      break;
+    }
     case "error":
       stopProgressPolling();
+      dropStream();
       markToolDone(lastTool());
       tagIdx(addBubble("error", evt.text), evt.idx);
       break;
     case "stopped":
       stopProgressPolling();
+      dropStream();
       markToolDone(lastTool());
       pillHide();
       addBubble("ai", "*stopped*");
       break;
     case "done":
       stopProgressPolling();
+      // a turn that ended without its reply landing leaves nothing half-written
+      dropStream();
       pillHide();
       // the server retires the rating once the reply lands — the chat it was
       // given for is gone
       chatRating = "";
       break;
   }
-  if (evt.type !== "progress") scrollDown(true);
+  if (evt.type !== "progress" && evt.type !== "delta"
+      && evt.type !== "think_delta") scrollDown(true);
 }
 
 /* --------------------------------------------------------------- gallery
@@ -4486,7 +4612,20 @@ async function regenReply(node) {
         case "progress":
           pillProgress(evt.progress || 0, "regenerating…");
           break;
+        case "think":
+          startThink();
+          break;
+        case "think_delta":
+          pushThink(evt.text);
+          break;
+        case "think_end":
+          endThink(evt.text);
+          break;
+        case "delta":
+          pushDelta(evt.text);
+          break;
         case "tool_start":
+          dropStream();
           pill(evt.name + "…", false);
           break;
         case "generation": {
@@ -4497,18 +4636,24 @@ async function regenReply(node) {
           addGeneration(evt, null);
           break;
         }
-        case "reply":
-          addBubble("ai", evt.text);
+        case "reply": {
+          // adopt the streamed bubble if one is open, rather than showing the
+          // same words twice
+          endReply(evt) || addBubble("ai", evt.text);
           break;
+        }
         case "error":
+          dropStream();
           addBubble("error", evt.text);
           break;
         case "stopped":
           // nothing was committed, so reloadChat() restores the old answer —
           // a bubble here would just flash and vanish
+          dropStream();
           toast("Stopped — the previous reply was kept");
           break;
         case "done":
+          dropStream();
           break;
       }
       scrollDown(true);

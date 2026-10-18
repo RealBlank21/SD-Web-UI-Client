@@ -532,6 +532,25 @@ button.tagchip.on {
 }
 .think-body[hidden] { display: none; }
 
+/* a block the model is still writing into — a pulse on the label, so a
+   collapsed one is visibly alive rather than looking finished */
+.think.streaming .tlabel::after {
+  content: ""; display: inline-block; flex: none;
+  width: 3px; height: 3px; margin-left: 5px; border-radius: 50%;
+  background: var(--accent); vertical-align: middle;
+  animation: streamPulse 1.15s ease-in-out infinite;
+}
+.msg.ai.streaming::after {
+  content: ""; display: inline-block;
+  width: 3px; height: 3px; margin-left: 5px; border-radius: 50%;
+  background: var(--accent); vertical-align: middle;
+  animation: streamPulse 1.15s ease-in-out infinite;
+}
+@keyframes streamPulse { 0%, 100% { opacity: .15; } 50% { opacity: .95; } }
+@media (prefers-reduced-motion: reduce) {
+  .think.streaming .tlabel::after, .msg.ai.streaming::after { animation: none; opacity: .6; }
+}
+
 /* generation card inside the chat — picture-first; details live in the
    lightbox info popup, so no meta chips here */
 .gen {

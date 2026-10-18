@@ -1996,26 +1996,61 @@ class Agent:
     # -------------------------------------------------------------- LLM
 
     def llm_complete(self, messages: list, temperature: float | None = None,
-                     max_tokens: int | None = None) -> dict:
+                     max_tokens: int | None = None,
+                     on_text=None, on_reason=None) -> dict:
         """LLMRouter logic inline: try models in order, retry rate limits,
         stick with whichever model last worked.
 
         When the chat's auto-images toggle is off the image tools are withheld
         from the request, so the turn is plain text — the model has no way to
-        generate even if it decides to."""
+        generate even if it decides to.
+
+        `on_text` and `on_reason` are handed the reply and the reasoning as
+        they stream in. The request goes out streamed either way, so there is
+        one response shape to handle rather than two; with no callbacks
+        nothing is shown until the whole message has arrived, as before.
+        """
         models = self.llm_models
-        order = models + models[:1] * 0            # copy
         tools: list = [] if not self.auto_images else None
         last_err: LLMError | None = None
-        for model in order:
+        # one word already on screen means a retry would duplicate it, so from
+        # that point on every failure is a failure
+        spoken = {"any": False}
+
+        def text_of(chunk: str):
+            spoken["any"] = True
+            if on_text:
+                on_text(chunk)
+
+        def reason_of(chunk: str):
+            spoken["any"] = True
+            if on_reason:
+                on_reason(chunk)
+
+        for model in models:
             for attempt in range(2):               # one retry per model
                 try:
                     self.emit_status(f"thinking · {model.split('/')[-1]}")
-                    return chat_completion(self.cfg["openrouter_key"],
-                                           model, messages,
-                                           temperature=temperature,
-                                           max_tokens=max_tokens,
-                                           tools=tools)
+                    try:
+                        return chat_completion_stream(
+                            self.cfg["openrouter_key"], model, messages,
+                            on_text=text_of, on_reason=reason_of,
+                            stopped=self.stopped,
+                            temperature=temperature, max_tokens=max_tokens,
+                            tools=tools)
+                    except StreamStopped:
+                        raise
+                    except LLMError:
+                        if spoken["any"]:
+                            raise
+                        # the stream broke before a word came out of it: that
+                        # is a broken stream, not a broken model, so ask again
+                        # in the shape that has never needed one
+                        return chat_completion(self.cfg["openrouter_key"],
+                                               model, messages,
+                                               temperature=temperature,
+                                               max_tokens=max_tokens,
+                                               tools=tools)
                 except LLMError as e:
                     last_err = e
                     if _is_auth_error(e):          # bad key: don't retry
@@ -2445,19 +2480,53 @@ class Agent:
         reply = None
         char_temp = None
         char_mt = None
-        think: list[str] = []
+        round_think: dict | None = None
 
-        def flush_think():
-            """Store this turn's reasoning, once, just above what it produced.
+        def on_reason(chunk: str):
+            """Open the round's reasoning block on its first token, grow it
+            there, and leave it on the timeline.
+
+            Streamed rather than held to the end of the turn: a turn that
+            draws a picture spends nearly all of its visible life inside that
+            generation, and none of the thinking that led to it used to reach
+            the screen until the picture had landed. One block per round, so
+            each sits directly above whatever it decided to do.
 
             Pushed rather than carried on the reply event because most turns
             that draw an image end with an empty assistant message and no
             reply bubble at all — the thinking would have nowhere to live.
             """
-            if not think:
+            nonlocal round_think
+            if not chunk:
                 return
-            self.push({"type": "think", "text": _join_think(think)}, emit)
-            think.clear()
+            if round_think is None:
+                round_think = self.push({"type": "think", "text": ""}, emit)
+            round_think["text"] += chunk
+            emit({"type": "think_delta", "text": chunk})
+
+        def on_text(chunk: str):
+            """The reply as it is written.
+
+            Only a preview: the real event still carries the finished text,
+            scrubbed, and is what the client keeps. This exists so the bubble
+            grows while the model is on its way to it.
+            """
+            if chunk:
+                emit({"type": "delta", "text": chunk})
+
+        def end_think() -> dict | None:
+            """Settle the round's block: scrubbed, bounded, re-rendered.
+
+            Returns the event it closed, so the caller can tell a round whose
+            reasoning already streamed from one that had none.
+            """
+            nonlocal round_think
+            if round_think is None:
+                return None
+            round_think["text"] = _finish_think(round_think["text"])
+            emit({"type": "think_end", "text": round_think["text"]})
+            done, round_think = round_think, None
+            return done
 
         if self.char:
             try:
@@ -2473,16 +2542,29 @@ class Agent:
                 if self.stopped():
                     reply = None
                     break
-                data = self.llm_complete(messages,
-                                         temperature=char_temp,
-                                         max_tokens=char_mt)
+                block = None
+                try:
+                    data = self.llm_complete(messages,
+                                             temperature=char_temp,
+                                             max_tokens=char_mt,
+                                             on_text=on_text,
+                                             on_reason=on_reason)
+                finally:
+                    # the round is over one way or the other — close its
+                    # reasoning block before the tool call runs, so what
+                    # stays on screen during a long generation is a finished
+                    # block rather than one that looks unfinished
+                    block = end_think()
                 msg = data["choices"][0]["message"]
                 messages.append(_clean_assistant_msg(msg))
                 # kept out of the context (see _clean_assistant_msg) and shown
-                # as a collapsed block at the end of the turn
+                # as a collapsed block, streamed as it arrives
                 reasoned = _reasoning_text(msg)
-                if reasoned:
-                    think.append(reasoned)
+                if reasoned and block is None:
+                    # a provider that hands the reasoning over in one lump, or
+                    # only in the finished message, still gets its block
+                    on_reason(reasoned)
+                    end_think()
 
                 tool_calls = msg.get("tool_calls") or []
                 if not tool_calls:
@@ -2521,8 +2603,9 @@ class Agent:
                     })
             else:
                 reply = "(stopped: too many tool rounds)"
+        except StreamStopped:
+            pass                 # the stop check below is what ends the turn
         except LLMError as e:
-            flush_think()
             evt = {"type": "error", "text": f"✗ {e}"}
             self.push(evt, emit)
             return False
@@ -2532,10 +2615,6 @@ class Agent:
             # no bubble — the user asked to stop, not to read a half answer
             emit({"type": "stopped"})
             return False
-
-        # every turn shows its reasoning, including the ones that end on an
-        # image card with no text at all
-        flush_think()
 
         if reply:                                 # empty final reply: no bubble
             # "mi" = messages length after appending this assistant message,
@@ -2571,11 +2650,15 @@ class Agent:
         (a freshly generated image, say) — `before` marks where that starts.
         """
         head = self.timeline[:idx]
-        # a reasoning block always sits immediately above the reply it led to,
-        # so this is the thinking behind the answer just replaced — the new
-        # turn pushed its own, and two of them would read as two attempts
-        if head and head[-1].get("type") == "think":
-            head = head[:-1]
+        # the replaced turn's reasoning goes with it. It streams live, so it
+        # sits above whatever that turn went on to do rather than immediately
+        # above the reply: everything between this turn's own user message and
+        # the reply being replaced belongs to the attempt being thrown away,
+        # and the re-answer pushed a fresh block of its own.
+        last_user = max((i for i, e in enumerate(head)
+                         if e.get("type") == "user"), default=-1)
+        head = [e for i, e in enumerate(head)
+                if e.get("type") != "think" or i <= last_user]
         self.timeline = head + self.timeline[before:]
         self.messages = messages
 
@@ -2771,25 +2854,243 @@ def _reasoning_text(msg: dict) -> str:
     return scrub_paths(out) if out else ""
 
 
-def _join_think(parts: list[str]) -> str:
-    """One turn's reasoning, one block.
+def _finish_think(text: str) -> str:
+    """A reasoning block as it is kept: scrubbed, and bounded.
 
-    A turn can take several rounds (call a tool, read the result, answer), and
-    each round thinks for itself. They are joined into a single collapsible
-    block with a rule between rounds — the user asked to *see* the thinking,
-    not to be walked through it round by round.
+    Streaming puts the raw text on screen as it arrives, so the scrub and the
+    cap are applied at the end of the round and the block re-rendered from
+    what comes back — the same reason the whole thinking string used to be
+    assembled before it was shown at all.
     """
-    text = "\n\n———\n\n".join(p for p in parts if p).strip()
-    if len(text) > THINK_MAX:
-        text = text[:THINK_MAX].rstrip() + "\n\n…"
-    return text
+    out = scrub_paths(text)
+    if len(out) > THINK_MAX:
+        out = out[:THINK_MAX].rstrip() + "\n\n…"
+    return out
+
+
+class StreamStopped(Exception):
+    """The user pressed stop while the model was still writing.
+
+    Not a failure: the turn ends the way a stopped turn always has, without
+    waiting out the rest of the completion.
+    """
+
+
+def _completion_or_raise(data: dict) -> dict:
+    """Accept a completion payload, or raise for the failure carried inside it.
+
+    Several providers answer HTTP 200 with the error in the body.
+    """
+    if not isinstance(data, dict):
+        raise LLMError("OpenRouter sent something that is not a completion")
+    if data.get("error") or not data.get("choices"):
+        raise LLMError("OpenRouter provider error: "
+                       f"{json.dumps(data.get('error') or data)[:300]}")
+    return data
+
+
+def _merge_tool_calls(parts: list, acc: dict) -> None:
+    """Fold one chunk's `tool_calls` delta into the per-index accumulator.
+
+    A tool call arrives in fragments: the id and the function name with the
+    first of them, the JSON arguments split across the rest, all keyed by the
+    call's `index`. Arguments concatenate verbatim. The name only when what
+    has been collected so far does not already end in it, so a provider that
+    repeats the name in a second chunk does not produce
+    `generate_imagegenerate_image`.
+    """
+    for tc in parts or []:
+        if not isinstance(tc, dict):
+            continue
+        i = tc.get("index")
+        cur = acc.setdefault(i if isinstance(i, int) else 0,
+                             {"id": "", "type": "function",
+                              "function": {"name": "", "arguments": ""}})
+        if tc.get("id"):
+            cur["id"] = tc["id"]
+        if tc.get("type"):
+            cur["type"] = tc["type"]
+        fn = tc.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = str(fn.get("name") or "")
+        if name and not cur["function"]["name"].endswith(name):
+            cur["function"]["name"] += name
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            cur["function"]["arguments"] += args
+
+
+def _delta_reasoning(delta: dict) -> str:
+    """The reasoning one streamed chunk carries, as plain text.
+
+    OpenRouter has put it in `delta.reasoning` — a string, or a list of parts
+    — and in `delta.reasoning_details`, which is the chunked form some
+    providers use. `reasoning` wins when both are present: they are the same
+    text, and reading both would show every line of reasoning twice.
+    """
+    rsn = delta.get("reasoning")
+    if isinstance(rsn, str):
+        return rsn
+    if isinstance(rsn, list):
+        return "".join(str(p.get("text") or "") for p in rsn
+                       if isinstance(p, dict))
+    if "reasoning" in delta:
+        return ""
+    return "".join(str(d.get("text") or "")
+                   for d in (delta.get("reasoning_details") or [])
+                   if isinstance(d, dict))
+
+
+def _read_stream(resp, on_text, on_reason, stopped) -> dict:
+    """Assemble one streamed completion, handing the text out as it arrives."""
+    ctype = (resp.headers.get("Content-Type") or "").lower()
+    if "text/event-stream" not in ctype:
+        # asked for a stream and given a document — some providers answer the
+        # plain request instead. Nothing has been emitted yet, so taking it
+        # whole is free and gives the caller the same message either way.
+        data = _completion_or_raise(resp.json())
+        msg = data["choices"][0]["message"] or {}
+        thought = _reasoning_text(msg)
+        if thought and on_reason:
+            on_reason(thought)
+        if msg.get("content") and on_text:
+            on_text(msg["content"])
+        return data
+
+    content: list[str] = []
+    thought: list[str] = []
+    details: list[dict] = []
+    calls: dict = {}
+    finish = ""
+    deltas = 0
+
+    for line in resp.iter_lines(decode_unicode=True):
+        if stopped and stopped():
+            raise StreamStopped()
+        line = (line or "").strip()
+        if not line.startswith("data:"):
+            continue                       # a comment or a named event
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        if chunk.get("error"):
+            # 200 OK with the failure inside the stream
+            raise LLMError("OpenRouter provider error: "
+                           f"{json.dumps(chunk['error'])[:300]}")
+        for choice in chunk.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            if choice.get("finish_reason"):
+                finish = choice["finish_reason"]
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            deltas += 1
+            piece = delta.get("content")
+            if isinstance(piece, str) and piece:
+                content.append(piece)
+                if on_text:
+                    on_text(piece)
+            thinking = _delta_reasoning(delta)
+            if thinking:
+                thought.append(thinking)
+                if on_reason:
+                    on_reason(thinking)
+            for part in delta.get("reasoning_details") or []:
+                if isinstance(part, dict):
+                    details.append(part)
+            _merge_tool_calls(delta.get("tool_calls"), calls)
+
+    if stopped and stopped():
+        raise StreamStopped()
+    if not deltas:
+        # an event stream that carried no choices at all is a dead connection
+        # wearing a 200 — distinct from a model that chose to answer with an
+        # empty message, which arrives as deltas and is left alone
+        raise LLMError("OpenRouter closed the stream with no data")
+
+    msg: dict = {"role": "assistant", "content": "".join(content)}
+    if "".join(thought).strip():
+        msg["reasoning"] = "".join(thought)
+    if details:
+        msg["reasoning_details"] = details
+    if calls:
+        msg["tool_calls"] = [calls[k] for k in sorted(calls)]
+    return {"choices": [{"message": msg, "finish_reason": finish}]}
+
+
+def chat_completion_stream(api_key: str, llm: str, messages: list,
+                           on_text=None, on_reason=None, stopped=None,
+                           temperature: float | None = None,
+                           max_tokens: int | None = None,
+                           tools: list | None = None) -> dict:
+    """One OpenRouter chat completion, streamed.
+
+    The same request and the same return shape as `chat_completion` — a caller
+    cannot tell which path answered — except that the reply and the model's
+    reasoning reach `on_text` / `on_reason` as they arrive. That is what lets
+    the reasoning block be on screen while the tool call it asked for is still
+    generating: a turn that draws a picture spends nearly all of its visible
+    life inside that generation.
+
+    `stopped` is polled between chunks, and raising StreamStopped off the read
+    is how a press of stop cuts the completion short rather than waiting out
+    the rest of it.
+    """
+    from agent_core import TOOLS
+    if tools is None:
+        tools = TOOLS
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "X-Title": "Anima",
+    }
+    body: dict = {"model": llm, "messages": messages, "stream": True,
+                  "temperature": temperature if temperature is not None
+                  else 0.7}
+    if tools:
+        # omitted entirely when empty — an empty array is rejected by some
+        # providers and tells the model nothing a missing key wouldn't
+        body["tools"] = tools
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
+    try:
+        resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                             headers=headers, json=body, stream=True,
+                             timeout=(20, LLM_TIMEOUT))
+    except requests.RequestException as e:
+        raise LLMError(f"OpenRouter unreachable: {e}") from e
+    if resp.status_code in (401, 403):
+        raise LLMError(f"OpenRouter auth error {resp.status_code}: "
+                       f"{resp.text[:300]}")
+    if resp.status_code != 200:
+        raise LLMError(f"OpenRouter error {resp.status_code}: "
+                       f"{resp.text[:300]}")
+    # requests decodes a charset-less text/* as ISO-8859-1, which mangles
+    # every non-ASCII character the model writes
+    resp.encoding = "utf-8"
+    try:
+        return _read_stream(resp, on_text, on_reason, stopped)
+    finally:
+        resp.close()
 
 
 def chat_completion(api_key: str, llm: str, messages: list,
                     temperature: float | None = None,
                     max_tokens: int | None = None,
                     tools: list | None = None) -> dict:
-    """One OpenRouter chat completion with tool definitions.
+    """One OpenRouter chat completion with tool definitions, in one piece.
+
+    The unstreamed twin of `chat_completion_stream`, kept as its fallback: a
+    stream that dies before a word comes out of it says the connection is
+    unreliable, not that the model is.
 
     `tools` defaults to the full tool set; pass an empty list to withhold the
     image tools (the chat's auto-images toggle is off).
@@ -2822,12 +3123,7 @@ def chat_completion(api_key: str, llm: str, messages: list,
     if resp.status_code != 200:
         raise LLMError(f"OpenRouter error {resp.status_code}: "
                        f"{resp.text[:300]}")
-    data = resp.json()
-    # some providers return HTTP 200 with an error inside the body
-    if data.get("error") or not data.get("choices"):
-        raise LLMError("OpenRouter provider error: "
-                       f"{json.dumps(data.get('error') or data)[:300]}")
-    return data
+    return _completion_or_raise(resp.json())
 
 
 def run_chat_turn(agent: Agent, user_text: str):
@@ -2885,7 +3181,7 @@ def run_reply_regen(agent: Agent, idx: int):
         return ("nokey", None)
     if not agent.lock.acquire(blocking=False):
         return ("busy", None)
-    ctx = agent.reply_context(idx)
+    msgs = agent.reply_context(idx)
     before = len(tl)
     q = Queue()
     agent.stop_flag.clear()
@@ -2896,8 +3192,8 @@ def run_reply_regen(agent: Agent, idx: int):
     def worker():
         try:
             agent.status_cb = emit
-            if agent.resume_turn(ctx, emit):
-                agent.commit_reply(idx, ctx, before)
+            if agent.resume_turn(msgs, emit):
+                agent.commit_reply(idx, msgs, before)
             else:
                 agent.rollback_reply(before)
         except Exception as e:                         # noqa: BLE001 — last resort
@@ -2912,10 +3208,12 @@ def run_reply_regen(agent: Agent, idx: int):
             q.put({"type": "done"})
 
     # A new thread starts with an empty context, so the outputs scope (and
-    # anything else request-scoped) would be lost mid-turn and images would
-    # land in the unscoped root. Copy it across explicitly.
-    ctx = contextvars.copy_context()
-    threading.Thread(target=ctx.run, args=(worker,), daemon=True).start()
+    # anything else request-scoped) would be lost mid-turn. Copy it across
+    # explicitly — and under its own name: `msgs` above is the message list
+    # this turn re-answers from, and shadowing it handed `resume_turn` a
+    # Context instead, so every regeneration died on the first response.
+    tctx = contextvars.copy_context()
+    threading.Thread(target=tctx.run, args=(worker,), daemon=True).start()
     return ("ok", q)
 
 
