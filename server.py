@@ -68,6 +68,7 @@ from agent_core import (                      # vendored agent brain
     strip_lora_tags,
     apply_lora_tags,
     lora_prompt_block,
+    vision_prompt_block,
     execute_tool,
 )
 from sd_client import LORA_WEIGHT_BAND, lora_referenceable, lora_tag
@@ -89,12 +90,79 @@ STATIC_MIME = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
     ".svg": "image/svg+xml",
     ".ico": "image/x-icon",
     ".txt": "text/plain; charset=utf-8",
     ".woff2": "font/woff2",
 }
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+
+#: Encoders for the on-the-wire copy of a gallery image. See `derived_image`:
+#: the master keeps exactly the bytes Forge wrote (PNG, lossless, carrying the
+#: `parameters` chunk the regen sheet reads back) and this is the *second*
+#: file the browser actually downloads.
+#:
+#: Measured over this box's own 2 671 images, encoded at full resolution —
+#: never downscaled, which is the one thing the numbers below are not:
+#:
+#:     webp q90   310 MB total    9.5x smaller than the 2 930 MB of PNG
+#:     avif q80   238 MB total   12.3x
+#:     jpeg q95   879 MB total    3.3x   (4:4:4, nothing subsampled)
+#:
+#: Fidelity against the original is PSNR 35-41 / SSIM 0.97-0.99 for webp and
+#: avif. Cel-shaded art scores low on PSNR, so read those against the other
+#: yardstick: a 50% downscale measures 33-36 dB. These never touch resolution.
+DERIVED_ENCODERS = {
+    "webp": {"ext": ".webp", "mime": "image/webp",
+             "kw": {"quality": 90, "method": 4}},
+    "avif": {"ext": ".avif", "mime": "image/avif",
+             "kw": {"quality": 80}},
+    "jpeg": {"ext": ".jpg", "mime": "image/jpeg",
+             "kw": {"quality": 95, "subsampling": 0, "optimize": True}},
+}
+#: What `/image/` serves unless the URL asks for something else with `?f=`.
+#: webp is universal (Safari 14+); avif is another 25% off and one query
+#: parameter away, for a client known to take it.
+DERIVED_FORMAT = "webp"
+
+#: What the model is *shown* of an image it made — the vision feature.
+#:
+#: JPEG 4:4:4 q95 rather than the webp the display path uses: it is the best
+#: fidelity per byte of any encode every provider accepts (45.8 dB against
+#: webp q90's 41.3, and Pillow's webp is always chroma-subsampled with no way
+#: to stop it, which is what costs it the ink lines). Three times the bytes of
+#: webp, and still a tenth of the master.
+#:
+#: It reuses the same `.derived` cache the display path fills, so a picture
+#: the reader has already looked at costs one disk read to send.
+VISION_FORMAT = "jpeg"
+#: Ceiling on one attached file. A master that has to fall back to PNG is
+#: 1.1 MB; past this it is an upload or a panorama, and its base64 on every
+#: round of every turn is worse than not seeing it.
+VISION_MAX_BYTES = 4 * 1024 * 1024
+#: How many images ONE user message may attach by hand. A deliberate act, so
+#: it is honoured *on top of* `vision_count` — but still bounded, because the
+#: bytes are re-sent on every round of the turn.
+VISION_MAX_REFS = 6
+_VISION_MIME = {".png": "image/png", ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg", ".webp": "image/webp",
+                ".avif": "image/avif"}
+
+#: Cache policy for the three image routes. A year, because the bytes behind
+#: the URL are named for what they are and never rewritten in place: a
+#: generation is `<prefix>_<stamp>_<seed>_<n>.png`, an edit is saved as a new
+#: file, and the derivative is keyed by the master's own name.
+#:
+#: `stale-while-revalidate` rather than `immutable` on purpose. The one
+#: exception is an overwrite in place — `save_images` will reuse a name if a
+#: seed repeats inside the same second, and an upload that lands on a name is
+#: replaced rather than refused. `immutable` would pin that old picture
+#: forever; this serves the cached copy instantly and still picks the new one
+#: up once the window closes, off the ETag `_file` sends.
+IMG_CACHE = "private, max-age=31536000, stale-while-revalidate=604800"
+
 SEARCH_LIMIT = 500                   # cap on hits from /api/gallery/search
 GEN_TOOLS = {"generate_image", "edit_image"}
 PROGRESS_POLL = 1.2
@@ -139,6 +207,36 @@ DEFAULT_CONFIG = {
     "inject_char_tags": True,     # active card's appearance tags
     "inject_persona_tags": True,  # user persona's tags when the shot draws them
     "inject_lora_tags": True,     # the card's <lora:…> activation tags
+    # Let the model see the pictures (Settings > Generation > Text).
+    #
+    # Every generation's tool result already carries its own `saved_files` rel
+    # paths, and `sync_gen_context` keeps those pointing at the newest variant
+    # through a regeneration — so nothing is added to the message and nothing
+    # is written to the chat file. The bytes are expanded from that existing
+    # reference when the request is built, which is also what makes "newest N"
+    # a one-line policy rather than a history migration.
+    #
+    # `vision_count` caps the *automatic* ones: the newest N, 0 = all. An
+    # image the user attached by hand is honoured on top of it, because that
+    # one was asked for. Both default on — a missing key reads as on, so
+    # configs predating the keys get the feature without a migration.
+    "vision_images": True,
+    "vision_count": 3,
+    # How hard the model thinks before it answers, sent to OpenRouter as the
+    # `reasoning` parameter (Settings > Generation > Text). "" = say nothing
+    # and take the model's own default; "off" = ask for no reasoning at all;
+    # anything else is an effort the model itself declares. The picker is
+    # built from the catalogue's per-model `reasoning` object rather than a
+    # fixed list, because the vocabularies genuinely differ — `max/xhigh/
+    # high/medium/low/minimal/none` across the 471 models, seven distinct
+    # subsets, and 134 that take no effort control at all.
+    "thinking": "",
+    # Preferred OpenRouter provider(s) for this user's turns, comma separated,
+    # in order of preference (Settings > Generation > Text). "" = send no
+    # `provider` key at all and take OpenRouter's own routing, which is the
+    # behaviour every config had before this key existed. Sent as a soft
+    # preference with fallbacks allowed — see `provider_param`.
+    "provider_pref": "",
 }
 
 
@@ -219,7 +317,8 @@ AUDITED = {
     "user.delete",
     "login.fail", "login.ok",
     # the privileged surface in general
-    "settings.sd_url", "settings.key", "system_prompt.set",
+    "settings.sd_url", "settings.key", "settings.provider",
+    "system_prompt.set",
     "model_guide.set", "character.delete",
 }
 
@@ -710,8 +809,8 @@ def user_row(u: dict) -> dict:
     d = user_dir(uid)
     chats = sum(1 for _ in (d / "chats").glob("*/*.json")) if (
         d / "chats").is_dir() else 0
-    # Excludes .thumbs — those are cached jpegs, and counting them made the
-    # admin's image count disagree with the gallery by a few hundred.
+    # Excludes .thumbs and .derived — those are cached copies, and counting
+    # them made the admin's image count disagree with the gallery.
     root = OUT_DIR / uid
     images = sum(1 for p in root.rglob("*")
                  if p.is_file() and not p.relative_to(root).parts[0].startswith(".")
@@ -731,6 +830,192 @@ OR_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OR_MODELS_FILE = DATA_DIR / "or_models.json"
 OR_TTL = 24 * 3600         # the catalogue moves slowly; a day is plenty
 OR_FETCH_TIMEOUT = 12
+
+#: Preferred provider (Settings > Generation > Text). OpenRouter fans one model
+#: out across every provider that serves it, and the spread is not small —
+#: `deepseek/deepseek-v4.1-flash` has 34 of them, measured p50 throughput
+#: between 11 and 240 tokens/sec, and the cheap end is the slow end. Sending
+#: nothing (the default) leaves that pick to the gateway, which is what makes
+#: a turn cost 40 s on one provider and 13 s on another with no other change.
+#:
+#: Sending a preference is a *preference*, never a restriction: see
+#: `provider_param`. There is deliberately no "only" switch — a hard filter
+#: turns a provider outage into a failed turn, and the user cannot tell the
+#: difference from a broken app.
+PROVIDER_MAX = 5                 # more names than this is not a preference
+PROVIDER_NAME_RE = re.compile(r"^[\w .+\-]{1,40}$")
+PROVIDERS_URL = "https://openrouter.ai/api/v1/models/{}/endpoints"
+PROVIDERS_TTL = 3600
+_PROVIDER_CACHE: dict[str, tuple[float, list]] = {}
+_ALL_PROVIDERS: dict = {}
+
+
+def provider_names(raw) -> list[str]:
+    """The provider names in a saved preference, in order, deduped.
+
+    Tolerant on purpose: this runs on the way *into* a request, where a bad
+    value must degrade to "no preference" rather than lose the turn. The
+    strict version that runs on the way in from the Settings box is
+    `clean_provider_pref`.
+    """
+    out: list[str] = []
+    for part in str(raw or "").split(","):
+        name = " ".join(part.split())        # collapse inner whitespace
+        if name and name.lower() not in (o.lower() for o in out):
+            out.append(name)
+    return out[:PROVIDER_MAX]
+
+
+def clean_provider_pref(raw) -> str:
+    """Canonical "A, B" from the settings field.
+
+    Raises ValueError on something that could not be a provider name. Dropping
+    it silently is the worse failure: the box would read back as saved while
+    the preference applied to nothing, and OpenRouter ignores unmatched names
+    without saying so.
+    """
+    for name in provider_names(raw):
+        if not PROVIDER_NAME_RE.match(name):
+            raise ValueError(f"“{name}” is not a provider name")
+    return ", ".join(provider_names(raw))
+
+
+def provider_param(pref) -> dict | None:
+    """The OpenRouter `provider` object for a preference, or None to send none.
+
+    `order` is a preference and `allow_fallbacks` stays on, so a provider that
+    is down, or that does not serve the model this round picked, cannot kill
+    the turn — it just goes where it would have gone anyway.
+    """
+    names = provider_names(pref)
+    if not names:
+        return None
+    return {"order": names, "allow_fallbacks": True}
+
+
+def model_providers(model: str, key: str = "") -> list[dict]:
+    """Which providers serve `model`, fastest first, with their measured speed.
+
+    OpenRouter's per-model endpoints route carries `throughput_last_30m` and
+    `latency_last_30m` percentiles — but only when the call is authenticated:
+    without a key both objects come back null, while the *names* still come
+    back, which is why the box is usable before a key is saved. This is also
+    the only place the app can learn provider names, and a name typed from
+    memory is exactly how a preference ends up applying to nothing.
+
+    Best effort by design: an unreachable catalogue returns [] and the box
+    falls back to free text, never to an error. Cached in memory for an hour —
+    the percentiles move, but not fast enough to fetch per settings open.
+    """
+    model = str(model or "").strip()
+    if not model:
+        return []
+    # keyed on whether this call is authenticated, because the two answers
+    # differ in the part worth caching: without a key the percentiles come back
+    # null, and serving that entry to a key-holding user hides the speeds for
+    # the whole TTL — which is the one thing the setting is for
+    ckey = f"{model}\x00{int(bool(key))}"
+    hit = _PROVIDER_CACHE.get(ckey)
+    if hit and time.time() - hit[0] < PROVIDERS_TTL and hit[1]:
+        return hit[1]
+    headers = {"Accept": "application/json"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    try:
+        resp = requests.get(PROVIDERS_URL.format(model), headers=headers,
+                            timeout=OR_FETCH_TIMEOUT)
+        resp.raise_for_status()
+        eps = ((resp.json() or {}).get("data") or {}).get("endpoints") or []
+    except Exception:                                    # noqa: BLE001
+        return hit[1] if hit else []
+    best: dict[str, dict] = {}
+    for e in eps:
+        if not isinstance(e, dict):
+            continue
+        name = str(e.get("provider_name") or "").strip()
+        if not name:
+            continue
+        thr = ((e.get("throughput_last_30m") or {}).get("p50"))
+        lat = ((e.get("latency_last_30m") or {}).get("p50"))
+        cur = best.get(name)
+        if cur is None or (thr or 0) > (cur.get("thr") or 0):
+            best[name] = {"name": name, "thr": thr, "lat": lat,
+                          "in": _usd_per_million(
+                              (e.get("pricing") or {}).get("prompt")),
+                          "out": _usd_per_million(
+                              (e.get("pricing") or {}).get("completion"))}
+    out = sorted(best.values(), key=lambda p: -(p.get("thr") or 0))
+    if out:
+        _PROVIDER_CACHE[ckey] = (time.time(), out)
+    return out
+
+
+def all_providers(key: str = "") -> list[str]:
+    """Every provider OpenRouter knows, alphabetically.
+
+    The fallback for a model that publishes no routing table — the
+    `~author/family-latest` aliases on this box are one, and `/models/{id}/
+    endpoints` answers 200 with zero endpoints for them. Without this the
+    picker would be a dropdown with nothing in it. A provider listed here that
+    does not serve the model is harmless: the preference always falls back.
+    """
+    cached = _ALL_PROVIDERS.get("names")
+    if cached and time.time() - _ALL_PROVIDERS.get("ts", 0) < PROVIDERS_TTL:
+        return cached
+    headers = {"Accept": "application/json"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    try:
+        resp = requests.get("https://openrouter.ai/api/v1/providers",
+                            headers=headers, timeout=OR_FETCH_TIMEOUT)
+        resp.raise_for_status()
+        names = sorted({str(p.get("name")).strip()
+                        for p in (resp.json() or {}).get("data") or []
+                        if isinstance(p, dict) and p.get("name")})
+    except Exception:                                    # noqa: BLE001
+        return cached or []
+    _ALL_PROVIDERS.update({"names": names, "ts": time.time()})
+    return names
+
+
+def provider_options(cfg: dict) -> dict:
+    """The preferred-provider choices for a user, ready to paint a <select>.
+
+    Exactly the shape of `thinking_options` — `value`, `options` of
+    value/label, `note` — because it is painted by the same kind of control.
+    The list is the providers that actually serve the chain's first model,
+    fastest first, from OpenRouter's own 30-minute percentiles; the label
+    carries the speed so the choice needs no explanation.
+    """
+    key = str(cfg.get("openrouter_key") or "")
+    models = [str(m).strip() for m in (cfg.get("llm_models") or [])
+              if str(m).strip()]
+    saved = provider_names(cfg.get("provider_pref"))
+    want = saved[0] if saved else ""
+    options = [{"value": "", "label": "OpenRouter picks"}]
+    if not models:
+        return {"value": "", "options": options, "note": "Set a model first."}
+
+    provs, note = [], ""
+    for m in models:
+        # the fallback chain is tried in order: the first model with a routing
+        # table is the one the list comes from
+        provs = model_providers(m, key)
+        if provs:
+            break
+    if not provs:
+        provs = [{"name": n} for n in all_providers(key)]
+        note = ("No routing data for this model — every provider is listed."
+                if provs else "Could not reach OpenRouter.")
+    elif not any(p.get("thr") for p in provs):
+        note = ("Save an API key to see the measured speeds." if not key
+                else "OpenRouter has no speed data for this model right now.")
+    for p in provs:
+        speed = p.get("thr")
+        options.append({"value": p["name"],
+                        "label": p["name"] + (f" — {round(speed)} tok/s"
+                                              if speed else "")})
+    return {"value": want, "options": options, "note": note}
 
 
 def _usd_per_million(value) -> float:
@@ -793,6 +1078,29 @@ def fetch_openrouter_models(key: str = "", force: bool = False) -> dict:
             ctx = int(m.get("context_length") or 0)
         except (TypeError, ValueError):
             ctx = 0
+        # The model's own thinking capability, verbatim in shape but trimmed
+        # to what the picker needs. `supported_efforts` has three states the
+        # docs distinguish and all three matter: a list (only these), `null`
+        # (every gateway level), or absent (no effort control at all) — so
+        # the flag and the list are kept apart rather than collapsed.
+        rsn = m.get("reasoning")
+        reasoning = None
+        if isinstance(rsn, dict):
+            if "supported_efforts" not in rsn:
+                efforts, any_effort = [], False
+            elif rsn.get("supported_efforts") is None:
+                efforts, any_effort = [], True
+            else:
+                efforts = [str(x) for x in rsn["supported_efforts"]
+                           if isinstance(x, str)]
+                any_effort = False
+            reasoning = {
+                "efforts": efforts,          # descending, highest first
+                "any_effort": any_effort,
+                "default": str(rsn.get("default_effort") or ""),
+                "mandatory": bool(rsn.get("mandatory")),
+                "max_tokens": bool(rsn.get("supports_max_tokens")),
+            }
         models.append({
             "id": mid,
             "name": str(m.get("name") or mid),
@@ -800,6 +1108,16 @@ def fetch_openrouter_models(key: str = "", force: bool = False) -> dict:
             # the agent drives images through function calling, so a model
             # without "tools" is a plain-text-only member of the chain
             "tools": "tools" in (m.get("supported_parameters") or []),
+            # …and a model without "image" in its input modalities cannot be
+            # sent a picture at all: the request comes back 400 and takes the
+            # whole turn with it. The vision feature is gated on this, not on
+            # a model-name convention — `~deepseek/deepseek-pro-latest` is
+            # text-only sitting right beside a vision model from the vendor
+            # that actually answers here.
+            "img": "image" in ((m.get("architecture")
+                                or {}).get("input_modalities") or []),
+            # absent = the model has no `reasoning` block = it does not think
+            "reasoning": reasoning,
             "in": _usd_per_million(price.get("prompt")),
             "out": _usd_per_million(price.get("completion")),
         })
@@ -817,6 +1135,134 @@ def fetch_openrouter_models(key: str = "", force: bool = False) -> dict:
     except OSError:
         pass
     return {"models": models, "ts": ts, "error": ""}
+
+
+#: Last-read id -> (can-see-images, reasoning-capabilities) maps, with the
+#: mtime they came from. The file is 60 KB and parsed once per LLM round
+#: otherwise, which is once per round of every turn in every conversation on
+#: the box. Both maps come from the one parse — they are read in the same
+#: request, so parsing twice would be pure waste.
+_OR_META_CACHE: tuple[int, dict, dict] = (0, {}, {})
+
+
+def _or_meta() -> tuple[dict, dict]:
+    """(id -> can-see-images, id -> reasoning dict), from the cache on disk.
+
+    The reasoning map answers for *every* id in the catalogue, using a dict
+    with `voice: False` for a model that has no `reasoning` block. A missing
+    id means the catalogue has never seen the model, which is not the same
+    fact and is why the two are not collapsed into `None`.
+    """
+    global _OR_META_CACHE
+    try:
+        st = OR_MODELS_FILE.stat()
+    except OSError:
+        return {}, {}
+    if _OR_META_CACHE[0] == st.st_mtime_ns:
+        return _OR_META_CACHE[1], _OR_META_CACHE[2]
+    try:
+        cache = json.loads(OR_MODELS_FILE.read_text(encoding="utf-8"))
+        imgs, reasons = {}, {}
+        for m in (cache.get("models") or []):
+            mid = m.get("id")
+            if not mid:
+                continue
+            mid = str(mid)
+            imgs[mid] = bool(m.get("img", True))
+            r = m.get("reasoning")
+            reasons[mid] = ({"voice": True, **r} if isinstance(r, dict)
+                            else {"voice": False})
+    except Exception:                                    # noqa: BLE001
+        return _OR_META_CACHE[1], _OR_META_CACHE[2]
+    _OR_META_CACHE = (st.st_mtime_ns, imgs, reasons)
+    return imgs, reasons
+
+
+def _or_image_map() -> dict:
+    return _or_meta()[0]
+
+
+def model_image_input(model: str) -> bool:
+    """Whether `model` can be sent a picture.
+
+    Only a positive *no* from the cached catalogue suppresses one. "Unknown"
+    has to mean yes: the catalogue is fetched when the user opens the model
+    picker, so treating an absent one as "text-only" would silently switch the
+    whole feature off for anyone who has never opened that pane — which is
+    most people, on a fresh box.
+    """
+    return _or_image_map().get(model, True)
+
+
+#: Every effort name OpenRouter's gateway accepts (docs, "Reasoning Effort
+#: Level"), highest first. Used to expand a model that declares `null`
+#: supported_efforts, and to validate a saved value.
+REASONING_EFFORTS = ("max", "xhigh", "high", "medium", "low", "minimal",
+                     "none")
+_REASONING_LABELS = {"max": "Max", "xhigh": "Extra high", "high": "High",
+                     "medium": "Medium", "low": "Low", "minimal": "Minimal"}
+
+
+def reasoning_info(model: str) -> dict | None:
+    """What `model` declares about its own thinking, or None when unknown.
+
+    None means the catalogue has never seen the id — no list fetched yet, or
+    an off-list model — which is not the same as a model that does not
+    reason. `model_image_input` treats unknown the same way, for the same
+    reason: the catalogue is only read once someone opens the picker.
+    """
+    known = _or_meta()[1]
+    return known.get(model) if model in known else None
+
+
+def _effort_ok(effort: str, info: dict) -> bool:
+    if info.get("any_effort"):
+        return True
+    return effort in (info.get("efforts") or [])
+
+
+def thinking_options(cfg: dict) -> dict:
+    """The thinking-level choices for a user, ready to paint a <select>.
+
+    The list is the *model's own* `supported_efforts`. That is the whole
+    point: OpenRouter declares seven different vocabularies across its 471
+    models, so a fixed picker would offer levels the model rejects. An empty
+    `options` means there is nothing to choose; `note` says why.
+    """
+    models = cfg.get("llm_models") or []
+    primary = str(models[0]).strip() if models else ""
+    saved = str(cfg.get("thinking") or "").strip().lower()
+    options = [{"value": "", "label": "Model default"}]
+    if not primary:
+        return {"value": saved, "options": options, "supported": False,
+                "note": "Set a model first."}
+    info = reasoning_info(primary)
+    if info is None:
+        # never fetched, or off-list: guessing a level it may reject would
+        # cost the whole turn, so ask for the list instead of inventing one
+        return {"value": saved, "options": options, "supported": False,
+                "note": "Open “Choose from OpenRouter…” once so this model's "
+                        "own thinking levels can be read."}
+    if not info.get("voice"):
+        return {"value": "", "options": [], "supported": False,
+                "note": f"{primary.split('/')[-1]} does not expose a "
+                        "thinking level."}
+    if not info.get("mandatory"):
+        options.append({"value": "off", "label": "Off (no thinking)"})
+    levels = list(info.get("efforts") or [])
+    if not levels and info.get("any_effort"):
+        levels = list(REASONING_EFFORTS)
+    dflt = str(info.get("default") or "").lower()
+    for lv in levels:
+        if lv == "none":
+            continue                 # "none" is the same request as Off
+        label = _REASONING_LABELS.get(lv, lv.capitalize())
+        options.append({"value": lv,
+                        "label": label + (" — model default" if lv == dflt
+                                          else "")})
+    return {"value": saved, "options": options, "supported": True,
+            "note": "" if any(o["value"] for o in options)
+                    else "This model takes no thinking level."}
 
 
 # -------------------------------------------------------------- characters
@@ -1877,6 +2323,8 @@ class Agent:
             base += ("\n\nScenario Context:\nScenario: "
                      + (sc.get("name") or "").strip()[:80]
                      + "\n" + (sc.get("description") or "").strip()[:4000])
+        if self.cfg.get("vision_images", True):
+            base += vision_prompt_block(self.vision_count())
         if not self.auto_images:
             # the image tools are withheld for this chat, so say so up front —
             # otherwise the model apologises for "having no tools" every turn
@@ -1993,11 +2441,147 @@ class Agent:
             emit(dict(evt, idx=len(self.timeline) - 1))
         return evt
 
+    # -------------------------------------------------------------- vision
+
+    def vision_count(self) -> int:
+        """How many of its own images a turn may send. 0 = all of them.
+
+        Clamped rather than trusted: it is a number out of a settings form,
+        and a negative or absent one must not become "unlimited" by accident.
+        """
+        try:
+            n = int(self.cfg.get("vision_count", 3))
+        except (TypeError, ValueError):
+            n = 3
+        return max(0, min(n, 20))
+
+    def vision_uri(self, rel: str) -> str | None:
+        """A data URI for the image at `rel`, or None if it cannot be shown."""
+        try:
+            path = out_file(rel)
+        except Exception:                                    # noqa: BLE001
+            return None
+        if path is None:
+            return None
+        return vision_data_uri(path)
+
+    def attach_images(self, messages: list, allow: bool) -> list:
+        """A copy of `messages` with pictures attached, for this request only.
+
+        The bytes are deliberately NOT in the context. Every generation's tool
+        message already carries `saved_files`, and `sync_gen_context` repoints
+        that at the newest variant, so the reference is already where it
+        belongs and this only expands it on the way out. `_save_state` writes
+        `messages[1:]` to the chat file *and* the restart mirror, so base64 in
+        the context would rewrite megabytes on every autosave of every chat —
+        hence the copy, and hence nothing here touches an input dict.
+
+        Two sources, counted differently on purpose:
+
+        * an image the user attached by hand (`refs` on a user message) is
+          always shown, and sits *on top of* the cap — they asked for it;
+        * the model's own newest `vision_count` generations, walked backwards,
+          so a long chat carries its recent work rather than all of it. Every
+          round of a turn re-sends the whole list, so this single number is
+          what a turn costs to upload.
+
+        `refs` is stripped from the outgoing message either way: it is our
+        key, not the API's, and an unknown field on a message is a 400 waiting
+        to happen on a strict provider.
+        """
+        on = bool(self.cfg.get("vision_images", True)) and allow
+        cap = self.vision_count()
+        picks: dict[int, list[str]] = {}
+        auto = 0
+        if on:
+            for i in range(len(messages) - 1, -1, -1):
+                if cap and auto >= cap:
+                    break
+                m = messages[i]
+                if m.get("role") != "tool" or not isinstance(m.get("content"),
+                                                             str):
+                    continue
+                try:
+                    content = json.loads(m["content"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(content, dict):
+                    continue
+                # reversed: the last file saved in a batch is the variant the
+                # reader is looking at, unless a regeneration repointed the
+                # tool message, in which case `saved_files` already holds the
+                # one that replaced it
+                for rel in reversed([str(f) for f
+                                     in (content.get("saved_files") or [])]):
+                    if cap and auto >= cap:
+                        break
+                    picks.setdefault(i, []).append(rel)
+                    auto += 1
+        out: list = []
+        changed = False
+        for i, m in enumerate(messages):
+            hand = (m.get("refs") or []) if on else []
+            rels = [str(r) for r in hand] + picks.get(i, [])
+            if not rels and not m.get("refs"):
+                out.append(m)
+                continue
+            changed = True
+            nm = {k: v for k, v in m.items() if k != "refs"}
+            parts: list = [{"type": "text",
+                            "text": str(nm.get("content") or "")}]
+            for rel in rels:
+                uri = self.vision_uri(rel)
+                if uri:
+                    parts.append({"type": "image_url",
+                                  "image_url": {"url": uri}})
+            nm["content"] = parts
+            out.append(nm)
+        return out if changed else messages
+
     # -------------------------------------------------------------- LLM
+
+    def reasoning_param(self, model: str) -> dict | None:
+        """The OpenRouter `reasoning` object for `model`, or None to omit it.
+
+        The saved value is one of the levels the model itself declared, so
+        normally it is forwarded as-is. Three cases are dropped rather than
+        guessed at, because a payload the model rejects takes the whole turn
+        with it: a model that declares no reasoning at all, a level this model
+        does not list, and `off` on a model whose reasoning is mandatory.
+
+        An *unknown* model is treated as accepting it — the same rule as
+        `model_image_input`, for the same reason: the catalogue is only read
+        once someone opens the picker, so "unknown" must not silently disable
+        what the user explicitly chose.
+        """
+        val = str(self.cfg.get("thinking") or "").strip().lower()
+        if not val:
+            return None
+        info = reasoning_info(model)
+        if info is not None and not info.get("voice"):
+            return None                 # the model does not reason
+        if val == "off":
+            if info is not None and info.get("mandatory"):
+                return None             # mandatory reasoning cannot be off
+            return {"enabled": False}
+        if info is not None and not _effort_ok(val, info):
+            return None                 # not a level this model accepts
+        return {"effort": val}
+
+    def provider_param(self) -> dict | None:
+        """The routing preference this user asked for, or None.
+
+        Computed once per turn rather than per model: a provider name is a
+        property of the gateway, not of the model, so a fallback chain of three
+        models gets the same preference three times and OpenRouter sorts out
+        which of them that provider actually serves.
+        """
+        return provider_param(self.cfg.get("provider_pref"))
 
     def llm_complete(self, messages: list, temperature: float | None = None,
                      max_tokens: int | None = None,
-                     on_text=None, on_reason=None) -> dict:
+                     on_text=None, on_reason=None,
+                     stoppable: bool = True) -> dict:
         """LLMRouter logic inline: try models in order, retry rate limits,
         stick with whichever model last worked.
 
@@ -2009,9 +2593,23 @@ class Agent:
         they stream in. The request goes out streamed either way, so there is
         one response shape to handle rather than two; with no callbacks
         nothing is shown until the whole message has arrived, as before.
+
+        `stoppable=False` is for callers that are NOT a chat turn — the
+        character form's assistant is the one. The stop flag is cleared at the
+        start of a turn and by nothing else, so a flag left set by an earlier
+        abort follows every later caller; and a non-turn caller has no Stop
+        button of its own, so there is nothing for it to be stopped by. Left
+        shared, the two break each other both ways: a stale flag kills the
+        request outright with a StreamStopped nobody downstream handles, and a
+        Stop aimed at a running turn would abort the other request as
+        collateral.
         """
         models = self.llm_models
         tools: list = [] if not self.auto_images else None
+        # once per turn: a provider name describes the gateway, not the model,
+        # so it is the same for every member of the fallback chain
+        prov = self.provider_param()
+        stopped = self.stopped if stoppable else None
         last_err: LLMError | None = None
         # one word already on screen means a retry would duplicate it, so from
         # that point on every failure is a failure
@@ -2028,16 +2626,22 @@ class Agent:
                 on_reason(chunk)
 
         for model in models:
+            # per model, not per turn: a text-only member of the fallback chain
+            # gets the plain messages instead of a 400 that would take the
+            # whole turn down with it — and a member whose thinking levels
+            # differ gets the level it actually declares
+            req = self.attach_images(messages, model_image_input(model))
+            rsn = self.reasoning_param(model)
             for attempt in range(2):               # one retry per model
                 try:
                     self.emit_status(f"thinking · {model.split('/')[-1]}")
                     try:
                         return chat_completion_stream(
-                            self.cfg["openrouter_key"], model, messages,
+                            self.cfg["openrouter_key"], model, req,
                             on_text=text_of, on_reason=reason_of,
-                            stopped=self.stopped,
+                            stopped=stopped,
                             temperature=temperature, max_tokens=max_tokens,
-                            tools=tools)
+                            tools=tools, reasoning=rsn, provider=prov)
                     except StreamStopped:
                         raise
                     except LLMError:
@@ -2047,16 +2651,30 @@ class Agent:
                         # is a broken stream, not a broken model, so ask again
                         # in the shape that has never needed one
                         return chat_completion(self.cfg["openrouter_key"],
-                                               model, messages,
+                                               model, req,
                                                temperature=temperature,
                                                max_tokens=max_tokens,
-                                               tools=tools)
+                                               tools=tools, reasoning=rsn,
+                                               provider=prov)
                 except LLMError as e:
                     last_err = e
                     if _is_auth_error(e):          # bad key: don't retry
                         raise LLMError(
                             "OpenRouter rejected the API key "
                             "(auth error). Check it in Settings.") from e
+                    if req is not messages and not spoken["any"]:
+                        # A payload carrying pictures is a shape some
+                        # providers refuse outright — `tool` messages take
+                        # `content` parts on OpenRouter's side of the wire,
+                        # and nowhere is that guaranteed. Nothing has been
+                        # said yet, so drop them and ask the same model again
+                        # in the plain shape rather than losing the turn; the
+                        # model simply does not see this one.
+                        req = messages
+                        self.emit_status(
+                            f"{model.split('/')[-1]} rejected the image — "
+                            "retrying without it…")
+                        continue
                     if attempt == 0:
                         self.emit_status(
                             f"{model.split('/')[-1]} hiccup — retrying…")
@@ -2463,9 +3081,18 @@ class Agent:
 
     # -------------------------------------------------------------- turn
 
-    def run_turn(self, user_text: str, emit) -> None:
-        self.messages.append({"role": "user", "content": user_text})
-        self.push({"type": "user", "text": user_text}, emit)
+    def run_turn(self, user_text: str, emit, refs: list | None = None) -> None:
+        rels = [str(r) for r in (refs or [])][:VISION_MAX_REFS]
+        msg: dict = {"role": "user", "content": user_text}
+        if rels:
+            # Kept on the message and expanded at request time — never the
+            # bytes, which would be re-saved with the chat on every autosave.
+            msg["refs"] = rels
+        self.messages.append(msg)
+        evt: dict = {"type": "user", "text": user_text}
+        if rels:
+            evt["refs"] = rels          # so a reload shows what was attached
+        self.push(evt, emit)
         self._complete(self.messages, emit)
 
     def resume_turn(self, messages: list, emit) -> bool:
@@ -3030,7 +3657,9 @@ def chat_completion_stream(api_key: str, llm: str, messages: list,
                            on_text=None, on_reason=None, stopped=None,
                            temperature: float | None = None,
                            max_tokens: int | None = None,
-                           tools: list | None = None) -> dict:
+                           tools: list | None = None,
+                           reasoning: dict | None = None,
+                           provider: dict | None = None) -> dict:
     """One OpenRouter chat completion, streamed.
 
     The same request and the same return shape as `chat_completion` — a caller
@@ -3061,6 +3690,15 @@ def chat_completion_stream(api_key: str, llm: str, messages: list,
         body["tools"] = tools
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
+    if reasoning:
+        # {"effort": …} for a level, {"enabled": false} for off; absent means
+        # the model's own default applies
+        body["reasoning"] = reasoning
+    if provider:
+        # {"order": [names], "allow_fallbacks": true} — omitted entirely when
+        # unset, so a config that never touched the setting sends exactly the
+        # request it sent before the setting existed
+        body["provider"] = provider
     try:
         resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
                              headers=headers, json=body, stream=True,
@@ -3085,7 +3723,9 @@ def chat_completion_stream(api_key: str, llm: str, messages: list,
 def chat_completion(api_key: str, llm: str, messages: list,
                     temperature: float | None = None,
                     max_tokens: int | None = None,
-                    tools: list | None = None) -> dict:
+                    tools: list | None = None,
+                    reasoning: dict | None = None,
+                    provider: dict | None = None) -> dict:
     """One OpenRouter chat completion with tool definitions, in one piece.
 
     The unstreamed twin of `chat_completion_stream`, kept as its fallback: a
@@ -3112,6 +3752,10 @@ def chat_completion(api_key: str, llm: str, messages: list,
         body["tools"] = tools
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
+    if reasoning:
+        body["reasoning"] = reasoning
+    if provider:
+        body["provider"] = provider
     try:
         resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
                              headers=headers, json=body, timeout=LLM_TIMEOUT)
@@ -3126,7 +3770,7 @@ def chat_completion(api_key: str, llm: str, messages: list,
     return _completion_or_raise(resp.json())
 
 
-def run_chat_turn(agent: Agent, user_text: str):
+def run_chat_turn(agent: Agent, user_text: str, refs: list | None = None):
     """Acquire the agent lock, run the turn, stream events through a queue.
     Returns the queue, or None when the agent is already busy."""
     if not agent.has_key():
@@ -3142,7 +3786,7 @@ def run_chat_turn(agent: Agent, user_text: str):
     def worker():
         try:
             agent.status_cb = emit
-            agent.run_turn(user_text, emit)
+            agent.run_turn(user_text, emit, refs)
         except Exception as e:                         # noqa: BLE001 — last resort
             evt = {"type": "error",
                    "text": f"✗ server error — {type(e).__name__}: {e}"}
@@ -3924,9 +4568,31 @@ def _seed_from_name(name: str) -> str | None:
     return m.group(1) if m else None
 
 
+def drop_thumb(master: Path, exts: tuple = (".webp", ".jpg")) -> None:
+    """Forget a master's cached thumbnails.
+
+    The default covers both extensions, because the cache moved from JPEG to
+    WebP: an install that predates that still has the `.jpg` sitting next to
+    it and nothing reads it any more. `thumbnail` passes just the legacy one,
+    so it does not delete the file it is in the middle of writing.
+    Best-effort — a failure costs disk, not a request.
+    """
+    for ext in exts:
+        try:
+            (_out_root() / ".thumbs" / (master.stem + ext)).unlink()
+        except OSError:
+            pass
+
+
 def thumbnail(path: Path) -> Path | None:
+    """The gallery grid's copy: 480x720, webp.
+
+    WebP rather than the JPEG this used to be — same pixels, 0.69x the bytes
+    over 8 images sampled off this box (40.0 KB vs 57.6 KB), and it keeps the
+    grid on the same encoder as `/image/`.
+    """
     tdir = _out_root() / ".thumbs"
-    thumb = tdir / (path.stem + ".jpg")
+    thumb = tdir / (path.stem + ".webp")
     try:
         if thumb.exists() and thumb.stat().st_mtime >= path.stat().st_mtime:
             return thumb
@@ -3937,10 +4603,148 @@ def thumbnail(path: Path) -> Path | None:
         im = Image.open(path).convert("RGB")
         im.thumbnail((480, 720))
         tdir.mkdir(exist_ok=True)
-        im.save(thumb, "JPEG", quality=86)
+        im.save(thumb, "WEBP", quality=85, method=4)
+        drop_thumb(path, (".jpg",))      # the JPEG this replaced, if any
         return thumb
     except Exception:
         return None
+
+
+def _derived_key(rel: str) -> str:
+    """Cache-file stem for a master at rel path `rel`.
+
+    The whole rel path, not just the basename the way `.thumbs` does it:
+    `unique_name` only guarantees a name is free *inside one folder*, so two
+    characters may each own `ai_20260101-120000_42_0.png` and a stem-keyed
+    cache would hand out the wrong picture. Nothing collides here today, but
+    the hash costs nothing and the failure would be invisible if it did.
+    """
+    return hashlib.sha1(rel.encode("utf-8")).hexdigest()[:12]
+
+
+def _derived_path(master: Path, ext: str) -> Path:
+    """Where the display copy of `master` is cached."""
+    root = _out_root()
+    try:
+        rel = master.relative_to(root).as_posix()
+    except ValueError:
+        rel = master.name
+    return root / ".derived" / (_derived_key(rel) + ext)
+
+
+def drop_derived(rel: str) -> None:
+    """Forget the cached display copies of the master at `rel`.
+
+    Best-effort and never raises: an orphan is only wasted disk, because
+    `derived_image` re-encodes whenever the master is newer than the cache.
+    Called wherever an image stops existing under that rel path — a delete, a
+    move, a folder rename — so the cache cannot grow past the gallery.
+    """
+    for spec in DERIVED_ENCODERS.values():
+        try:
+            (_out_root() / ".derived"
+             / (_derived_key(rel) + spec["ext"])).unlink()
+        except OSError:
+            pass
+
+
+def derived_image(master: Path, fmt: str | None = None) -> Path | None:
+    """A compressed, full-resolution copy of `master`, encoded on first use.
+
+    Same lifetime rules as [`thumbnail`]: built lazily, kept in a dot-folder
+    the gallery listing and search skip, rebuilt when the master is newer.
+    Nothing is ever written back over the master — `/outputs/` keeps serving
+    the PNG, because the avatar/cover picker re-uploads whatever it fetches
+    and `parse_png_info` reads `parameters` out of the original.
+
+    Returns None when Pillow or this encoder is unavailable; the caller treats
+    that as "serve the master", so a build without AVIF still works.
+    """
+    fmt = fmt if fmt in DERIVED_ENCODERS else DERIVED_FORMAT
+    spec = DERIVED_ENCODERS[fmt]
+    dest = _derived_path(master, spec["ext"])
+    try:
+        if dest.exists() and dest.stat().st_mtime >= master.stat().st_mtime:
+            return dest
+    except OSError:
+        return None
+    # Encode to a sibling temp file and rename: two requests for the same
+    # image arrive together on a cold gallery, and `os.replace` is atomic
+    # where writing `dest` directly can leave a half-written body for the
+    # other thread to serve.
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+    try:
+        from PIL import Image                          # optional
+        with Image.open(master) as im:
+            # Uploads are the only source of an unusual mode: everything Forge
+            # writes here is RGB. JPEG has no alpha channel at all, so it is
+            # converted the same way Forge's own encoder does it; webp and
+            # avif keep transparency, because flattening it would turn a
+            # transparent upload black rather than merely lossy.
+            if fmt == "jpeg" and im.mode != "RGB":
+                im = im.convert("RGB")
+            elif im.mode == "P":
+                im = im.convert("RGBA" if "transparency" in im.info else "RGB")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            im.save(tmp, fmt.upper(), **spec["kw"])
+        os.replace(tmp, dest)
+        return dest
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return None
+
+
+def vision_data_uri(master: Path) -> str | None:
+    """The bytes the model is handed for `master`, as a data URI.
+
+    Rendered from the same `.derived` JPEG the display path caches, so a
+    picture the reader has already looked at is one read and one encode of
+    base64 rather than a second encode.
+
+    Falls back to the master when Pillow is unavailable — an uncompressed
+    picture the model can see beats no picture — as long as it is not absurd:
+    `VISION_MAX_BYTES` refuses the uploads and panoramas whose base64 would
+    ride on every round of every later turn. Returns None to mean "send
+    nothing", which the caller treats as "this one is simply not shown".
+    """
+    src = derived_image(master, VISION_FORMAT) or master
+    try:
+        if src.stat().st_size > VISION_MAX_BYTES:
+            return None
+        raw = src.read_bytes()
+    except OSError:
+        return None
+    mime = _VISION_MIME.get(src.suffix.lower(), "image/png")
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
+def clean_refs(refs) -> list[str]:
+    """Validated rel paths for the images a user attached to one message.
+
+    Runs in the request thread, where the outputs scope is the requester's, so
+    a reference cannot name anything they could not already open. A path that
+    does not resolve to an image file is dropped rather than refused — a
+    picture deleted between the tap and the send should not lose the message
+    they typed.
+    """
+    out: list[str] = []
+    for r in (refs or []):
+        if len(out) >= VISION_MAX_REFS:
+            break
+        rel = str(r or "").strip()
+        if not rel or rel in out:
+            continue
+        try:
+            p = out_file(rel)
+        except Exception:                                    # noqa: BLE001
+            p = None
+        if p is None or p.suffix.lower() not in _VISION_MIME:
+            continue
+        out.append(rel)
+    return out
 
 
 def gallery_listing(rel: str = "") -> dict:
@@ -4065,6 +4869,7 @@ def move_images(rel_folder: str, rels: list) -> tuple[list, list]:
             failed.append(old_rel)
             continue
         new_dir = rel_of(dest)
+        drop_derived(old_rel)
         mapping.append((old_rel, f"{new_dir}/{new_name}" if new_dir
                         else new_name))
     return mapping, failed
@@ -4256,6 +5061,11 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "SDAgent/1.0"
 
+    #: Set by `do_HEAD` so the body writers below can answer with headers
+    #: alone. HEAD is a GET as far as routing is concerned; this is the only
+    #: difference.
+    _head = False
+
     # injected at startup (module-level on the server object)
     @property
     def app(self):
@@ -4265,6 +5075,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_one_request(self):
         """Swallow connection resets (phone reloads) quietly."""
+        # one body per request, however many share this socket
+        self._body_cache = None
         try:
             super().handle_one_request()
         except (ConnectionResetError, ConnectionAbortedError,
@@ -4276,12 +5088,20 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------- helpers
 
+    #: The parsed request body, or None before it has been read. Reset per
+    #: request in `handle_one_request`, because a keep-alive handler instance
+    #: serves several.
+    _body_cache = None
+
     def _body(self) -> dict:
+        if self._body_cache is not None:
+            return self._body_cache
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(length) or b"{}")
+            self._body_cache = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
-            return {}
+            self._body_cache = {}
+        return self._body_cache
 
     def _cookies(self) -> dict:
         out = {}
@@ -4338,11 +5158,40 @@ class Handler(BaseHTTPRequestHandler):
         for h in headers or []:
             self.send_header(*h)
         self.end_headers()
-        self.wfile.write(data)
+        if not self._head:
+            self.wfile.write(data)
 
     def _file(self, path: Path, cache: str | None = None,
               mime: str | None = None,
-              extra: list[tuple[str, str]] | None = None):
+              extra: list[tuple[str, str]] | None = None,
+              etag: str | None = None):
+        """Send a file, with the validator that makes `cache` mean anything.
+
+        Without an ETag (or Last-Modified) a `max-age` expiry is a cliff: the
+        browser has nothing to ask about, so the moment the window closes it
+        re-downloads the whole body rather than asking whether it changed. On
+        an image that is a real cost — hence the 304 below, which is ~200
+        bytes where the body is up to 2 MB.
+
+        The tag is (mtime_ns, size) rather than a content hash because it has
+        to be free: this runs per request. It covers the case it guards, since
+        a regeneration that overwrote a file in place moves both numbers.
+        """
+        try:
+            st = path.stat()
+        except OSError:
+            self.send_error(404)
+            return
+        tag = etag or f'"{st.st_mtime_ns}-{st.st_size}"'
+        if self.headers.get("If-None-Match") == tag:
+            self.send_response(304)          # no body, so no Content-Length
+            self.send_header("ETag", tag)
+            self.send_header("Cache-Control", cache or "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            for k, v in (extra or []):
+                self.send_header(k, v)
+            self.end_headers()
+            return
         try:
             data = path.read_bytes()
         except OSError:
@@ -4354,11 +5203,13 @@ class Handler(BaseHTTPRequestHandler):
                                                  "application/octet-stream"))
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", cache or "no-cache")
+        self.send_header("ETag", tag)
         self.send_header("X-Content-Type-Options", "nosniff")
         for k, v in (extra or []):
             self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(data)
+        if not self._head:
+            self.wfile.write(data)
 
     def _serve_login_bg(self, path: str):
         """GET /login-bg — a randomly chosen login backdrop, unauthenticated.
@@ -4398,22 +5249,62 @@ class Handler(BaseHTTPRequestHandler):
             name = chosen.name
         else:
             name = random.choice(picks).name
-        f = LOGIN_BG_DIR / name
-        try:
-            etag = f'"{int(f.stat().st_mtime)}-{f.stat().st_size}"'
-        except OSError:
-            self.send_error(404)
-            return
-        if self.headers.get("If-None-Match") == etag:
-            self.send_response(304)
-            self.send_header("ETag", etag)
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            return
-        self._file(f, cache="no-cache", extra=[("ETag", etag)])
+        # `no-cache` and the validator `_file` attaches: the browser
+        # revalidates on every load, so a repeat visit still gets a fresh
+        # random pick — but one that happens to land on the same file again
+        # costs a 304 rather than another 250 KB.
+        self._file(LOGIN_BG_DIR / name, cache="no-cache")
 
     def _denied(self):
         self._json({"error": "unauthorized"}, 401)
+
+    def _serve_image(self, prefix: str, f: Path):
+        """The three image routes: master, thumbnail, display copy."""
+        if prefix == "/thumb/":
+            # No explicit mime: `thumbnail` returns a .webp, but falls back to
+            # the master itself when Pillow is missing, and STATIC_MIME
+            # resolves whichever suffix came back.
+            self._file(thumbnail(f) or f, cache=IMG_CACHE)
+            return
+        if prefix == "/outputs/":
+            # The untouched master, full resolution. The download button, the
+            # avatar/cover picker and the regen sheet all read *this* — they
+            # want the bytes Forge wrote, not a re-encode of them.
+            self._file(f, cache=IMG_CACHE)
+            return
+        fmt = (parse_qs(urlparse(self.path).query).get("f")
+               or [DERIVED_FORMAT])[0].lower()
+        if fmt not in DERIVED_ENCODERS:
+            fmt = DERIVED_FORMAT
+        d = derived_image(f, fmt)
+        try:
+            # An upload can already be smaller than anything we would make
+            # from it. The master wins there, rather than a larger copy of an
+            # additionally lossy image.
+            if d is not None and d.stat().st_size >= f.stat().st_size:
+                d = None
+        except OSError:
+            d = None
+        if d is None:
+            self._file(f, cache=IMG_CACHE)
+        else:
+            self._file(d, cache=IMG_CACHE, mime=DERIVED_ENCODERS[fmt]["mime"])
+
+    def do_HEAD(self):
+        """A GET's headers without the body.
+
+        Worth having for the image routes: it is how you check what is
+        actually on the wire — size, content type, cache policy — without
+        paying for the bytes, and it is what a proxy or a `curl -I`
+        diagnostics run asks for. BaseHTTPRequestHandler answers 501 without
+        this. `send_error` suppresses its own body for HEAD already; `_json`
+        and `_file` check `_head`.
+        """
+        self._head = True
+        try:
+            self.do_GET()
+        finally:
+            self._head = False
 
     # --------------------------------------------------------------- GET
 
@@ -4435,7 +5326,16 @@ class Handler(BaseHTTPRequestHandler):
             name = _safe_name(path[len("/static/"):])
             f = APP_DIR / "static" / name if name else None
             if f and f.is_file():
-                self._file(f)
+                # `?v=NN` is a content version — the URL changes whenever the
+                # file does — so a versioned asset can never go stale and
+                # never needs revalidating: that is what stops app.js (210 KB)
+                # being re-fetched on every cold launch. Unversioned static
+                # files (icons, the manifest, the service worker) keep the
+                # default `no-cache`, because their names are stable across
+                # edits and pinning them for a year would be wrong.
+                v = (parse_qs(urlparse(self.path).query).get("v") or [""])[0]
+                self._file(f, cache=("public, max-age=31536000, immutable"
+                                     if v else None))
             else:
                 self.send_error(404)
             return
@@ -4463,8 +5363,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         scope_uid(self._uid())     # gallery reads are per-user from here on
 
-        if path.startswith("/outputs/") or path.startswith("/thumb/"):
-            prefix = "/outputs/" if path.startswith("/outputs/") else "/thumb/"
+        if (path.startswith("/outputs/") or path.startswith("/thumb/")
+                or path.startswith("/image/")):
+            prefix = next(p for p in ("/outputs/", "/thumb/", "/image/")
+                          if path.startswith(p))
             as_uid, rel = split_scope(path[len(prefix):])
             if as_uid:
                 # An admin browsing another user's gallery. A non-admin
@@ -4475,18 +5377,13 @@ class Handler(BaseHTTPRequestHandler):
             if not f:
                 self.send_error(404)
                 return
-            if prefix == "/thumb/":
-                t = thumbnail(f)
-                self._file(t if t else f, cache="private, max-age=86400",
-                           mime="image/jpeg" if t else None)
-            else:
-                # /outputs/ is the original file, full resolution — chat
-                # cards, the lightbox and downloads all use it.
-                self._file(f, cache="private, max-age=86400")
+            self._serve_image(prefix, f)
         elif path == "/api/status":
             self.api_status()
         elif path == "/api/llm/models":
             self.api_llm_models()
+        elif path == "/api/llm/providers":
+            self.api_llm_providers()
         elif path == "/api/gallery":
             qs = parse_qs(urlparse(self.path).query)
             as_uid, raw_folder = split_scope((qs.get("folder") or [""])[0])
@@ -4565,6 +5462,16 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         scope_uid("")
 
+        # Read the body once, up front, before any route can return early.
+        # A POST whose Content-Length is never read leaves those bytes sitting
+        # in the socket, and on a keep-alive connection the *next* request on
+        # it is parsed starting mid-body — Python answers that with a 501 HTML
+        # page, which no client here can read. `/api/delete_event` is posted
+        # with `{indices: [...]}` and ignores it, so deleting an event used to
+        # break whatever request followed on the same connection. Draining
+        # here makes every route safe, including the ones added later.
+        self._body()
+
         # ---- public ----
         if path == "/api/login":
             body = self._body()
@@ -4615,7 +5522,6 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/regenerate":
             self.api_regenerate()
         elif path == "/api/chat/new":
-            self._body()          # drain request body (keep-alive framing)
             agent = self.agent
             if not agent.lock.acquire(blocking=False):
                 self._json({"error": "busy — a turn is already running"},
@@ -4909,7 +5815,8 @@ class Handler(BaseHTTPRequestHandler):
         if not text:
             self._json({"error": "empty message"}, 400)
             return
-        status, q = run_chat_turn(self.agent, text)
+        status, q = run_chat_turn(self.agent, text,
+                                  clean_refs(body.get("refs")))
         if status == "nokey":
             self._json({"error": "no_api_key",
                         "message": "Add your OpenRouter API key in Settings "
@@ -5086,6 +5993,16 @@ class Handler(BaseHTTPRequestHandler):
         force = "refresh" in (parse_qs(urlparse(self.path).query) or {})
         self._json(fetch_openrouter_models(
             self.agent.cfg.get("openrouter_key", ""), force=force))
+
+    def api_llm_providers(self):
+        """The provider <select> for Settings > Generation > Text.
+
+        Same contract as `thinking_options`: value, value/label options, and a
+        short note. Built server-side so the labelling (and the speed on it)
+        lives in one place — the client only paints it. The list is per user,
+        so the key they saved is the one the percentiles are read with.
+        """
+        self._json(provider_options(self.agent.cfg))
 
     # ------------------------------------------------------- characters
 
@@ -5377,7 +6294,11 @@ class Handler(BaseHTTPRequestHandler):
         cid = _safe_name(cid_raw.strip().lower()) or ""
         f = self._avatar_path(cid)
         if f and f.is_file():
-            self._file(f, cache="private, max-age=86400")
+            # `no-cache` rather than a day: these two are the images that
+            # really are overwritten in place (`(AVATAR_DIR / f"{cid}.{ext}")
+            # .write_bytes`), so a max-age is a day of showing the old face.
+            # The ETag `_file` attaches makes the revalidation a 304.
+            self._file(f, cache="private, no-cache")
         else:
             self.send_error(404)
 
@@ -5385,7 +6306,7 @@ class Handler(BaseHTTPRequestHandler):
         key = _safe_name(key_raw.strip().lower()) or ""
         f = cover_file(key)
         if f and f.is_file():
-            self._file(f, cache="private, max-age=86400")
+            self._file(f, cache="private, no-cache")
         else:
             self.send_error(404)
 
@@ -5677,12 +6598,8 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 failed = True
                 continue
-            t = _out_root() / ".thumbs" / (f.stem + ".jpg")
-            try:
-                if t.exists():
-                    t.unlink()
-            except OSError:
-                pass
+            drop_thumb(f)
+            drop_derived(rel)
             removed.append(rel)
         if removed:
             reindex_timeline(agent, {}, set(removed))
@@ -5866,6 +6783,7 @@ class Handler(BaseHTTPRequestHandler):
                             continue
                         rel_old = rel_of(p)
                         rel_new = dest_rel + rel_old[len(rel):]
+                        drop_derived(rel_old)
                         moved.append((rel_old, rel_new))
                     shutil.move(str(src), str(dest))
                     reindex_timeline(agent,
@@ -5895,7 +6813,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 for p in folder.rglob("*"):
                     if p.is_file() and not p.name.startswith("."):
-                        gone.add(rel_of(p))
+                        gone_rel = rel_of(p)
+                        drop_thumb(p)
+                        drop_derived(gone_rel)
+                        gone.add(gone_rel)
                         count += 1
             except OSError:
                 pass
@@ -6043,6 +6964,10 @@ class Handler(BaseHTTPRequestHandler):
                         "inject_persona_tags":
                             cfg.get("inject_persona_tags", True),
                         "inject_lora_tags": cfg.get("inject_lora_tags", True),
+                        "vision_images": cfg.get("vision_images", True),
+                        "vision_count": cfg.get("vision_count", 3),
+                        "thinking": thinking_options(cfg),
+                        "provider_pref": cfg.get("provider_pref") or "",
                         "sd_components": cfg.get("sd_components") or {},
                         "current_arch": sd["current_arch"],
                         "sd_ok": sd["sd_ok"], "sd_error": sd["error"],
@@ -6141,6 +7066,33 @@ class Handler(BaseHTTPRequestHandler):
                     "inject_lora_tags"):
             if key in body:
                 cfg[key] = bool(body[key])
+        if "vision_images" in body:
+            cfg["vision_images"] = bool(body["vision_images"])
+        if "vision_count" in body:
+            try:
+                n = int(body["vision_count"])
+            except (TypeError, ValueError):
+                n = 3
+            cfg["vision_count"] = max(0, min(n, 20))
+        if "thinking" in body:
+            val = str(body["thinking"]).strip().lower()
+            if val == "none":
+                # the gateway's "none" is the same request as enabled:false;
+                # one spelling on disk so `off` is the only way to say it
+                val = "off"
+            if val and val != "off" and val not in REASONING_EFFORTS:
+                self._json({"error": "unknown thinking level"}, 400)
+                return
+            cfg["thinking"] = val
+        if "provider_pref" in body:
+            try:
+                pref = clean_provider_pref(body["provider_pref"])
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            audit(self._user(), "settings.provider", self._uid(),
+                  pref or "(default routing)")
+            cfg["provider_pref"] = pref
         if "sd_components" in body:
             comps = body["sd_components"]
             if not isinstance(comps, dict):
@@ -6166,6 +7118,13 @@ class Handler(BaseHTTPRequestHandler):
         else:
             out = {"ok": True}
         agent.apply_config(cfg)
+        # whichever model the chain now starts with decides the levels on
+        # offer, so the picker comes back with every settings save
+        out["thinking"] = thinking_options(cfg)
+        # echo what the server actually stored. The select repaints from
+        # /api/llm/providers, not from this — it is here for anyone driving
+        # the API by hand.
+        out["provider_pref"] = cfg.get("provider_pref") or ""
         if sys_touched:
             out.update({"system_prompt": cfg["system_prompt"]
                         or DEFAULT_BASE_PROMPT,
@@ -6401,7 +7360,17 @@ class Handler(BaseHTTPRequestHandler):
         msgs.append({"role": "user", "content": prompt[:4000]})
 
         try:
-            data = agent.llm_complete(msgs, temperature=0.9, max_tokens=2000)
+            # not stoppable: this is not a turn, and the chat's stop flag is
+            # cleared only when one starts — a flag left set by an abort would
+            # otherwise kill every attempt here (see llm_complete)
+            data = agent.llm_complete(msgs, temperature=0.9, max_tokens=2000,
+                                      stoppable=False)
+        except StreamStopped:
+            # belt and braces: this handler must always answer. An exception
+            # escaping it sends no response at all, and a client behind a
+            # reverse proxy reports that as a 502 rather than an error.
+            self._json({"error": "stopped — try again"}, 409)
+            return
         except LLMError as e:
             self._json({"error": scrub_paths(str(e))}, 502)
             return

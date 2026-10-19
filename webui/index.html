@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>Anima</title>
 <link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
-<link rel="stylesheet" href="/static/style.css?v=107">
+<link rel="stylesheet" href="/static/style.css?v=118">
 </head>
 <body>
 
@@ -137,6 +137,7 @@
 </div>
 
 <div id="composer" hidden>
+  <div id="attach" hidden></div>
   <textarea id="input" rows="1" placeholder="Describe an image… or just chat" enterkeyhint="send"></textarea>
   <button id="btn-send" aria-label="Send">
     <svg class="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
@@ -177,6 +178,7 @@
       <p id="lb-params"></p>
     </div>
     <div class="lb-actions">
+      <button id="lb-send">Send to chat</button>
       <button id="lb-download">Download</button>
       <button id="lb-delete" class="danger">Delete</button>
     </div>
@@ -356,6 +358,14 @@
       <button id="sh-save-llm">Save LLM chain</button>
       <div class="hint">Tried top to bottom — the first model that answers takes the turn. A model marked <span class="mono">no tools</span> can talk, but cannot call generate_image.</div>
 
+      <label>Thinking</label>
+      <select id="sh-think" aria-label="How much the model thinks before it answers"></select>
+      <div class="hint">How hard the model works before it answers. The levels come from the model itself — <span class="mono">Max</span> and <span class="mono">High</span> can spend a long time thinking, and every thinking token is billed as output, so <span class="mono">Low</span> or <span class="mono">Off</span> is the fix for a turn that takes too long. <span class="mono">Model default</span> leaves the choice to the model. <span id="sh-think-note"></span></div>
+
+      <label>Preferred LLM provider</label>
+      <select id="sh-prov" aria-label="Which OpenRouter provider takes the turn first"></select>
+      <div class="hint">Tried first when more than one provider serves the model, then falls back to OpenRouter's own choice, so this cannot break a turn. <span id="sh-prov-note"></span></div>
+
       <label>System message <span class="dim" id="sh-sysstate"></span></label>
       <textarea id="sh-sysprompt" class="mono" rows="8" spellcheck="false"
                 autocapitalize="off" autocomplete="off"></textarea>
@@ -383,6 +393,20 @@
         <label class="tgl"><input type="checkbox" id="sh-inj-lora" checked> LoRAs</label>
       </div>
       <div class="hint">Tags the server adds to every image prompt on its own. <span class="mono">Character</span> — the active card's appearance tags. <span class="mono">Persona</span> — your persona's tags, on shots that draw you. <span class="mono">LoRAs</span> — the card's <span class="mono">&lt;lora:…&gt;</span> tags; off also stops the model being told their trigger words. Off sends the model's prompt as written. Applies from the next image on.</div>
+
+      <label>Seeing its own images</label>
+      <div class="row">
+        <label class="tgl"><input type="checkbox" id="sh-vision" checked> Model can see</label>
+        <select id="sh-vision-count" aria-label="How many images are attached">
+          <option value="1">newest 1</option>
+          <option value="2">newest 2</option>
+          <option value="3">newest 3</option>
+          <option value="5">newest 5</option>
+          <option value="8">newest 8</option>
+          <option value="0">all of them</option>
+        </select>
+      </div>
+      <div class="hint">Attaches the picture itself — not just the prompt that made it — so the model can check what it actually drew and fix a wrong pose or a missing character. This costs upload, because the bytes are re-sent on every round of every turn: <span class="mono">newest 3</span> is the sweet spot, <span class="mono">all</span> grows with the chat. An image you send by hand is always included, on top of this. Automatically skipped for a model that cannot take pictures.</div>
     </div>
     <div class="gen-pane" data-gpane="image" hidden>
       <label>SD WebUI server URL <span class="dim" id="sh-sdok"></span></label>
@@ -754,6 +778,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=107"></script>
+<script src="/static/app.js?v=118"></script>
 </body>
 </html>

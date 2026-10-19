@@ -80,6 +80,34 @@ if ("serviceWorker" in navigator) {
   });
 }
 
+/* Drop the service worker's display-image cache. Fire and forget: the worker
+   owns that cache and the byte accounting that goes with it, and a page can
+   maintain neither. A page with no controller yet has no cache either, so the
+   silent no-op is correct rather than unfortunate.
+
+   This belongs to `forgetUser` because the cache is keyed by URL and a URL is
+   not scoped to an account — `/image/~u002/x.png` means the same thing to
+   every session that asks. Same class of leak as the rendered timeline, one
+   layer further out; see `forgetUser` below. */
+function clearImageCache() {
+  try {
+    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: "image-clear" });
+    }
+  } catch { /* no worker, nothing cached */ }
+}
+
+/* Ask the browser to exempt this origin from automatic storage eviction.
+   WebKit deletes script-writable storage after seven days without a visit —
+   for a gallery cache that is the whole library at once. An installed PWA is
+   exempt already; a Safari tab is not, and `persist()` is the only lever for
+   that case. Fire and forget, and asked after sign-in rather than on the gate
+   because Firefox may put up a prompt for it and a stranger has not earned
+   one. */
+function askPersist() {
+  try { navigator.storage.persist().catch(() => {}); } catch { /* unavailable */ }
+}
+
 const els = {
   gate: $("gate"), gateUser: $("gate-user"),
   gatePw: $("gate-pw"), gateBtn: $("gate-btn"),
@@ -98,7 +126,7 @@ const els = {
   hsTitle: $("hs-title"), hsSelect: $("hs-select"),
   hsAll: $("hs-all"), hsDel: $("hs-del"),
   msgs: $("msgs"), pill: $("pill"), pillText: $("pill-text"), pillBar: $("pill-bar"),
-  input: $("input"), send: $("btn-send"),
+  input: $("input"), send: $("btn-send"), attach: $("attach"),
   grid: $("grid"), gcount: $("gcount"), gempty: $("gempty"),
   gfolders: $("gfolders"), gcrumbs: $("pg-crumbs"), gtotal: $("gtotal"),
   gemptyText: $("gempty-text"),
@@ -174,6 +202,9 @@ const els = {
   chDelete: $("ch-delete"),
   shInjChar: $("sh-inj-char"), shInjPersona: $("sh-inj-persona"),
   shInjLora: $("sh-inj-lora"),
+  shVision: $("sh-vision"), shVisionCount: $("sh-vision-count"),
+  shThink: $("sh-think"), shThinkNote: $("sh-think-note"),
+  shProv: $("sh-prov"), shProvNote: $("sh-prov-note"),
   toast: $("toast"),
 };
 
@@ -185,6 +216,11 @@ let authed = false;
 let me = null;            // {id, name, role, admin} from /api/auth
 let chars = [];           // character cards
 let activeCharId = "";
+// Images the user attached to the message they are about to send (rel paths
+// in the gallery). One-shot: consumed by the send. Server-side these become
+// `refs` on the user message and are expanded to data URIs at request time —
+// the bytes never enter the chat file.
+let pendingRefs = [];
 
 /* ------------------------------------------------------------------ util */
 
@@ -303,7 +339,30 @@ function mdToHtml(src) {
     (_, k, i) => blocks[+i]);
 }
 
-function scrollDown(smooth) {
+/* An image generation in flight. SD posts status lines ("loading xl
+ * checkpoint…", "generating…") for the whole 10-30 s it runs, and each one
+ * used to chase the bottom of the chat — dragging the reader away from
+ * whatever they were looking at while they waited. So the automatic scroll is
+ * off for that window, and the card that lands at the end scrolls once, when
+ * its picture has actually decoded (see addGeneration): the card reserves no
+ * height before that, so scrolling on the event itself lands short. */
+let genBusy = false;
+let genLanded = false;      // the next image to be added is one that just arrived
+
+function genToolStarted(name) {
+  if (name === "generate_image" || name === "edit_image") genBusy = true;
+}
+
+function genToolFinished() {
+  genBusy = false;
+  genLanded = true;
+}
+
+/* `force` is for a picture that has just landed: a second image in the same
+ * turn may already be generating, and that must not stop the view following
+ * the one that is on disk. */
+function scrollDown(smooth, force) {
+  if (genBusy && !force) return;
   requestAnimationFrame(() => {
     els.chatScroll.scrollTo({ top: els.chatScroll.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   });
@@ -339,8 +398,13 @@ function showGate() {
  *  `me` goes null so the Admin tab disappears on logout rather than lingering
  *  until the next person logs in. `galFolder` must reset too: the gallery
  *  folder is a path in *their* outputs tree, and opening it as another user
- *  would 404. */
+ *  would 404.
+ *
+ *  The service worker's display cache goes with it — it holds files, not
+ *  state, and it is the only piece of the previous user that would otherwise
+ *  survive a logout on this device. */
 function forgetUser() {
+  clearImageCache();
   me = null;
   inited = false;
   chars = [];
@@ -358,6 +422,8 @@ function forgetUser() {
   galSearchInfo = null;
   lbList = [];
   lbIndex = -1;
+  pendingRefs = [];
+  renderRefs();             // els exists even before init(), so this is safe
   busyStop = true;          // a turn still streaming belongs to the old user
   liveThink = liveReply = null;
 }
@@ -368,6 +434,7 @@ function showApp() {
   els.app.hidden = false;
   init();
   initAdmin();          // the Admin tab exists only for admins
+  askPersist();         // the display-image cache wants a durable home
 }
 
 async function tryLogin() {
@@ -436,9 +503,12 @@ function addBubble(kind, text) {
    on. Deliberately not a .msg: no long-press menu, nothing to edit or rewind
    — it is there to be read, so it only opens and closes.
 
-   `streaming` builds it open, because a block that is being written to has
-   nothing to be collapsed *about* yet — and it closes again when the round
-   ends, back to the reader's own choice. */
+   `streaming` only decides how its text is rendered (plain while it is being
+   written, markdown once the round lands) — it does NOT open the box. A block
+   that opened itself every turn and snapped shut at the end was a box flying
+   open and shut under the reader for no reason; it stays on whatever the
+   reader chose. Clicking a block open applies that choice to every block, now
+   and after a reload. */
 let thinkOpen = localStorage.getItem("thinkopen") === "1";
 
 function buildThink(text, streaming) {
@@ -475,7 +545,7 @@ function buildThink(text, streaming) {
   box.appendChild(head);
   box.appendChild(body);
   els.msgs.appendChild(box);
-  setOpen(streaming || thinkOpen);
+  setOpen(thinkOpen);
   setText(text || "", !streaming);
   if (streaming) box.classList.add("streaming");
   return { box, setOpen, setText, raw: text || "" };
@@ -497,11 +567,16 @@ function addGeneration(evt, idx) {
   // every file may be gone (its folder was deleted) — keep the event so
   // timeline indices stay stable, but draw nothing for it
   if (!(evt.files || []).length) return;
+  // a picture that just landed during a live turn is the one that pulls the
+  // view down when it decodes — see the load handler below
+  const live = genLanded;
+  genLanded = false;
   const src = evt.src ? relFromUrl(evt.src) : null;
   let rec;
   if (src && variantIndex.has(src)) {
     // a regeneration of an existing image — extend that card's carousel
     rec = variantIndex.get(src);
+    if (live) rec.live = true;
     if (idx != null) rec.evtIdxs.push(idx);
     for (const f of evt.files || []) {
       const name = relFromUrl(f);
@@ -519,7 +594,34 @@ function addGeneration(evt, idx) {
       '</div>';
     rec = { card,
             files: (evt.files || []).map(relFromUrl),
-            pos: 0, evtIdxs: idx != null ? [idx] : [] };
+            pos: 0, live, evtIdxs: idx != null ? [idx] : [] };
+    const img = card.querySelector(".gen-viewer img");
+    /* Reserve the picture's box before the file arrives.
+     *
+     * `.gen-viewer img` is `width:auto; height:auto`, so with nothing but a
+     * src the card is a few pixels tall until the file decodes — and every
+     * scroll that fires inside that window (this event's own, the reply's,
+     * the next image's) lands short of the real bottom. Ten images 9 s apart
+     * left the newest one below the fold every time.
+     *
+     * The width/height attributes give the browser the intrinsic ratio up
+     * front — the standard no-layout-shift trick — so `max-width:100%` and
+     * `height:auto` resolve to the final box immediately. The image's own
+     * dimensions take over once it loads, so a stale size costs a little
+     * scroll slop, never a distorted picture. */
+    const g = evt.gen || {};
+    const gw = parseInt(g.width, 10), gh = parseInt(g.height, 10);
+    if (gw > 0 && gh > 0) { img.width = gw; img.height = gh; }
+    // a picture that has just landed is wanted on screen now, not when the
+    // lazy-loader next looks around
+    if (live) img.loading = "eager";
+    // belt and braces for the paths with no size to reserve from (a replayed
+    // recipe with no width/height): catch up once the file is really there
+    img.addEventListener("load", () => {
+      if (!rec.live) return;
+      rec.live = false;
+      scrollDown(true, true);
+    });
     rec.card.querySelector(".car-prev").addEventListener("click", (e) => {
       e.stopPropagation();
       slideVariant(rec, -1);
@@ -575,6 +677,7 @@ function addModels(evt) {
 }
 
 function addToolStart(name) {
+  genToolStarted(name);
   const t = el("div", "tool-start");
   t.appendChild(el("span", "tname", name));
   t.appendChild(el("span", null, "running…"));
@@ -618,7 +721,11 @@ function renderHistory(timeline) {
   // nodes are about to be detached
   liveThink = liveReply = null;
   timeline.forEach((evt, i) => {
-    if (evt.type === "user") { const m = addBubble("user", evt.text); m.dataset.idx = i; }
+    if (evt.type === "user") {
+      const m = addBubble("user", evt.text);
+      m.dataset.idx = i;
+      attachThumbs(m, evt.refs);
+    }
     else if (evt.type === "reply") { const m = addBubble("ai", evt.text); m.dataset.idx = i; }
     else if (evt.type === "think") { addThink(evt.text); }
     else if (evt.type === "error") { const m = addBubble("error", evt.text); m.dataset.idx = i; }
@@ -634,6 +741,10 @@ function renderHistory(timeline) {
     els.msgs.appendChild(hint);
   }
   evtCounter = timeline.length;
+  // opening a chat abandons whatever was generating in the one we left, so
+  // the scroll must not stay suppressed here
+  genBusy = false;
+  genLanded = false;
   scrollDown(false);
 }
 
@@ -693,11 +804,88 @@ function stopGeneration() {
 
 function setBusy(b) {
   busy = b;
-  if (!b) { busyStop = false; busyAbort = null; }
+  if (!b) {
+    busyStop = false;
+    busyAbort = null;
+    // no turn is running, so nothing can be generating: leaving the scroll
+    // suppressed would freeze the chat until the next image
+    genBusy = false;
+    genLanded = false;
+  }
   els.send.classList.toggle("busy", b);
   els.send.classList.toggle("stopping", !!busyStop);
   els.send.setAttribute("aria-label", b ? "Stop generating" : "Send");
   els.send.classList.toggle("ready", !b && els.input.value.trim().length > 0);
+}
+
+/* ------------------------------------------------- images sent to the model
+ *
+ * A picture reaches the model two ways: it made it (server-side, expanded
+ * from the generation's own `saved_files` each request and capped by
+ * Settings > Generation > Text), or the user picked one and attached it.
+ * This is the second half — the composer strip and the "Send to chat"
+ * actions. Both are one-shot: the refs belong to one message.
+ *
+ * The strip holds rel paths, not data URLs. The server resolves them against
+ * the requester's own outputs tree when the request is built, so a path that
+ * went stale — the image was deleted between the tap and the send — is
+ * dropped there rather than shipped to a model by a client that cannot know.
+ */
+function attachThumbs(node, refs) {
+  if (!node || !refs || !refs.length) return;
+  const strip = el("div", "msgrefs");
+  for (const rel of refs) {
+    const a = el("a");
+    a.href = "/image/" + rel;
+    a.target = "_blank";
+    a.rel = "noopener";
+    const img = document.createElement("img");
+    img.src = "/thumb/" + rel;
+    img.alt = baseName(rel);
+    img.loading = "lazy";
+    a.appendChild(img);
+    strip.appendChild(a);
+  }
+  node.appendChild(strip);
+}
+
+function renderRefs() {
+  els.attach.textContent = "";
+  els.attach.hidden = !pendingRefs.length;
+  for (const rel of pendingRefs) {
+    const chip = el("div", "refchip");
+    const img = document.createElement("img");
+    img.src = "/thumb/" + rel;
+    img.alt = baseName(rel);
+    const x = el("button", "refx", "✕");
+    x.type = "button";
+    x.setAttribute("aria-label", "Remove " + baseName(rel));
+    x.addEventListener("click", () => {
+      pendingRefs = pendingRefs.filter((r) => r !== rel);
+      renderRefs();
+    });
+    chip.appendChild(img);
+    chip.appendChild(x);
+    els.attach.appendChild(chip);
+  }
+}
+
+/* Attach an image to the next message and put the cursor in the composer.
+   Deliberately does not send: the message is usually a sentence about the
+   picture, and that is the part only the user can write. */
+function attachRef(rel) {
+  if (!rel) return;
+  if (!pendingRefs.includes(rel)) {
+    if (pendingRefs.length >= 6) {
+      toast("Up to 6 images per message", true);
+      return;
+    }
+    pendingRefs.push(rel);
+  }
+  renderRefs();
+  switchView("chat");
+  els.input.focus();
+  toast("Attached — it goes with your next message");
 }
 
 async function sendMessage() {
@@ -711,6 +899,10 @@ async function sendMessage() {
 
 async function sendText(text) {
   if (!text || busy) return;
+  // one-shot: consumed by this message whether or not the turn succeeds
+  const refs = pendingRefs.slice();
+  pendingRefs = [];
+  renderRefs();
   setBusy(true);
   switchView("chat");
 
@@ -718,7 +910,7 @@ async function sendText(text) {
   const hint = els.msgs.querySelector(".empty");
   if (hint) hint.remove();
 
-  addBubble("user", text);
+  attachThumbs(addBubble("user", text), refs);
   scrollDown(true);
   pill("thinking…", false);
 
@@ -727,7 +919,7 @@ async function sendText(text) {
     const resp = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, refs }),
       signal: busyAbort.signal,
     });
     if (resp.status === 401) { showGate(); return; }
@@ -920,6 +1112,7 @@ function handleEvent(evt) {
       break;
     case "generation":
       markToolDone(evt.gen && (evt.gen.denoising_strength != null) ? "edit_image" : "generate_image");
+      genToolFinished();
       addGeneration(evt, evt.idx != null ? evt.idx : evtCounter++);
       pill("done — loading images…", false);
       break;
@@ -930,6 +1123,10 @@ function handleEvent(evt) {
       break;
     case "tool_error":
       markToolDone(lastTool());
+      // whatever was running is not running any more — if it was an image,
+      // the reader is free to be scrolled again
+      genBusy = false;
+      genLanded = false;
       addBubble("error", `✗ ${evt.name} — ${evt.error}`);
       tagIdx(els.msgs.lastChild, evt.idx);
       break;
@@ -1346,6 +1543,7 @@ async function deleteFolder(rel, count) {
 function imageCtx(rel) {
   openCtx([
     { label: "Open", action: () => openLightbox(rel) },
+    { label: "Send to chat", action: () => attachRef(rel) },
     { label: "Move to…", action: () => openFolderPicker([rel], false) },
     { label: "Download", action: () => downloadImage(rel) },
     { label: "Delete", danger: true, action: () => deleteImages([rel]) },
@@ -1507,7 +1705,7 @@ function lbBuildScroll() {
     img.loading = "lazy";
     img.decoding = "async";
     img.alt = "";
-    img.src = "/outputs/" + (im.rel || im.name);
+    img.src = "/image/" + (im.rel || im.name);
     wrap.appendChild(el("div", "lb-slide", "")).appendChild(img);
   }
 }
@@ -1530,7 +1728,7 @@ function showLightbox() {
   els.lbName.textContent = baseName(im.rel || im.name);
   lbResetInfo();
   if (lbIsScroll()) { lbJump(lbIndex); return; }
-  els.lbImg.src = "/outputs/" + (im.rel || im.name);
+  els.lbImg.src = "/image/" + (im.rel || im.name);
   els.lbPrev.style.visibility = lbIndex > 0 ? "visible" : "hidden";
   els.lbNext.style.visibility = lbIndex < lbList.length - 1 ? "visible" : "hidden";
   lbFetchInfo(im);
@@ -2100,6 +2298,11 @@ async function loadLlmModels(force) {
     els.shLlmState.textContent = llmModels.length
       ? `· ${llmModels.length} models` : "· list unavailable";
     renderLlmChain();          // names/prices only resolve once we have the list
+    // the catalogue also carries the model's own thinking levels; repaint the
+    // Thinking picker now that we may have filled it in for the first time
+    refreshThinking();
+    // and the chain's first model is what the provider list is drawn from
+    loadProviders();
     if (d.error) toast(d.error, true);
   } catch (e) {
     if (e.message === "locked") return;
@@ -2219,6 +2422,68 @@ function openLlmPicker() {
   ddOpen(els.shLlmPick, items, "", (id) => addLlmModel(id));
 }
 
+/* Thinking level (Settings > Generation > Text). The <select> is built from
+   the options the server derives from the *model's own* reasoning block, so
+   it only ever offers levels that model accepts — the vocabulary differs per
+   model, and guessing one it rejects would 400 the whole turn. */
+function paintThinking(t) {
+  const sel = els.shThink;
+  sel.textContent = "";
+  const opts = (t && t.options) || [];
+  if (!opts.length) {
+    const only = el("option", null, "not available");
+    only.value = "";
+    sel.appendChild(only);
+    sel.disabled = true;
+    els.shThinkNote.textContent = (t && t.note) || "";
+    return;
+  }
+  for (const o of opts) {
+    const node = el("option", null, o.label);
+    node.value = o.value;
+    sel.appendChild(node);
+  }
+  const want = (t && t.value) || "";
+  sel.value = opts.some((o) => o.value === want) ? want : "";
+  sel.disabled = opts.length < 2;      // only "Model default" = nothing to pick
+  els.shThinkNote.textContent = (t && t.note) ? t.note : "";
+}
+
+async function refreshThinking() {
+  try { paintThinking((await api("/api/settings")).thinking); }
+  catch (e) { if (e.message !== "locked") console.warn("thinking:", e); }
+}
+
+/* Preferred provider (Settings > Generation > Text). The options are built by
+   the server, so this is deliberately the same shape as paintThinking — and
+   the label already carries the measured speed, which is the whole reason to
+   pick one. A saved name that is not in today's list (the first model in the
+   chain changed, or the model publishes no routing table) is kept as an
+   option rather than dropped: a silent reset is a setting the user did not
+   make. */
+function paintProviders(p) {
+  const sel = els.shProv;
+  sel.textContent = "";
+  const opts = [...((p && p.options) || [{ value: "", label: "OpenRouter picks" }])];
+  const want = (p && p.value) || "";
+  if (want && !opts.some((o) => o.value === want)) {
+    opts.push({ value: want, label: `${want} (not in the list)` });
+  }
+  for (const o of opts) {
+    const node = el("option", null, o.label);
+    node.value = o.value;
+    sel.appendChild(node);
+  }
+  sel.value = want;
+  sel.disabled = opts.length < 2;    // only "OpenRouter picks" = nothing to pick
+  els.shProvNote.textContent = (p && p.note) ? `· ${p.note}` : "";
+}
+
+async function loadProviders() {
+  try { paintProviders(await api("/api/llm/providers")); }
+  catch (e) { if (e.message !== "locked") console.warn("providers:", e); }
+}
+
 /** The image-server URL the server is actually using — kept so a refused save
  *  can put the working address back in the box. */
 let lastSdUrl = "";
@@ -2254,6 +2519,15 @@ async function openSettings() {
         el.checked = cfg[key] !== false;
         el.parentElement.classList.toggle("on", el.checked);
       }
+      // vision: same "absent means on" rule
+      els.shVision.checked = cfg.vision_images !== false;
+      els.shVision.parentElement.classList.toggle("on", els.shVision.checked);
+      els.shVisionCount.value = String(cfg.vision_count ?? 3);
+      els.shVisionCount.disabled = !els.shVision.checked;
+      paintThinking(cfg.thinking);
+      paintProviders({ value: cfg.provider_pref || "" });
+      // the options themselves are a fetch — see loadProviders
+      loadProviders();
       savedComps = cfg.sd_components || {};
       renderComps(cfg.current_arch || s.current_arch || "");
     } catch (e) {
@@ -3240,8 +3514,8 @@ function renderCharList() {
   els.charlist.textContent = "";
   els.charempty.hidden = rows.length > 0;
   for (const c of rows) {
-    // A div, not a <button>. A card is a multi-element card — cover image,
-    // chips, name, greeting, count — and <button> cannot lay that out: Chrome
+    // A div, not a <button>. A card is a multi-element card — avatar, chips,
+    // name, greeting, count — and <button> cannot lay that out: Chrome
     // wraps button content in an anonymous centred box, which is what turned
     // grid mode into a wall of letterboxed pictures with no text under them.
     // The long-press and context-menu handlers only ever use
@@ -3251,7 +3525,13 @@ function renderCharList() {
       + (c.id === activeCharId ? " active" : ""));
     row.setAttribute("role", "button");
     row.setAttribute("tabindex", "0");
-    const pic = c.cover || c.avatar;
+    // The avatar, not the cover. The cover is the character's *opening chat
+    // image* — a portrait at the card's size, meant to head a fresh timeline —
+    // so letting it win here silently repainted every character thumbnail
+    // with their first image as soon as one was set. The avatar is the square
+    // face crop this slot was built for; the cover is only a stand-in for a
+    // character who never got one.
+    const pic = c.avatar || c.cover;
     if (pic) {
       const img = document.createElement("img");
       img.className = "char-avatar";
@@ -4110,10 +4390,14 @@ function openGallery() {
 
 /* ----------------------------------------------------------------- images */
 
-// native-resolution images everywhere; generation details live in the
-// lightbox info popup. `rel` may include folder segments.
+// Gallery images are shown at native resolution — no downscaling, the
+// lightbox and the chat are the picture. They are not the *master* though:
+// `/image/` serves a full-resolution WebP re-encode of the PNG (about a
+// tenth of the bytes; see `derived_image` in server.py). `/outputs/` stays
+// the untouched original, and is what Download and the avatar/cover picker
+// read. `rel` may include folder segments.
 function imgSrcFor(rel) {
-  return "/outputs/" + rel;
+  return "/image/" + rel;
 }
 
 /* accent color — custom UI theme (from the old Chatterbox appearance wheel) */
@@ -4471,6 +4755,7 @@ function ctxItemsFor(el) {
       els.input.value = `Edit ${baseName(rel)} — `;
       autosize(); els.input.focus(); els.send.classList.add("ready");
     }});
+    if (rel) items.push({ label: "Send to the model", action: () => attachRef(rel) });
     if (rel) items.push({ label: "Show in gallery", action: () => {
       els.pageGallery.hidden = false;
       setGalSelect(false);
@@ -4626,6 +4911,7 @@ async function regenReply(node) {
           break;
         case "tool_start":
           dropStream();
+          genToolStarted(evt.name);
           pill(evt.name + "…", false);
           break;
         case "generation": {
@@ -4633,6 +4919,7 @@ async function regenReply(node) {
           // No index: the server commits the rewind only after the turn
           // lands, so anything streamed now is provisional. reloadChat()
           // below re-draws the whole chat with the real ones.
+          genToolFinished();
           addGeneration(evt, null);
           break;
         }
@@ -5163,7 +5450,12 @@ $("sh-save-llm").addEventListener("click", () => {
     toast("Add at least one model to the chain", true);
     return;
   }
-  saveSettings({ llm: v }, $("sh-save-llm"), "LLM chain saved");
+  saveSettings({ llm: v }, $("sh-save-llm"), "LLM chain saved")
+    .then((d) => {
+      if (d && d.thinking) paintThinking(d.thinking);
+      // a different first model means a different provider list
+      if (d) loadProviders();
+    });
 });
 on("sh-llm-pick", "click", openLlmPicker);
 on("sh-llm-refresh", "click", () => loadLlmModels(true));
@@ -5322,6 +5614,38 @@ for (const [el, key, label] of INJ_TOGGLES) {
       `${label} ${el.checked ? "on" : "off"}`);
   });
 }
+/* Whether the model is shown the pictures, and how many of its own. Both save
+   the moment they change — there is nothing to review about a checkbox, and
+   the count is a choice of one of six. The count is disabled while the switch
+   is off so the pane cannot imply images are flowing. */
+els.shVision.addEventListener("change", () => {
+  els.shVision.parentElement.classList.toggle("on", els.shVision.checked);
+  els.shVisionCount.disabled = !els.shVision.checked;
+  saveSettings({ vision_images: els.shVision.checked }, null,
+    `Seeing its own images ${els.shVision.checked ? "on" : "off"}`);
+});
+els.shVisionCount.addEventListener("change", () => {
+  const n = parseInt(els.shVisionCount.value, 10) || 0;
+  saveSettings({ vision_count: n }, null, n
+    ? `Sending its newest ${n} image${n === 1 ? "" : "s"}`
+    : "Sending every image it made");
+});
+/* Thinking level: saves on pick, like the toggles. The options were built
+   from the model's own declared levels, so whatever is chosen here is
+   forwarded as-is; the server still drops it for a model that refuses it. */
+els.shThink.addEventListener("change", () => {
+  const opt = els.shThink.options[els.shThink.selectedIndex];
+  saveSettings({ thinking: els.shThink.value }, null,
+    `Thinking: ${opt ? opt.textContent : els.shThink.value}`);
+});
+/* Preferred provider: a <select>, so it saves the moment it changes, like the
+   Thinking picker above it — there is nothing to review about a choice of one
+   from a list the server built. */
+els.shProv.addEventListener("change", () => {
+  const v = els.shProv.value;
+  saveSettings({ provider_pref: v }, null,
+    v ? `Provider: ${v}` : "Provider: OpenRouter picks");
+});
 $("sh-logout").addEventListener("click", async () => {
   try { await api("/api/logout", { method: "POST" }); } catch { /* ignore */ }
   showGate();
@@ -5663,6 +5987,12 @@ els.lbNext.addEventListener("click", () => lbMove(1));
 els.lbStage.addEventListener("click", (e) => {
   if (e.target.closest(".lb-nav")) return;
   if (els.lbSheet.classList.contains("open")) toggleLbInfo(false);
+});
+$("lb-send").addEventListener("click", () => {
+  const im = lbList[lbIndex];
+  if (!im) return;
+  closeLightbox();
+  attachRef(im.rel || im.name);
 });
 $("lb-download").addEventListener("click", () => {
   const im = lbList[lbIndex];

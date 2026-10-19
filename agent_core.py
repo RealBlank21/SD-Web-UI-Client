@@ -233,11 +233,17 @@ EVERY TURN, in this order:
    a new location or camera view, a new pose, outfit or state of dress, an
    expression or mood shift (flustered -> confident, shy -> bold...), or a
    physical action (touching, grabbing, undressing, revealing, kissing,
-   fighting, running...) - call generate_image EXACTLY ONCE, before writing
-   any prose. One image per turn, always.
-   If several things changed, build ONE image of the most recent moment.
-   Never render a sequence of beats, and never render a beat your reply has
-   already moved past.
+   fighting, running...) - call generate_image before writing any prose.
+   How many images you make is your call. ONE is the norm and keeps the turn
+   quick, so make a single image of the most recent moment with everything
+   that changed in it. Make more when the turn genuinely calls for it: the
+   user asks for a sequence, for several scenes or variations, says "keep
+   generating" or "in multiple turns", or the moment really is several beats
+   that each deserve their own picture. Words like those mean now, in this
+   reply - do not make one and wait to be asked again. Then make as many as
+   it needs - one call per distinct scene, or batch_size for several takes of
+   the same prompt. Never pad a turn with near-identical shots, and never
+   render a beat your reply has already moved past.
 3. Then write your in-character reply.
 - NO image only when nothing visual changed: pure dialogue, reactions,
   thinking, questions.
@@ -703,6 +709,46 @@ def lora_prompt_block(entries: list[dict]) -> str:
                          "around it, and do not describe what it would have "
                          "looked like.")
     return "\n".join(parts)
+
+
+def vision_prompt_block(count: int) -> str:
+    """The prose that tells the model it can see what it drew.
+
+    Appended by `Agent._sys_msg` only while the vision setting is on, so the
+    prompt never claims an ability the request is not going to hand it. Code
+    rather than a string literal in `_BASE_SYSTEM_PROMPT` on purpose: a saved
+    prompt override replaces that literal wholesale, and a model told it has
+    eyes when it does not is worse than one that was never told.
+
+    `count` is the cap on how much of its own history rides along (0 = all of
+    it). It is here because the model is much better at this when it knows
+    whether it is looking at one picture or the whole session — and much
+    worse at pretending when it is not sure.
+
+    Deliberately hedged on the fallback chain: `allow` is decided per model at
+    request time, so the model that actually answers may not be the one this
+    prompt was written for. "Do not invent what an image looks like" is
+    exactly as true for a model that got one as for a model that did not.
+    """
+    span = ("every image in this conversation"
+            if not count else
+            f"the last {count} image{'s' if count != 1 else ''} you generated")
+    return (
+        "\n\nThe pictures you generate are attached back to you, on the tool "
+        "result that made them — you can see " + span + ", not just the "
+        "prompt you wrote for it.\n"
+        "- Look at the render before you write your reply, and check it "
+        "against what was actually asked: the pose, who is doing what to "
+        "whom, who is in frame, and the framing. Compare it with the picture, "
+        "not with the prompt you meant to write.\n"
+        "- If it is wrong, that is a reason to generate again with the "
+        "correction applied — not to write about it as if it were right.\n"
+        "- Never describe or narrate the picture back to the user, and never "
+        "list its tags or settings. They are looking at it.\n"
+        "- A picture the user attached themselves arrives the same way. That "
+        "one is the subject they mean, so match it rather than starting over.\n"
+        "- If no picture is attached, you have not seen it: say so plainly "
+        "instead of inventing what it looks like.")
 
 
 # Scene-bound tags: a place, a prop, or a state that will not be true next
