@@ -51,30 +51,24 @@ TOOLS = [
                                        "bad anatomy, watermark'.",
                     },
                     "width": {"type": "integer",
-                              "description": "px. SDXL: 1024x1024, 832x1216, "
-                                             "1216x832. SD1.5: 512-1024."},
+                              "description": "px. Portrait 832x1216, landscape "
+                                             "1216x832, square 1024x1024."},
                     "height": {"type": "integer", "description": "px, see width."},
                     "steps": {"type": "integer",
                               "description": "Sampling steps. Best left out — "
-                                             "the server already defaults to a "
-                                             "tuned value per architecture. If "
-                                             "you do pass one: 12 for SDXL "
-                                             "(output is flat past that), "
-                                             "20-35 for Anima/Krea, 4-15 for "
-                                             "distilled Turbo/LCM/LCM-Schnell "
-                                             "models, 20 for Flux.1 dev."},
+                                             "the server applies a tuned value "
+                                             "for the loaded model. Only pass "
+                                             "one if the user asks."},
                     "cfg_scale": {"type": "number",
-                                  "description": "Prompt adherence. 4-6 for "
-                                                 "SDXL/Anima/Krea, 1-2 for "
-                                                 "distilled models (Flux, "
-                                                 "Qwen, Z-Image Turbo, Wan), "
-                                                 "~7 for SD1.5."},
+                                  "description": "Prompt adherence. Best left "
+                                                 "out — the server has a tuned "
+                                                 "value for the loaded model. "
+                                                 "Roughly 4-6 when passing one."},
                     "distilled_cfg_scale": {
                         "type": "number",
-                        "description": "Real guidance of a distilled model "
-                                       "(Flux/Qwen/Z-Image/Wan). Only needed "
-                                       "when you want something other than the "
-                                       "model's own default (usually 3-9)."},
+                        "description": "Real guidance of a distilled model, "
+                                       "when the user wants something other "
+                                       "than its default."},
                     "sampler_name": {"type": "string",
                                      "description": "e.g. 'Euler a', 'Euler', "
                                                     "'ER SDE', 'LCM', 'DPM++ "
@@ -87,41 +81,14 @@ TOOLS = [
                                                  "'Turbo', 'flow_match', "
                                                  "'flux2'."},
                     "clip_skip": {"type": "integer",
-                                  "description": "CLIP skip (2 for most anime "
-                                                 "SDXL checkpoints)."},
+                                  "description": "CLIP skip. Leave out unless "
+                                                 "the user asks."},
                     "seed": {"type": "integer",
                              "description": "-1 = random. Reuse a seed to "
                                             "iterate on an image."},
                     "batch_size": {"type": "integer",
                                    "description": "How many images (only if "
                                                   "user asks for several)."},
-                    "model": {"type": "string",
-                              "description": "Checkpoint title to switch to. "
-                                             "Switching takes 10-30 s; only "
-                                             "when user asks."},
-                    "text_encoder": {
-                        "type": "string",
-                        "description": "Companion text encoder for modular "
-                                       "DiT models, e.g. "
-                                       "'qwen_3_06b_base.safetensors'. Only "
-                                       "for Flux/Qwen/Anima/Krea/Wan-style "
-                                       "models; call list_sd_models first to "
-                                       "see what is installed.",
-                    },
-                    "sd_vae": {
-                        "type": "string",
-                        "description": "Companion VAE for a modular model, "
-                                       "e.g. 'qwen_image_vae.safetensors' or "
-                                       "'ae.safetensors' ('Automatic' keeps "
-                                       "the checkpoint's own).",
-                    },
-                    "low_bits": {
-                        "type": "string",
-                        "description": "Diffusion precision: 'Automatic', "
-                                       "'float8-e4m3fn', 'float8-e5m2' or the "
-                                       "'... (fp16 LoRA)' variants. Use "
-                                       "float8 to fit a big model in VRAM.",
-                    },
                 },
                 "required": ["prompt"],
             },
@@ -159,16 +126,6 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_sd_models",
-            "description": "List the checkpoints installed on the server, with "
-                           "the architecture of each and the companion files "
-                           "(text encoders / VAEs) available for modular models.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
 ]
 
 # The system prompt the app ships with, and the floor every other copy
@@ -187,29 +144,31 @@ Restrictions:
 Your tools:
 - generate_image: text-to-image. Use for any "draw/make/generate ... " request.
 - edit_image: modify a previously generated image; pass its file NAME as 'image'.
-- list_sd_models: show installed checkpoints.
 
 Prompt craft:
 - Write rich prompts: subject, action, style, composition, lighting, detail tags.
 - Always supply a sensible negative_prompt, e.g. "lowres, blurry, bad anatomy, watermark".
-- Sizes: SDXL checkpoints -> 1024x1024, 832x1216 (portrait), 1216x832 (landscape).
-  SD1.5 checkpoints -> 512-1024. Default 1024x1024 unless the user says otherwise.
-  If a model-guide entry below matches, follow its size/steps/cfg instead.
-- steps 20-30, cfg_scale ~7, seed -1 (random). Reuse a reported seed to iterate.
+- Sizes: portrait 832x1216, landscape 1216x832, square 1024x1024. Default
+  1024x1024 unless the user says otherwise, or a settings guide below says
+  otherwise.
+- Leave the generation settings alone: do not pass steps, cfg_scale,
+  sampler_name, scheduler or clip_skip. The server applies tuned values for the
+  model that is loaded, which is not something you choose or need to know
+  about. Only pass one if the user explicitly asks for it.
+- seed -1 (random), unless you are iterating and reusing a reported seed.
 - batch_size > 1 only when the user asks for several images/variations.
 
 Rules:
 - When the user asks for an image, ALWAYS call a tool — never say you cannot.
-- If the user names a checkpoint/model, pass it via the 'model' argument of
-  generate_image (switching takes 10-30 s, so only when actually needed).
-  The 'model' value must be an EXACT checkpoint title as returned by
-  list_sd_models — if unsure of the exact title, call list_sd_models first.
+- The image model is already loaded and is not yours to change. There is no
+  way to switch it and nothing to pick from — if the user wants a different
+  model they do it themselves, outside the chat.
 - Do NOT mention file names, seeds or technical details in your reply — the
   app already shows the generated image to the user.
 - For edit_image, the 'image' argument must be a bare file name of a previously
   generated image (as shown in chat or the gallery), never a path.
 - If a tool returns an error, explain it in plain words and suggest a fix
-  (e.g. out-of-memory -> smaller size, or a different checkpoint).
+  (e.g. out-of-memory -> smaller size).
 - Ordinary conversation: just answer, no tools.
 
 Roleplay:
@@ -222,9 +181,9 @@ Roleplay:
   question. Apply the fix, generate, then write the reply. Do not summarise
   what you changed, do not list tags, do not ask permission to continue. If
   they want it re-run they will have said "re-run".
-- Answer a technical question (what a tag does, which model to use, what a
-  setting means) in one or two plain sentences. Never as a bulleted list, and
-  only once unless they keep asking.
+- Answer a technical question (what a tag does, what a setting means) in one or
+  two plain sentences. Never as a bulleted list, and only once unless they keep
+  asking.
 
 EVERY TURN, in this order:
 1. Silently compare the current story moment against the last image you
@@ -256,7 +215,7 @@ One tag per body part. Once you have written "his erect penis" that is the whole
 
 Every contact is anchored to the WORLD, never to the viewer. Write "hand on door frame", "hand flat on the wall", "hand on the bed edge" - never "hand beside the viewer's head", "hand on the viewer's shoulder", "hand on the viewer's knee". A contact that points at the viewer gets anchored by the model to the nearest body part it CAN see, which is how a hand meant for the door frame ends up in his own hair. Where the viewer is standing is expressed by the framing tags above, not by naming body parts relative to them. If the viewer's body really is in frame, show it (duo) or let the hand enter alone: "hand from bottom of frame", "hand entering from below". The matching negative ("own hand on own X") helps but cannot rescue a wrong positive - fix the positive.
 
-Meta vs. in-character detection. Before calling any tool, check whether the message is in-scene or about the scene. Meta messages — questions about prompts, tags, models, settings, seeds, or my own behavior; requests to explain or revise my rules; commentary on a previous image; "how would you change X" — are ordinary conversation. Answer them in text, no tool call, even if they quote or paraphrase an action from the story. Only treat a message as an action if the user is narrating something the characters are actually doing in the fiction. When it's ambiguous, prefer text, but ask in one short sentence and never offer options. A meta message that says something is WRONG is a correction, not a question: apply it and generate. A meta message that asks WHAT something does is a question: answer it in one or two sentences.
+Meta vs. in-character detection. Before calling any tool, check whether the message is in-scene or about the scene. Meta messages — questions about prompts, tags, settings, seeds, or my own behavior; requests to explain or revise my rules; commentary on a previous image; "how would you change X" — are ordinary conversation. Answer them in text, no tool call, even if they quote or paraphrase an action from the story. Only treat a message as an action if the user is narrating something the characters are actually doing in the fiction. When it's ambiguous, prefer text, but ask in one short sentence and never offer options. A meta message that says something is WRONG is a correction, not a question: apply it and generate. A meta message that asks WHAT something does is a question: answer it in one or two sentences.
 
 Anatomy must be owned too. In a POV or near-POV framing, never use bare anatomy tags ("erect penis", "cock", "breasts") — attach them to the subject ("his erect penis", "penis on his body"), and add the viewer's equivalents to the negative prompt ("pov cock", "another person's cock", "first person view").
 
@@ -384,71 +343,71 @@ def default_guide_text() -> str:
     return GUIDE_FILE.read_text(encoding="utf-8", errors="replace").strip()
 
 
-def _guide_tail(override: str | None = None) -> str:
-    """Per-model settings guide (optional section): the Settings override when
-    one is saved, otherwise the guide file."""
-    content = (override or "").strip() or default_guide_text()
+def model_guide_tail(entry: dict | None) -> str:
+    """The settings guide for the checkpoint that is *currently loaded*.
 
-    if content:
-        guide = (
-            "## Model-specific settings guide (model_guide.txt)\n"
-            "Reference prompt + generation settings per checkpoint. When the\n"
-            "checkpoint you are generating with matches an entry, follow that\n"
-            "entry closely:\n"
-            "- Keep its quality-tag scaffolding and negative prompt; swap the\n"
-            "  subject, character, composition and camera tags for what the\n"
-            "  user asked for.\n"
-            "- Use its CFG scale, width/height and clip_skip as-is.\n"
-            "- Do NOT pass steps, sampler_name or scheduler. Leave them out\n"
-            "  and the server applies a measured default per architecture\n"
-            "  (SDXL: DPM++ 2M + Karras at 12 steps — output stops improving\n"
-            "  past 12, and the SDE samplers cost twice as much per step).\n"
-            "  The Steps and Sampler fields in an entry describe the old\n"
-            "  recipe that produced that reference image; they are not\n"
-            "  advice for new ones. Only pass them if the user asks.\n"
-            "- Entry titles are informal names; match them to installed\n"
-            "  checkpoints by similarity. Tip: an entry's 'Model hash' appears\n"
-            "  in the server's checkpoint title, e.g.\n"
-            "  'novaAnimeXL_ilV190.safetensors [fa486caafc]'.\n"
-            "- Ignore export artifacts: 'middle:', 'shadow:', 'highlight:',\n"
-            "  Global Seed, Model hash values. The guide's example Seeds are\n"
-            "  ONLY for reproducing those exact reference images — for new\n"
-            "  images ALWAYS use seed -1.\n"
-            "- Ignore the 'Hires ...' fields (hi-res fix is not exposed via\n"
-            "  the tools) and the older A1111-only notes such as 'Enable\n"
-            "  Quantization in K samplers'.\n"
-            "- These entries are written for SD1.5/SDXL. If the matched\n"
-            "  checkpoint is a newer architecture (Flux, Qwen, Anima, Krea,\n"
-            "  Wan, Z-Image), follow that architecture's CFG/steps rules above\n"
-            "  instead of the entry's numbers.\n"
-            "- No matching entry -> use your own judgment.\n"
-            "\n---- begin model_guide.txt ----\n"
-            f"{content}\n"
-            "---- end guide ----"
-        )
-        return guide + "\n"
-    return _FALLBACK_EXAMPLE
+    `entry` is the record the server resolved out of its model-guide library
+    (see `resolve_model_guide` in server.py) — notes, an example prompt, and
+    optional settings the user wrote for one checkpoint. Only that one entry
+    is rendered: the agent is deliberately never told which checkpoints exist
+    or which one this is, so it cannot ask for a different one. Every field is
+    optional, and a missing/disabled entry falls back to the stock example.
+    """
+    if not entry or not entry.get("enabled", True):
+        return _FALLBACK_EXAMPLE
+    notes = str(entry.get("notes") or "").strip()
+    prompt = str(entry.get("prompt") or "").strip()
+    negative = str(entry.get("negative") or "").strip()
+    settings = entry.get("settings") or {}
+    lines: list[str] = []
+    if notes:
+        lines.append(notes)
+    if prompt:
+        lines.append("Reference prompt (adapt the subject; keep the "
+                     "scaffolding and quality tags):\n" + prompt)
+    if negative:
+        lines.append("Reference negative prompt:\n" + negative)
+    rendered = []
+    for k, label in (("cfg_scale", "CFG scale"), ("steps", "Steps"),
+                     ("sampler_name", "Sampler"),
+                     ("scheduler", "Schedule type"),
+                     ("clip_skip", "Clip skip")):
+        v = settings.get(k)
+        if v not in (None, ""):
+            rendered.append(f"{label}: {v}")
+    if settings.get("width") and settings.get("height"):
+        rendered.append(f"Size: {settings['width']}x{settings['height']}")
+    if rendered:
+        lines.append("Settings for this model: " + ", ".join(rendered)
+                     + "\nThe server already applies these for this model; do "
+                       "not pass them unless the user asks for something "
+                       "different.")
+    if not lines:
+        return _FALLBACK_EXAMPLE
+    return ("## Notes for the model currently loaded\n"
+            "These were written for the model that is loaded right now; they "
+            "override the general prompt-craft guidance above when they "
+            "conflict.\n\n" + "\n\n".join(lines) + "\n")
 
 
 def build_system_prompt(base: str | None = None,
-                        guide: str | None = None) -> str:
-    """Compose a full system prompt: base rules + model-guide tail.
-    Pass a custom base to swap the rules while keeping the guide, and a custom
-    guide to swap the tail while keeping the rules."""
+                        guide_tail: str | None = None) -> str:
+    """Compose a full system prompt: base rules + the loaded model's guide.
+    Pass a custom base to swap the rules, and a rendered guide tail (from
+    `model_guide_tail`) to swap the per-model section."""
     return (base if base is not None else _BASE_SYSTEM_PROMPT) \
-        + "\n\n" + _guide_tail(guide)
+        + "\n\n" + (guide_tail if guide_tail is not None
+                    else model_guide_tail(None))
 
 
 DEFAULT_BASE_PROMPT = _BASE_SYSTEM_PROMPT       # what Settings edits
 
 
 def effective_system_prompt(override: str | None = None,
-                            guide: str | None = None) -> str:
+                            guide_tail: str | None = None) -> str:
     """The system prompt actually sent to the LLM: the custom system message
-    and/or model guide with the built-in defaults filled in wherever the user
-    hasn't saved an override. The guide file is re-read on every call, so
-    editing model_guide.txt on disk takes effect without a restart."""
-    return build_system_prompt((override or "").strip() or None, guide)
+    (or the built-in default) plus the already-rendered per-model guide."""
+    return build_system_prompt((override or "").strip() or None, guide_tail)
 
 
 # The leading run of quality/scaffolding tags every guide entry opens with.
@@ -613,6 +572,106 @@ def ensure_tags(prompt: str, tags: str, viewer_tags: str = "",
     while cut < len(have) and norm(have[cut]) in _QUALITY_TAGS:
         cut += 1
     return ", ".join(have[:cut] + missing + have[cut:])
+
+
+# ------------------------------------------------------------- tag rules
+#
+# A card may carry a short list of deterministic rewrites for the image
+# tool call: put a tag in the prompt, put one in the negative, replace one,
+# or drop one. It exists because the model is asked to remember a character's
+# canonical look every turn and sometimes does not, and because "stop drawing
+# X" is not something a prompt suggestion can guarantee.
+#
+# These run in the server's GEN_TOOLS block right after `ensure_tags`, so a
+# `remove` also beats the card's own appearance injection — otherwise the
+# injector puts the tag straight back and the rule does nothing, which is the
+# trap AGENTS.md records for prompt-only fixes.
+
+TAG_RULE_ACTIONS = ("add_pos", "add_neg", "replace", "remove")
+
+
+def _tag_list(text: str) -> list[str]:
+    return [t.strip() for t in (text or "").split(",") if t.strip()]
+
+
+def apply_tag_rules(prompt: str, negative: str,
+                    rules: list) -> tuple[str, str]:
+    """Rewrite the tool call's tags from the card's rules, in stored order.
+
+    Each rule is `{action, tag, with}`:
+
+    * ``add_pos`` — put `tag` at the FRONT of the prompt, and take it out of
+      the negative
+    * ``add_neg`` — put `tag` in the negative, and take it out of the prompt
+    * ``replace`` — rewrite `tag` to `with` in the prompt (empty `with` drops
+      it, so a half-filled rule does the obvious thing)
+    * ``remove``  — drop `tag` from both prompts
+
+    Add rules clear the other side on purpose: a tag in both prompts is a
+    contradiction, and whichever one the sampler happens to favour is not a
+    useful answer to "this character always has X". Replace touches only the
+    prompt — a colour swap in a negative would negate the *new* tag.
+
+    `add_pos` goes to the front rather than the end because SD's text encoder
+    weights early tags more heavily, and the card's guaranteed tag competing
+    with twenty scene tags at the tail is exactly what the rule exists to
+    prevent. It is also moved to the front when the model already wrote it:
+    leaving it buried is the same as not applying the rule. Several such rules
+    keep their stored order at the head of the prompt.
+
+    Matching is whole comma-separated tag and uses the same normalisation as
+    `ensure_tags` (case, parentheses and backslash-escapes ignored), so a rule
+    written against `arlecchino (genshin impact)` still matches the escaped
+    spelling a model guide uses. Unknown actions and blank tags are skipped
+    rather than raising: the card file is user-editable.
+    """
+    pos = _tag_list(prompt)
+    neg = _tag_list(negative)
+    head: list[str] = []           # add_pos tags, in stored order
+    for rule in rules or []:
+        if not isinstance(rule, dict):
+            continue
+        action = str(rule.get("action") or "").strip().lower()
+        tag = str(rule.get("tag") or "").strip()
+        if not tag or action not in TAG_RULE_ACTIONS:
+            continue
+        want = _norm_tag(tag)
+
+        def has(t: str) -> bool:
+            return _norm_tag(t) == want
+
+        if action == "add_pos":
+            pos = [t for t in pos if not has(t)]
+            pos.append(tag)
+            head.append(tag)
+            neg = [t for t in neg if not has(t)]
+        elif action == "add_neg":
+            if not any(has(t) for t in neg):
+                neg.append(tag)
+            pos = [t for t in pos if not has(t)]
+        elif action == "replace":
+            repl = str(rule.get("with") or "").strip()
+            if repl:
+                pos = [repl if has(t) else t for t in pos]
+            else:
+                pos = [t for t in pos if not has(t)]
+        else:                                         # remove
+            pos = [t for t in pos if not has(t)]
+            neg = [t for t in neg if not has(t)]
+    # Hoisted at the end rather than inserted as we go: a later remove or
+    # replace can delete a head tag, and an insertion index would then leave a
+    # gap that pushes the next one behind the model's own tags. Only tags still
+    # present survive, which also covers replace rewriting one.
+    if head:
+        front, seen = [], set()
+        for t in head:
+            norm = _norm_tag(t)
+            if norm in seen or not any(_norm_tag(x) == norm for x in pos):
+                continue
+            seen.add(norm)
+            front.append(t)
+        pos = front + [t for t in pos if _norm_tag(t) not in seen]
+    return ", ".join(pos), ", ".join(neg)
 
 
 # --------------------------------------------------------------- LoRA tags
@@ -906,15 +965,14 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
     args = {k: v for k, v in args.items() if v is not None}
 
     if name == "generate_image":
-        # A model switch and its companion components belong in one options
-        # write: separate posts mean separate model reloads, and the second
-        # reload can fail on a card that is already tight on VRAM.
-        model = args.pop("model", None)
-        components = {k: args.pop(k) for k in
-                      ("text_encoder", "sd_vae", "low_bits") if k in args}
-        # Set by the server from the active card, never by the model. Popped
-        # here so they cannot reach the payload: `_clean_payload` would drop
-        # them anyway, but with a note about unknown keys, which is noise.
+        # The checkpoint is chosen by the SERVER (the active card's preference)
+        # and handed over as `_model`; the LLM has no model arguments any more
+        # and anything it invents under those names is discarded here, so a
+        # hallucinated field cannot switch the loaded model.
+        model = args.pop("_model", None)
+        components = args.pop("_components", None) or {}
+        for k in ("model", "text_encoder", "sd_vae", "low_bits"):
+            args.pop(k, None)
         loras = args.pop("_loras", None)
         lora_notes = args.pop("_lora_notes", None) or []
         switched = None
@@ -924,11 +982,11 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
             # single loaded checkpoint, so without this the second user's job
             # silently runs on the first user's model — and records the wrong
             # one in `gen`, poisoning the regen recipe. See forge_lease.
-            with forge_lease(client, model, components) as running:
+            with forge_lease(client, model, components) as (running, info):
                 if model:
-                    switched = client.current_model()
+                    switched = info
                 else:
-                    model = model or running or None
+                    model = running or None
                 t0 = time.perf_counter()
                 prepared = client.prepare_args(
                     args, model=model, kind="txt2img")
@@ -963,10 +1021,13 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
                 "gallery or a generation in this chat")
         loras = args.pop("_loras", None)
         lora_notes = args.pop("_lora_notes", None) or []
-        model = args.pop("model", None)
+        model = args.pop("_model", None)
+        components = args.pop("_components", None) or {}
+        for k in ("model", "text_encoder", "sd_vae", "low_bits"):
+            args.pop(k, None)
         # Same lease as txt2img — the dial is shared across every generation
         # path, so guarding only one of them would leave img2img unguarded.
-        with forge_lease(client, model) as running:
+        with forge_lease(client, model, components) as (running, _info):
             model = model or running or None
             t0 = time.perf_counter()
             try:
@@ -988,17 +1049,6 @@ def execute_tool(client, name: str, args: dict, out_dir: Path) -> dict:
                 "count": len(saved),
                 "seed_used": _seed_of(result),
                 "gen": gen}
-
-    if name == "list_sd_models":
-        models = [{"title": m["title"], "arch": m.get("arch", "sd")}
-                  for m in client.list_models()]
-        files = client.companion_files()
-        return {"current_model": client.current_model(),
-                "current_arch": client.current_arch(),
-                "models": models,
-                "text_encoders": files["text_encoder"],
-                "vaes": files["vae"],
-                "low_bits": client.list_low_bits()}
 
     return {"error": f"unknown tool: {name}"}
 

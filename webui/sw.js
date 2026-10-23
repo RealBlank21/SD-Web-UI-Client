@@ -2,8 +2,8 @@
    Network-first for API/dynamic content; cache-first for static assets and
    for the display images (see `displayImage`). */
 
-const CACHE = "sdagent-v118";
-const V = "?v=118";                   // keep in sync with index.html
+const CACHE = "sdagent-v126";
+const V = "?v=126";                   // keep in sync with index.html
 
 /* Display images get their own cache, and it is deliberately NOT versioned
    with the shell. The shell cache is emptied by every version bump, and

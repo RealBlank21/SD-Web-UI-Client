@@ -24,10 +24,9 @@ The `Agent` class was already structurally a session object (its instance state
 is exactly the per-user field set); it was a singleton only by convention, and
 the Handler reaches it through just 25 `self.app.agent.*` references.
 
-A DB earns its keep later, if ever, at `feedback_log` aggregation across users,
-usage/quota stats, and conversation search. Then it should be **SQLite** — one
-box, WAL covers concurrent readers, real transactions. Postgres is ops cost for
-no benefit at this scale.
+A DB earns its keep later, if ever, at usage/quota stats and conversation
+search. Then it should be **SQLite** — one box, WAL covers concurrent readers,
+real transactions. Postgres is ops cost for no benefit at this scale.
 
 ## Decisions
 

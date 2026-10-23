@@ -33,8 +33,10 @@ import secrets
 import shutil
 import socket
 import sys
+import tempfile
 import threading
 import time
+import zipfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -59,8 +61,10 @@ from agent_core import (                      # vendored agent brain
     DEFAULT_LLM,
     LLMError,
     MAX_TOOL_ROUNDS,
+    TAG_RULE_ACTIONS,
     _clean_assistant_msg,
     _is_auth_error,
+    apply_tag_rules,
     default_guide_text,
     effective_system_prompt,
     ensure_tags,
@@ -69,6 +73,7 @@ from agent_core import (                      # vendored agent brain
     apply_lora_tags,
     lora_prompt_block,
     vision_prompt_block,
+    model_guide_tail,
     execute_tool,
 )
 from sd_client import LORA_WEIGHT_BAND, lora_referenceable, lora_tag
@@ -146,6 +151,12 @@ VISION_MAX_BYTES = 4 * 1024 * 1024
 #: it is honoured *on top of* `vision_count` — but still bounded, because the
 #: bytes are re-sent on every round of the turn.
 VISION_MAX_REFS = 6
+#: Largest request body archived to disk for the chat menu's Copy. A turn
+#: writes its body once, and the usual one is ~1 MB (three images inline); a
+#: chat carrying twenty pictures plus hand-attached refs can reach tens of MB,
+#: and rewriting that on every turn is not worth it. Past this the body is
+#: still served from memory for the turn that just ran.
+REQUEST_ARCHIVE_MAX = 16 * 1024 * 1024
 _VISION_MIME = {".png": "image/png", ".jpg": "image/jpeg",
                 ".jpeg": "image/jpeg", ".webp": "image/webp",
                 ".avif": "image/avif"}
@@ -188,10 +199,6 @@ DEFAULT_CONFIG = {
     "llm_models": [DEFAULT_LLM],
     "sd_url": "http://0.0.0.0:7860",
     "system_prompt": "",   # custom system message; "" = built-in default
-    # custom model guide; "" = the model_guide.txt file on disk. Held in the
-    # config rather than written back to the file so a save never dirties a
-    # hand-maintained model_guide.txt.
-    "model_guide": "",
     "username": "",          # how the AI knows the user
     "persona_id": "",        # active user persona (data/personas.json)
     # per-architecture companion files, e.g.
@@ -1285,6 +1292,200 @@ DEFAULT_CHAT_FILE = CHATS_DIR / "default.json"
 ASSISTANT_ID = "assistant"
 
 
+# -------------------------------------------------------------- model guides
+
+# Per-checkpoint instructions: one record holds free notes and an optional
+# reference prompt / negative / settings written for ONE model. The server
+# resolves the record belonging to the checkpoint that is actually loaded and
+# appends just that one to the system prompt — so the agent writes prompts
+# suited to the loaded model without ever being told which checkpoints exist
+# or which one it is running on, and therefore has no way to ask for another.
+#
+# The old model_guide.txt was one document, and the agent had to match its
+# `### <title>` sections to installed checkpoints by eye. This is a catalogue
+# instead: browsable, individually switchable, and matched by the server, which
+# is the only party that knows what is loaded. model_guide.txt is read once to
+# seed the library (see _seed_model_guides) and then left on disk, untouched.
+MODEL_GUIDES_FILE = DATA_DIR / "model_guides.json"
+
+#: Free-text caps. The notes ride on every system message, so they are the one
+#: field where restraint pays — they are re-sent on every turn of the chat.
+GUIDE_NOTES_MAX = 8000
+GUIDE_PROMPT_MAX = 8000
+GUIDE_NEGATIVE_MAX = 4000
+
+#: The numeric/text fields a record may pin. Everything else lives in notes.
+_GUIDE_SETTING_KEYS = ("steps", "cfg_scale", "sampler_name", "scheduler",
+                       "clip_skip", "width", "height")
+
+
+def load_model_guides() -> dict:
+    """The per-model guides, as {name: record}.
+
+    On first read, when no library exists yet, model_guide.txt is parsed into
+    records and saved — the old file keeps its contents and simply stops being
+    consulted, so nothing written there is lost by the move.
+    """
+    if not MODEL_GUIDES_FILE.exists():
+        lib = _seed_model_guides()
+        try:
+            save_model_guides(lib)
+        except OSError:
+            pass                       # read-only disk: still serve the seed
+        return lib
+    try:
+        data = json.loads(MODEL_GUIDES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    lib = data.get("guides") if isinstance(data, dict) else None
+    return lib if isinstance(lib, dict) else {}
+
+
+def save_model_guides(lib: dict) -> None:
+    tmp = MODEL_GUIDES_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"guides": lib}, indent=1,
+                               ensure_ascii=False), encoding="utf-8")
+    tmp.replace(MODEL_GUIDES_FILE)
+
+
+def _clean_model_guide_record(rec: dict, name: str) -> dict:
+    """One guide record, normalised. Unknown keys are dropped."""
+    rec = rec if isinstance(rec, dict) else {}
+    raw = rec.get("settings") if isinstance(rec.get("settings"), dict) else {}
+    settings: dict = {}
+    for k in _GUIDE_SETTING_KEYS:
+        v = raw.get(k)
+        if v is None or v == "":
+            continue
+        try:
+            if k == "cfg_scale":
+                settings[k] = round(max(1.0, min(30.0, float(v))), 2)
+            elif k in ("width", "height"):
+                settings[k] = max(64, min(4096, int(v)))
+            elif k == "steps":
+                settings[k] = max(1, min(150, int(v)))
+            elif k == "clip_skip":
+                settings[k] = max(1, min(12, int(v)))
+            else:                                  # sampler_name, scheduler
+                settings[k] = str(v).strip()[:60]
+        except (TypeError, ValueError):
+            continue
+    return {
+        "model": str(rec.get("model") or "").strip()[:200],
+        "arch": str(rec.get("arch") or "").strip()[:40],
+        "notes": str(rec.get("notes") or "").strip()[:GUIDE_NOTES_MAX],
+        "prompt": str(rec.get("prompt") or "").strip()[:GUIDE_PROMPT_MAX],
+        "negative": str(rec.get("negative") or "").strip()[:GUIDE_NEGATIVE_MAX],
+        "settings": settings,
+        "enabled": bool(rec.get("enabled", True)),
+    }
+
+
+def _seed_model_guides() -> dict:
+    """model_guide.txt -> the first library, once.
+
+    Every `### <title>` section becomes a record whose `model` is that title,
+    so the server matches it to exactly the checkpoint the old prompt asked the
+    agent to match by eye. Prose before the first heading — the file's "use
+    this model unless stated otherwise" preamble — becomes a catch-all record
+    that applies whatever is loaded.
+    """
+    text = default_guide_text()
+    if not text:
+        return {}
+    lib: dict = {}
+    parts = re.split(r"(?m)^###\s+(.+?)\s*$", text)
+    preamble = parts[0].strip()
+    if preamble:
+        lib["default"] = _clean_model_guide_record(
+            {"model": "", "arch": "", "notes": preamble, "enabled": True},
+            "default")
+    for i in range(1, len(parts) - 1, 2):
+        title = parts[i].strip()
+        body = parts[i + 1].strip()
+        if not title:
+            continue
+        lib[title[:200]] = _clean_model_guide_record(
+            {"model": title, "notes": body, "enabled": True}, title)
+    return lib
+
+
+def _guide_is_catchall(rec: dict) -> bool:
+    """A record with neither a model nor an arch applies to everything."""
+    return (not str(rec.get("model") or "").strip()
+            and not str(rec.get("arch") or "").strip())
+
+
+def resolve_model_guide(model: str, arch: str = "",
+                        lib: dict | None = None) -> dict | None:
+    """The guide that applies to the checkpoint currently loaded.
+
+    A record whose `model` text appears in the loaded title wins — the longest
+    match when several do, so a record naming a hash+filename beats one naming
+    just the family. Failing that, a record written for the loaded architecture
+    applies. A record with neither (the catch-all a seeded file leaves behind)
+    applies to everything and is *merged in* rather than replaced: its notes
+    are general rules, the matched record's are the specific ones.
+
+    The dict carries a private `_names` list of the records that contributed,
+    so the editor can mark a row as live without re-deriving the match. No
+    match and no catch-all means no guide — the prompt then falls back to the
+    stock example.
+    """
+    lib = lib if lib is not None else load_model_guides()
+    if not lib:
+        return None
+    items = [(nm, rec) for nm, rec in lib.items()
+             if isinstance(rec, dict) and rec.get("enabled", True)]
+    if not items:
+        return None
+    mlow = str(model or "").lower()
+    best: dict | None = None
+    best_name = ""
+    best_len = 0
+    for nm, rec in items:
+        key = str(rec.get("model") or "").strip().lower()
+        if key and key in mlow and len(key) > best_len:
+            best, best_name, best_len = rec, nm, len(key)
+    if best is None:
+        alow = str(arch or "").strip().lower()
+        if alow:
+            for nm, rec in items:
+                if str(rec.get("arch") or "").strip().lower() == alow:
+                    best, best_name = rec, nm
+                    break
+    base: dict | None = None
+    base_name = ""
+    for nm, rec in items:
+        if _guide_is_catchall(rec):
+            base, base_name = rec, nm
+            break
+    if best is None:
+        if base is None:
+            return None
+        out = dict(base)
+        out["_names"] = [base_name]
+        return out
+    if base is None or base is best:
+        out = dict(best)
+        out["_names"] = [best_name]
+        return out
+    notes = "\n\n".join(n for n in (str(base.get("notes") or "").strip(),
+                                    str(best.get("notes") or "").strip()) if n)
+    settings = dict(base.get("settings") or {})
+    settings.update(best.get("settings") or {})
+    return {
+        "model": best.get("model") or "",
+        "arch": best.get("arch") or "",
+        "notes": notes,
+        "prompt": best.get("prompt") or base.get("prompt") or "",
+        "negative": best.get("negative") or base.get("negative") or "",
+        "settings": settings,
+        "enabled": True,
+        "_names": [base_name, best_name],
+    }
+
+
 # ------------------------------------------------------------------- LoRAs
 
 # A library of LoRAs, keyed by the exact name Forge resolves (`<lora:NAME>`),
@@ -1307,6 +1508,11 @@ LORA_DIR_FALLBACK = DATA_DIR / "loras"
 #: over the same attention layers and the result is neither of them; three is
 #: already past the point where a human can predict the outcome.
 LORA_PER_CARD = 3
+
+#: How many tag rules one card may carry. They are applied in order and every
+#: one of them is a comma-segment rewrite, so a long list is a prompt language
+#: nobody can reason about; the cap keeps a card's behaviour inspectable.
+TAG_RULES_PER_CARD = 24
 
 #: Refuse a card whose weights add up past this. The failure is a blended face
 #: that belongs to nobody, and it is invisible in the settings UI.
@@ -1766,32 +1972,6 @@ def chat_preview(payload: dict, limit: int = 120) -> str:
     return ""
 
 
-def _last_reply(agent: "Agent") -> str:
-    """The newest assistant line on the timeline — a snippet of what was on
-    screen when the user gave their verdict."""
-    for evt in reversed(agent.timeline):
-        if evt.get("type") == "reply":
-            return str(evt.get("text") or "")[:300]
-    return ""
-
-
-def _clean_feedback(raw) -> dict:
-    """A stored verdict, or {} when there isn't a usable one."""
-    if not isinstance(raw, dict):
-        return {}
-    rating = str(raw.get("rating") or "").strip().lower()
-    if rating not in ("like", "dislike"):
-        return {}
-    try:
-        at = int(raw.get("at") or 0)
-    except (TypeError, ValueError):
-        at = 0
-    return {"rating": rating, "at": at,
-            "msgs": int(raw.get("msgs") or 0) if str(
-                raw.get("msgs") or "0").lstrip("-").isdigit() else 0,
-            "reply": str(raw.get("reply") or "")[:300]}
-
-
 # ------------------------------------------------------------------ users
 #
 # Per-user storage (MULTIUSER.md, Phase 1). Chats, chat state, personas and
@@ -1815,6 +1995,19 @@ def user_dir(uid: str) -> Path:
 
 def user_state_file(uid: str, name: str) -> Path:
     return user_dir(uid) / name
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """tmp + replace for text that is already the final bytes.
+
+    `_write_json_atomic` re-serialises; the captured request body must not be
+    touched (its point is that it is byte-for-byte what went over the wire),
+    so it gets the same crash-safety without the round trip.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 
 def _write_json_atomic(path: Path, payload, indent=None) -> None:
@@ -1921,8 +2114,8 @@ def ensure_assistant(chars: list, uid: str = "") -> list:
                   "name": "Assistant", "system": True, "shared": True,
                   "owner": uid,
                   "appearance": "", "persona": "", "greeting": "",
-                  "checkpoint": "", "size": [], "temp": None,
-                  "max_tokens": None, "loras": [], "tags": []})
+                  "checkpoint": "", "size": [], "loras": [], "tags": [],
+                  "tag_rules": [], "vision": None})
     try:
         save_characters(chars)
     except OSError:
@@ -2216,8 +2409,9 @@ class Agent:
         self.chat_id = ""                # active chat id (bound chats)
         self.scenario_id = ""            # scenario bound to the active chat
         self.auto_images = True          # per-chat: may the model use image tools?
-        self.feedback = {}               # verdict on the conversation as it
-        self.feedback_log = []           # stands; verdicts it has moved past
+        self.last_request = ""           # newest LLM request body, verbatim:
+                                         # what the chat menu's Copy hands over
+        self._request_saved = None       # the same string, once on disk
         self._home = self.default_chat_file()  # where the active chat persists
         self.messages = [self._sys_msg()]
         self.timeline = []
@@ -2242,11 +2436,50 @@ class Agent:
         """The user's booru-tag look, auto-injected when a shot draws them."""
         return str(self.persona().get("appearance") or "")
 
+    def model_guide_entry(self) -> dict | None:
+        """The guide record for the checkpoint that is loaded right now.
+
+        Resolved from the library by the checkpoint's title/hash, then by its
+        architecture. This is the only place the agent's prompt learns anything
+        about a model — and only about the loaded one; it is never handed the
+        list, so it cannot ask for a different checkpoint.
+        """
+        try:
+            model = self.client.current_model()
+            arch = self.client.current_arch()
+        except Exception:                              # noqa: BLE001
+            return None
+        return resolve_model_guide(model, arch)
+
+    #: Generation settings a per-model guide may pin. Applied with setdefault,
+    #: so an argument the model deliberately passed still wins — but the guide
+    #: is where a checkpoint's recommended steps/sampler come from in practice,
+    #: because the prompt tells the model to leave those out.
+    GUIDE_SETTING_KEYS = ("steps", "cfg_scale", "sampler_name", "scheduler",
+                          "clip_skip", "width", "height")
+
+    def apply_guide_settings(self, args: dict) -> None:
+        """Fill the loaded checkpoint's pinned settings into a request.
+
+        The guide is user-authored and per-checkpoint. This never moves the
+        model — only the numbers around it — so the agent still cannot change
+        which checkpoint is loaded. A blank field falls through to the
+        architecture profile as before.
+        """
+        guide = self.model_guide_entry() or {}
+        settings = guide.get("settings") or {}
+        for k in self.GUIDE_SETTING_KEYS:
+            v = settings.get(k)
+            if v not in (None, "") and args.get(k) in (None, ""):
+                args[k] = v
+
     def _sys_msg(self) -> dict:
-        """Opening system message: global override (or default) + user
-        persona (or plain username) + the active character's block."""
+        """Opening system message: global override (or default) + the loaded
+        checkpoint's guide + user persona (or plain username) + the active
+        character's block."""
         base = effective_system_prompt(self.cfg.get("system_prompt"),
-                                       self.cfg.get("model_guide"))
+                                       model_guide_tail(
+                                           self.model_guide_entry()))
         persona = self.persona()
         if persona:
             nm = str(persona.get("name") or "").strip()[:80]
@@ -2323,8 +2556,9 @@ class Agent:
             base += ("\n\nScenario Context:\nScenario: "
                      + (sc.get("name") or "").strip()[:80]
                      + "\n" + (sc.get("description") or "").strip()[:4000])
-        if self.cfg.get("vision_images", True):
-            base += vision_prompt_block(self.vision_count())
+        vis_on, vis_n = self.vision_setting()
+        if vis_on:
+            base += vision_prompt_block(vis_n)
         if not self.auto_images:
             # the image tools are withheld for this chat, so say so up front —
             # otherwise the model apologises for "having no tools" every turn
@@ -2455,6 +2689,35 @@ class Agent:
             n = 3
         return max(0, min(n, 20))
 
+    def vision_setting(self) -> tuple[bool, int]:
+        """(send pictures, how many) for the character in this chat.
+
+        `card["vision"]` overrides the user's Settings for one card:
+
+        * ``None`` — follow Settings (`vision_images` + `vision_count`)
+        * ``0``    — never send a picture: this character cannot see images
+        * ``-1``   — every one of its own (the cap's own 0 sentinel)
+        * ``n``    — the newest n
+
+        It is a card and not a chat because it describes the character: an
+        NPC who cannot see needs no eyes in every conversation, and setting it
+        once is the difference between a feature and a chore.
+        """
+        raw = (self.char or {}).get("vision")
+        if raw is None:
+            return (bool(self.cfg.get("vision_images", True)),
+                    self.vision_count())
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return (bool(self.cfg.get("vision_images", True)),
+                    self.vision_count())
+        if n == 0:
+            return (False, 0)
+        if n < 0:
+            return (True, 0)              # 0 is this app's "all of them"
+        return (True, max(1, min(n, 20)))
+
     def vision_uri(self, rel: str) -> str | None:
         """A data URI for the image at `rel`, or None if it cannot be shown."""
         try:
@@ -2489,8 +2752,8 @@ class Agent:
         key, not the API's, and an unknown field on a message is a 400 waiting
         to happen on a strict provider.
         """
-        on = bool(self.cfg.get("vision_images", True)) and allow
-        cap = self.vision_count()
+        on, cap = self.vision_setting()
+        on = on and allow
         picks: dict[int, list[str]] = {}
         auto = 0
         if on:
@@ -2578,6 +2841,20 @@ class Agent:
         """
         return provider_param(self.cfg.get("provider_pref"))
 
+    def _capture_request(self, body: dict) -> None:
+        """Keep the newest request body exactly as it goes over the wire.
+
+        Serialised here rather than on read so the copy cannot be changed by
+        anything that happens to the context afterwards — and because the body
+        may point at the live `messages` list when no picture was attached.
+        In memory only: a body carrying images is megabytes and the chat file
+        must not grow by that on every round.
+        """
+        try:
+            self.last_request = json.dumps(body, ensure_ascii=False)
+        except (TypeError, ValueError):
+            self.last_request = ""      # never present an older round as this
+
     def llm_complete(self, messages: list, temperature: float | None = None,
                      max_tokens: int | None = None,
                      on_text=None, on_reason=None,
@@ -2610,6 +2887,10 @@ class Agent:
         # so it is the same for every member of the fallback chain
         prov = self.provider_param()
         stopped = self.stopped if stoppable else None
+        # what actually went out, for the chat menu's Copy. A turn only: the
+        # character form's assistant is not this conversation, so it must not
+        # replace what the chat last sent.
+        capture = self._capture_request if stoppable else None
         last_err: LLMError | None = None
         # one word already on screen means a retry would duplicate it, so from
         # that point on every failure is a failure
@@ -2641,7 +2922,8 @@ class Agent:
                             on_text=text_of, on_reason=reason_of,
                             stopped=stopped,
                             temperature=temperature, max_tokens=max_tokens,
-                            tools=tools, reasoning=rsn, provider=prov)
+                            tools=tools, reasoning=rsn, provider=prov,
+                            on_request=capture)
                     except StreamStopped:
                         raise
                     except LLMError:
@@ -2655,7 +2937,8 @@ class Agent:
                                                temperature=temperature,
                                                max_tokens=max_tokens,
                                                tools=tools, reasoning=rsn,
-                                               provider=prov)
+                                               provider=prov,
+                                               on_request=capture)
                 except LLMError as e:
                     last_err = e
                     if _is_auth_error(e):          # bad key: don't retry
@@ -2714,6 +2997,38 @@ class Agent:
     def _char_dir(self, cid: str) -> Path:
         return self.chats_dir / cid
 
+    def _request_file(self, cid: str = "", chat_id: str = "") -> Path | None:
+        """Where the newest request body of a chat is kept.
+
+        A sidecar tree, not a key in the chat file: a body carrying images is
+        megabytes, and the chat file is rewritten on every autosave of the
+        conversation — once per turn is the right cost, not once per autosave.
+        The tree is per chat and per character so Copy works on a conversation
+        opened from the archive, not only on the turn that just ran, and so a
+        deleted chat takes its body with it.
+
+        None for a character whose chat has no id yet: there is no conversation
+        to file it under, and the unbound chat's slot must not be borrowed.
+        """
+        cid = cid or (self.char["id"] if self.char else "")
+        chat_id = chat_id or (self.chat_id if self.char else "")
+        root = user_dir(self.uid) / "requests"
+        if cid:
+            if not CHAT_ID_RE.match(chat_id):
+                return None
+            return root / cid / f"{chat_id}.json"
+        return root / "default.json"       # the unbound chat
+
+    def saved_request(self) -> str:
+        """The body kept on disk for the active chat, or "" if none."""
+        path = self._request_file()
+        if path is None:
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
     def _list_chats(self, cid: str) -> list[Path]:
         """Chat files of a character, newest first."""
         try:
@@ -2739,10 +3054,8 @@ class Agent:
         self.scenario_id = str(d.get("scenario_id") or "")
         # absent = written before the toggle existed -> default to on
         self.auto_images = d.get("auto_images", True) is not False
-        self.feedback = _clean_feedback(d.get("feedback"))
-        log = d.get("feedback_log")
-        self.feedback_log = [f for f in (log or []) if isinstance(f, dict)] \
-            if isinstance(log, list) else []
+        self.last_request = ""       # another chat's request does not belong
+        self._request_saved = None   # its saved copy is on the new chat's file
         msgs = d.get("messages")
         self.messages = [self._sys_msg()] + \
             (msgs if isinstance(msgs, list) else [])
@@ -2751,48 +3064,11 @@ class Agent:
     def _fresh_chat(self, scenario_id: str = ""):
         self.scenario_id = scenario_id
         self.auto_images = True          # a fresh chat starts with images on
-        self.feedback = {}
-        self.feedback_log = []
+        self.last_request = ""
+        self._request_saved = None
         self.messages = [self._sys_msg()]
         self.timeline = []
         self._seed_greeting()
-
-    # ------------------------------------------------------------ feedback
-
-    def set_feedback(self, rating: str) -> dict:
-        """Rate the conversation as it stands: "like", "dislike", or "" to
-        clear. The same verdict twice clears it, the opposite one replaces
-        it — there is one rating per chat, not a per-message scoreboard.
-
-        Deliberately captured and not acted on. The point is to collect what
-        the user thought of a conversation while it is in front of them.
-        """
-        rating = (rating or "").strip().lower()
-        if rating not in ("like", "dislike"):
-            self.feedback = {}
-        elif self.feedback.get("rating") == rating:
-            self.feedback = {}
-        else:
-            self.feedback = {"rating": rating, "at": int(time.time()),
-                             "msgs": len(self.messages),
-                             "reply": _last_reply(self)}
-        self._save_state()
-        return self.feedback
-
-    def clear_feedback(self) -> None:
-        """The conversation moved on, so the verdict no longer describes it.
-
-        The old one is kept: archived in `feedback_log` with the message count
-        it was given at, which is what makes the archive analysable later.
-        Saves here rather than trusting the caller — the turn paths all do
-        save afterwards, but the archive should not depend on that.
-        """
-        if not self.feedback:
-            return                         # nothing rated, nothing to write
-        self.feedback_log.append(dict(self.feedback))
-        del self.feedback_log[:-200]        # keep a chat's archive bounded
-        self.feedback = {}
-        self._save_state()
 
     def _seed_greeting(self):
         """Opening events of a fresh chat: a cover image (the bound
@@ -2857,6 +3133,13 @@ class Agent:
             shutil.rmtree(self._char_dir(cid), ignore_errors=True)
         except OSError:
             pass
+        # the archived request bodies go with their chats rather than lingering
+        # as megabytes nobody will ever open again
+        try:
+            shutil.rmtree(user_dir(self.uid) / "requests" / cid,
+                          ignore_errors=True)
+        except OSError:
+            pass
 
     def new_chat(self, scenario_id: str = "") -> None:
         """Start a fresh chat for the active character — the old one stays
@@ -2865,6 +3148,16 @@ class Agent:
         if not self.char:
             self.scenario_id = ""
             self.auto_images = True
+            self.last_request = ""
+            self._request_saved = None
+            # the unbound chat reuses one home file, so its saved request body
+            # has to go with it or Copy would hand over the old conversation
+            path = self._request_file()
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             self.messages = [self._sys_msg()]
             self.timeline = []
             self._save_state()
@@ -2900,6 +3193,12 @@ class Agent:
                       and self.chat_id == chat_id)
         try:
             self._chat_file(cid, chat_id).unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            req = self._request_file(cid, chat_id)
+            if req is not None:
+                req.unlink(missing_ok=True)
         except OSError:
             pass
         if active and self.char:
@@ -3021,7 +3320,6 @@ class Agent:
             "chat_id": self.chat_id if self.char else "",
             "scenario_id": self.scenario_id,
             "auto_images": self.auto_images,
-            "feedback": self.feedback,
             "messages": self.messages[1:],
             "timeline": self.timeline,
         }
@@ -3036,8 +3334,6 @@ class Agent:
                     "updated": now,
                     "scenario_id": self.scenario_id,
                     "auto_images": self.auto_images,
-                    "feedback": self.feedback,
-                    "feedback_log": self.feedback_log,
                     "messages": mirror["messages"],
                     "timeline": self.timeline,
                 }
@@ -3047,10 +3343,24 @@ class Agent:
         else:
             payload = {"messages": mirror["messages"],
                        "auto_images": self.auto_images,
-                       "feedback": self.feedback,
                        "timeline": self.timeline}
             self.chats_dir.mkdir(parents=True, exist_ok=True)
             _write_json_atomic(self.default_chat_file(), payload)
+        # The newest request body rides beside the chat, not inside it: one
+        # write per turn, and only when a new capture actually landed. This is
+        # what makes Copy work on a conversation opened from the archive —
+        # `last_request` alone is memory, and a chat switch or a restart
+        # empties it. Identity, not equality: a capture always makes a new
+        # string, so a repeated autosave never rewrites a megabyte for nothing.
+        if self.last_request and self.last_request is not self._request_saved \
+                and len(self.last_request) <= REQUEST_ARCHIVE_MAX:
+            path = self._request_file()
+            if path is not None:
+                try:
+                    _write_text_atomic(path, self.last_request)
+                    self._request_saved = self.last_request
+                except OSError:
+                    pass
         _write_json_atomic(self.state_file, mirror)
 
     def _load_state(self):
@@ -3066,7 +3376,6 @@ class Agent:
             self.chat_id = d.get("chat_id", "")
             self.scenario_id = str(d.get("scenario_id") or "")
             self.auto_images = d.get("auto_images", True) is not False
-            self.feedback = _clean_feedback(d.get("feedback"))
             if isinstance(d.get("messages"), list):
                 self.messages = [self._sys_msg()] + d["messages"]
             self.timeline = d.get("timeline") or []
@@ -3105,8 +3414,6 @@ class Agent:
 
     def _complete(self, messages: list, emit) -> bool:
         reply = None
-        char_temp = None
-        char_mt = None
         round_think: dict | None = None
 
         def on_reason(chunk: str):
@@ -3155,15 +3462,6 @@ class Agent:
             done, round_think = round_think, None
             return done
 
-        if self.char:
-            try:
-                char_temp = float(self.char["temp"])  # type: ignore[arg-type]
-            except (KeyError, TypeError, ValueError):
-                char_temp = None
-            try:
-                char_mt = int(self.char["max_tokens"])  # type: ignore[arg-type]
-            except (KeyError, TypeError, ValueError):
-                char_mt = None
         try:
             for _ in range(MAX_TOOL_ROUNDS):
                 if self.stopped():
@@ -3172,8 +3470,6 @@ class Agent:
                 block = None
                 try:
                     data = self.llm_complete(messages,
-                                             temperature=char_temp,
-                                             max_tokens=char_mt,
                                              on_text=on_text,
                                              on_reason=on_reason)
                 finally:
@@ -3215,9 +3511,14 @@ class Agent:
                     # but the prompt it held is NOT — the next turn has to
                     # know which prompt actually produced the image on screen
                     content = {k: v for k, v in result.items() if k != "gen"}
+                    # ...except for the card's tag rules: the model gets back
+                    # the prompt it wrote, so its rewrites stay invisible to
+                    # it. The recipe in `gen` keeps the real one.
+                    seen = content.pop("_seen_prompt", None)
                     gen = result.get("gen") or {}
                     if gen.get("prompt"):
-                        content["prompt"] = gen["prompt"]
+                        content["prompt"] = seen if seen is not None \
+                            else gen["prompt"]
                     files = content.get("saved_files") or []
                     if files:
                         # stable lineage id: survives every regeneration
@@ -3248,9 +3549,6 @@ class Agent:
             # so a later edit/regenerate can rewind the context exactly
             evt = {"type": "reply", "text": reply, "mi": len(messages)}
             self.push(evt, emit)
-            # a verdict rated the conversation *before* this reply, so it no
-            # longer describes it — archive it and start the chat unrated
-            self.clear_feedback()
             return True
         return False
 
@@ -3299,13 +3597,20 @@ class Agent:
         keep = [e for e in self.timeline[before:] if e.get("type") == "error"]
         self.timeline = self.timeline[:before] + keep
 
-    def sync_gen_context(self, series: str, rel: str, gen: dict | None) -> bool:
+    def sync_gen_context(self, series: str, rel: str, gen: dict | None,
+                         visible_prompt: str | None = None) -> bool:
         """Point the LLM's tool result at the newest variant of an image.
 
         Regenerating rewrites the picture but not the conversation, so the
         model would otherwise keep describing the original. Repoint the tool
         message that produced the file at the one now on screen, and give it
         the prompt that actually ran.
+
+        `visible_prompt` overrides that text with the prompt the model should
+        see — the recipe as it was before the card's tag rules rewrote it.
+        The model is never told those rules exist, so handing it the rewritten
+        prompt would teach it the edit and it would start writing the edited
+        tags itself.
 
         `series` identifies the lineage and `rel` is the new file. The match
         accepts either the current file or the lineage's original, because a
@@ -3330,7 +3635,7 @@ class Agent:
             content["series"] = root or series
             content.pop("count", None)
             if gen and gen.get("prompt"):
-                content["prompt"] = gen["prompt"]
+                content["prompt"] = visible_prompt or gen["prompt"]
             m["content"] = json.dumps(content, ensure_ascii=False)
             return True
         return False
@@ -3347,6 +3652,7 @@ class Agent:
                        "error": result["error"]}, emit)
             return result
         is_gen = name in GEN_TOOLS
+        seen_prompt = None
         if is_gen and self.char:
             # Each tag source the server adds on its own is individually
             # switchable (Settings > Generation > Text); a switch that is off
@@ -3364,16 +3670,19 @@ class Agent:
                     self.char_tags() if inj_char else "",
                     self.persona_appearance() if inj_view else "",
                     args.get("negative_prompt", ""))
-            # preferred checkpoint applies when the model didn't pick one
+            # The agent has no model arguments any more. The only thing that
+            # can move the loaded checkpoint is the card's preferred
+            # checkpoint, and it is applied here, server-side — the model in
+            # the chat never sees it and cannot ask for a different one.
             cp = (self.char.get("checkpoint") or "").strip()
-            if cp and not args.get("model"):
-                args["model"] = cp
-            # a checkpoint switch carries its architecture's saved companion
-            # files, so a modular model never loads without its text encoder
-            if args.get("model"):
-                arch = self.client.arch_for(args["model"])
-                for k, v in self.saved_components(arch).items():
-                    args.setdefault(k, v)
+            if cp:
+                args["_model"] = cp
+                # a checkpoint switch carries its architecture's saved
+                # companion files, so a modular model never loads without its
+                # text encoder
+                comps = self.saved_components(self.client.arch_for(cp))
+                if comps:
+                    args["_components"] = comps
             size = self.char.get("size") or []
             if name == "generate_image" and len(size) == 2:
                 args.setdefault("width", size[0])
@@ -3384,8 +3693,8 @@ class Agent:
             # arch is resolved here, after any card checkpoint switch, because
             # it decides which LoRAs can load at all.
             if self.cfg.get("inject_lora_tags", True):
-                larch = self.client.arch_for(args["model"]) \
-                    if args.get("model") else self.client.current_arch()
+                larch = self.client.arch_for(cp) if cp \
+                    else self.client.current_arch()
                 entries = card_loras(self.char, larch,
                                     _installed_loras(self.client))
                 tags, applied, skipped = lora_tag_list(entries)
@@ -3409,6 +3718,29 @@ class Agent:
                 # injection off. (With injection on, apply_lora_tags strips
                 # before it appends.)
                 args["prompt"], _ = strip_lora_tags(args.get("prompt", ""))
+            # The card's tag rules run LAST, on the finished prompt: after
+            # ensure_tags so a "remove" beats the card's own look injection
+            # (the trap AGENTS.md records for prompt-only fixes), and after
+            # the LoRA block so the text captured here is byte-for-byte what
+            # the model would have sent without any rules at all.
+            #
+            # That capture is the point. `seen_prompt` goes back to the model
+            # in the tool result instead of the rewritten prompt, so a turn
+            # cannot see that its tags were edited (or that a rule exists) and
+            # simply re-applies the card's rules on the next image. `gen`
+            # keeps the real prompt: the lightbox, the regen sheet and the
+            # chat file are the places where what was actually sent belongs.
+            rules = self.char.get("tag_rules") or []
+            if rules:
+                seen_prompt = args.get("prompt", "")
+                args["prompt"], negged = apply_tag_rules(
+                    seen_prompt, args.get("negative_prompt", ""), rules)
+                args["negative_prompt"] = negged
+        if is_gen:
+            # The guide's pinned settings are the *user's* defaults for this
+            # checkpoint; the model is told to leave them out, so this is where
+            # a model's recommended steps/sampler actually come from.
+            self.apply_guide_settings(args)
         emit({"type": "tool_start", "name": name})
         out = {"result": None, "error": None}
 
@@ -3444,6 +3776,10 @@ class Agent:
                                  in result.get("saved_files", [])]
         if result.get("gen"):
             result["gen"]["prompt"] = result["gen"].get("prompt", "")
+            if seen_prompt is not None:
+                # model-facing copy of the prompt, without its card's rules;
+                # popped in `_complete` before the tool message is serialised
+                result["_seen_prompt"] = seen_prompt
             evt = {
                 "type": "generation",
                 "files": ["/outputs/" + f for f in result["saved_files"]],
@@ -3659,7 +3995,8 @@ def chat_completion_stream(api_key: str, llm: str, messages: list,
                            max_tokens: int | None = None,
                            tools: list | None = None,
                            reasoning: dict | None = None,
-                           provider: dict | None = None) -> dict:
+                           provider: dict | None = None,
+                           on_request=None) -> dict:
     """One OpenRouter chat completion, streamed.
 
     The same request and the same return shape as `chat_completion` — a caller
@@ -3672,6 +4009,10 @@ def chat_completion_stream(api_key: str, llm: str, messages: list,
     `stopped` is polled between chunks, and raising StreamStopped off the read
     is how a press of stop cuts the completion short rather than waiting out
     the rest of it.
+
+    `on_request` is handed the finished body just before it goes out — the
+    chat menu's Copy takes that verbatim, images and all. It is a debugging
+    hook, so a callback that raises must not be able to kill the request.
     """
     from agent_core import TOOLS
     if tools is None:
@@ -3699,6 +4040,11 @@ def chat_completion_stream(api_key: str, llm: str, messages: list,
         # unset, so a config that never touched the setting sends exactly the
         # request it sent before the setting existed
         body["provider"] = provider
+    if on_request is not None:
+        try:
+            on_request(body)
+        except Exception:                              # noqa: BLE001
+            pass                    # a debugging hook cannot take a turn down
     try:
         resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
                              headers=headers, json=body, stream=True,
@@ -3725,7 +4071,8 @@ def chat_completion(api_key: str, llm: str, messages: list,
                     max_tokens: int | None = None,
                     tools: list | None = None,
                     reasoning: dict | None = None,
-                    provider: dict | None = None) -> dict:
+                    provider: dict | None = None,
+                    on_request=None) -> dict:
     """One OpenRouter chat completion with tool definitions, in one piece.
 
     The unstreamed twin of `chat_completion_stream`, kept as its fallback: a
@@ -3756,6 +4103,11 @@ def chat_completion(api_key: str, llm: str, messages: list,
         body["reasoning"] = reasoning
     if provider:
         body["provider"] = provider
+    if on_request is not None:
+        try:
+            on_request(body)
+        except Exception:                              # noqa: BLE001
+            pass
     try:
         resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
                              headers=headers, json=body, timeout=LLM_TIMEOUT)
@@ -3800,6 +4152,175 @@ def run_chat_turn(agent: Agent, user_text: str, refs: list | None = None):
     # A new thread starts with an empty context, so the outputs scope (and
     # anything else request-scoped) would be lost mid-turn and images would
     # land in the unscoped root. Copy it across explicitly.
+    ctx = contextvars.copy_context()
+    threading.Thread(target=ctx.run, args=(worker,), daemon=True).start()
+    return ("ok", q)
+
+
+# ----------------------------------------------------------------- commands
+
+#: Slash commands the composer understands. Handled entirely server-side and
+#: never sent to the LLM: loading a checkpoint is something the user does to
+#: the session, not a conversation turn, and the agent is deliberately kept
+#: unaware that other models exist at all.
+_COMMANDS = ("help", "model", "models")
+
+_COMMAND_HELP = (
+    "Commands — these run locally and never reach the AI:\n"
+    "  /models          list the installed checkpoints\n"
+    "  /model <n|name>  load a checkpoint (a number from /models, or part "
+    "of its name)\n"
+    "  /help            this list\n"
+    "Anything else you type is a normal message."
+)
+
+
+def parse_command(text: str) -> tuple[str, str] | None:
+    """Split "/model 2" into ("model", "2"). None when this isn't a command.
+
+    A lone slash or an unknown word is not a command — it is an ordinary
+    message that happens to start with "/", and the model should see it.
+    """
+    m = re.match(r"^\s*/([A-Za-z_]+)\s*(.*)$", text or "", re.S)
+    if not m:
+        return None
+    name = m.group(1).lower()
+    if name not in _COMMANDS:
+        return None
+    return name, m.group(2).strip()
+
+
+def _cmd_model_rows(client) -> list[dict]:
+    try:
+        return [{"title": m["title"], "arch": m.get("arch", "")}
+                for m in client.list_models()]
+    except Exception:                                  # noqa: BLE001
+        return []
+
+
+def _cmd_models_notice(client, rows: list[dict]) -> str:
+    try:
+        current = client.current_model()
+    except Exception:                                  # noqa: BLE001
+        current = ""
+    clow = current.lower()
+    out = [f"Installed checkpoints ({len(rows)}):"]
+    for i, r in enumerate(rows[:60], 1):
+        mark = "   ← loaded" if r["title"].lower() == clow else ""
+        out.append(f"  {i:>2}. {r['title']}{mark}")
+    if len(rows) > 60:
+        out.append(f"  … and {len(rows) - 60} more")
+    out.append("Load one with /model <number or part of its name>.")
+    return "\n".join(out)
+
+
+def _cmd_resolve_model(arg: str, rows: list[dict]) -> tuple[dict | None,
+                                                            str, list[str]]:
+    """Resolve a /model argument to one row.
+
+    Returns (row, error, candidates). A number indexes the /models list; any
+    other text matches a title (hash included) case-insensitively. An
+    ambiguous match comes back as candidates rather than a guess.
+    """
+    arg = arg.strip()
+    if not arg:
+        return None, "", []
+    if re.fullmatch(r"#?\d+", arg):
+        n = int(arg.lstrip("#"))
+        if 1 <= n <= len(rows):
+            return rows[n - 1], "", []
+        return None, f"there is no checkpoint #{n} — /models lists them.", []
+    low = arg.lower()
+    exact = [r for r in rows if r["title"].lower() == low]
+    if exact:
+        return exact[0], "", []
+    hits = [r for r in rows if low in r["title"].lower()]
+    if not hits:
+        return None, f"no installed checkpoint matches {arg!r}.", []
+    if len(hits) > 1:
+        return None, "", [r["title"] for r in hits]
+    return hits[0], "", []
+
+
+def _run_model_switch(agent: Agent, row: dict, emit) -> None:
+    """Load one checkpoint with its saved companions, then report it.
+
+    The switch is announced even when it fails: a bad checkpoint leaves Forge
+    on whatever it had, and silence would look like success.
+    """
+    client = agent.client
+    title = row["title"]
+    arch = row.get("arch") or client.arch_for(title)
+    comps = agent.saved_components(arch)
+    emit({"type": "status", "text": f"loading {title}…"})
+    with forge_lock(client.base_url):
+        info = client.set_model(title, arch=arch,
+                                **{k: v for k, v in comps.items() if v})
+    loaded = info.get("model") or title
+    notes = list(info.get("notes") or [])
+    text = f"Loaded {loaded} ({arch})."
+    if notes:
+        text += "\n" + "\n".join("  · " + str(n) for n in notes)
+    # the loaded checkpoint decides the model guide, so the system message is
+    # rebuilt now rather than at the start of the next turn
+    if agent.messages and agent.messages[0].get("role") == "system":
+        agent.messages[0] = agent._sys_msg()
+    agent.push({"type": "notice", "text": text}, emit)
+
+
+def run_chat_command(agent: Agent, text: str, cmd: tuple[str, str]):
+    """Handle a slash command and stream its result like a turn.
+
+    Same lock and queue shape as run_chat_turn, and no API key is needed: the
+    command never leaves the machine. The command and its notice are stored on
+    the timeline (so a reload still shows them) but never appended to
+    `messages` — the LLM must not learn that checkpoints exist.
+    """
+    if not agent.lock.acquire(blocking=False):
+        return ("busy", None)
+    q = Queue()
+
+    def emit(evt):
+        q.put(evt)
+
+    def worker():
+        try:
+            agent.push({"type": "user", "text": text}, emit)
+            name, arg = cmd
+            if name == "help":
+                agent.push({"type": "notice", "text": _COMMAND_HELP}, emit)
+            else:
+                client = agent.client
+                rows = _cmd_model_rows(client)
+                if name == "models" or not arg:
+                    if not rows:
+                        agent.push({"type": "notice",
+                                    "text": "The image server reported no "
+                                            "checkpoints."}, emit)
+                    else:
+                        agent.push({"type": "notice",
+                                    "text": _cmd_models_notice(client, rows)},
+                                   emit)
+                else:
+                    row, err, cands = _cmd_resolve_model(arg, rows)
+                    if err:
+                        agent.push({"type": "notice", "text": err}, emit)
+                    elif cands:
+                        agent.push({"type": "notice",
+                                    "text": "Several checkpoints match:\n"
+                                            + "\n".join("  · " + c
+                                                        for c in cands)
+                                            + "\nUse /model <number>."}, emit)
+                    else:
+                        _run_model_switch(agent, row, emit)
+        except Exception as e:                         # noqa: BLE001
+            agent.push({"type": "error",
+                        "text": f"✗ {type(e).__name__}: {e}"}, emit)
+        finally:
+            agent._save_state()
+            agent.lock.release()
+            q.put({"type": "done"})
+
     ctx = contextvars.copy_context()
     threading.Thread(target=ctx.run, args=(worker,), daemon=True).start()
     return ("ok", q)
@@ -4230,7 +4751,8 @@ def _clean_gen_args(args: dict, client=None, model: str = "") -> dict:
 
 
 def run_regeneration(agent: Agent, rel: str, instruction: str, emit,
-                     overrides: dict | None = None) -> dict:
+                     overrides: dict | None = None,
+                     seen: dict | None = None) -> dict:
     """Re-create an image directly — no LLM turn, no chat message.
 
     Starts from the image's own recipe (newest chat snapshot, else the PNG
@@ -4293,12 +4815,29 @@ def run_regeneration(agent: Agent, rel: str, instruction: str, emit,
         if not args.get("prompt"):
             raise ValueError("no original prompt found for this image")
 
+    # A card's tag rules belong to the card, not to the tool call that first
+    # drew the image, so a regeneration gets them too — an edited prompt still
+    # lands on the character's canonical look. Re-running them over a recipe
+    # that already carries their result is a no-op (all four actions are
+    # idempotent), which is what keeps a plain replay faithful.
+    #
+    # `seen` receives the prompt *before* the rewrite: the conversation is
+    # repointed at the new variant by `sync_gen_context`, and it must be given
+    # what the user asked for rather than what the card turned it into, or the
+    # model would learn that a rule exists. `gen` keeps the real one.
+    rules = (agent.char or {}).get("tag_rules") or []
+    if rules:
+        if seen is not None:
+            seen["prompt"] = args.get("prompt", "")
+        args["prompt"], args["negative_prompt"] = apply_tag_rules(
+            args.get("prompt", ""), args.get("negative_prompt", ""), rules)
+
     # One lease across "switch the dial" and "run". Forge's dial is global, so
     # a regen that switched models without it could be overtaken mid-flight
     # by another user on the same WebUI and produce the wrong checkpoint.
     with forge_lease(agent.client, ckpt or None,
                      {k: v for k, v in components.items() if v},
-                     arch=arch if ckpt else None) as running:
+                     arch=arch if ckpt else None) as (running, _info):
         model = ckpt or model or running
         if mode == "img2img":
             emit({"type": "status", "text": "applying change…"})
@@ -5098,7 +5637,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._body_cache
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            self._body_cache = json.loads(self.rfile.read(length) or b"{}")
+            raw = self.rfile.read(length) or b"{}"
+            ctype = (self.headers.get("Content-Type")
+                     or "").split(";")[0].strip().lower()
+            if ctype == "application/x-www-form-urlencoded":
+                # Bulk download posts a plain form so the browser can handle
+                # the zip as a native download, synchronously with the click.
+                form = parse_qs(raw.decode("utf-8", "replace"),
+                                keep_blank_values=True)
+                self._body_cache = {k: (v[0] if len(v) == 1 else v)
+                                    for k, v in form.items()}
+            else:
+                self._body_cache = json.loads(raw)
         except (ValueError, json.JSONDecodeError):
             self._body_cache = {}
         return self._body_cache
@@ -5157,6 +5707,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         for h in headers or []:
             self.send_header(*h)
+        self.end_headers()
+        if not self._head:
+            self.wfile.write(data)
+
+    def _json_text(self, text: str, code: int = 200):
+        """Send a JSON document that is already serialised, untouched.
+
+        `_json` takes an object and re-encodes it — fine for everything built
+        here, wrong for a captured request body, where the point is that the
+        bytes on the clipboard are the bytes that went out.
+        """
+        data = text.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         if not self._head:
             self.wfile.write(data)
@@ -5406,8 +5973,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/history":
             self._json({"timeline": self.agent.timeline,
                         "busy": self.agent.lock.locked(),
-                        "auto_images": self.agent.auto_images,
-                        "feedback": self.agent.feedback})
+                        "auto_images": self.agent.auto_images})
+        elif path == "/api/chat/request":
+            self.api_chat_request()
         elif path == "/api/settings":
             self.api_settings()
         elif path == "/api/audit":
@@ -5424,6 +5992,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_loras()
         elif path == "/api/loras/search":
             self.api_loras_search()
+        elif path == "/api/model_guides":
+            self.api_model_guides()
         elif path.startswith("/api/avatar/"):
             self.api_avatar(path[len("/api/avatar/"):])
         elif path.startswith("/api/cover/"):
@@ -5532,16 +6102,13 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 agent.lock.release()
             self._json({"ok": True, "timeline": agent.timeline,
-                        "auto_images": agent.auto_images,
-                        "feedback": agent.feedback})
+                        "auto_images": agent.auto_images})
         elif path == "/api/chat/select":
             self.api_chat_select()
         elif path == "/api/chat/delete":
             self.api_chat_delete()
         elif path == "/api/chat/auto_images":
             self.api_chat_auto_images()
-        elif path == "/api/chat/feedback":
-            self.api_chat_feedback()
         elif path == "/api/characters":
             self.api_characters_save()
         elif path == "/api/character/select":
@@ -5556,6 +6123,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_loras()
         elif path == "/api/loras/search":
             self.api_loras_search()
+        elif path == "/api/model_guides":
+            self.api_model_guides()
         elif path == "/api/persona/select":
             self.api_persona_select()
         elif path == "/api/persona/delete":
@@ -5583,6 +6152,8 @@ class Handler(BaseHTTPRequestHandler):
             self.api_delete_images()
         elif path == "/api/gallery/folder":
             self.api_gallery_folder()
+        elif path == "/api/gallery/download":
+            self.api_gallery_download()
         elif path == "/api/delete_event":
             body = self._body()
             tl = self.agent.timeline
@@ -5600,12 +6171,10 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self.agent.timeline = [e for i, e in enumerate(tl)
                                            if i not in idxs]
-                self.agent.clear_feedback()   # it rated what just went
                 self.agent._save_state()
                 # the caller re-reads /api/history — every later index moved
                 self._json({"ok": True, "removed": len(idxs),
-                            "timeline": self.agent.timeline,
-                            "feedback": self.agent.feedback})
+                            "timeline": self.agent.timeline})
                 return
             try:
                 idx = int(body.get("index", -1))
@@ -5615,11 +6184,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "bad index"}, 400)
                 return
             evt = tl.pop(idx)
-            self.agent.clear_feedback()       # it rated what just went
             self.agent._save_state()
             self._json({"ok": True, "removed": evt.get("type"),
-                        "timeline": self.agent.timeline,
-                        "feedback": self.agent.feedback})
+                        "timeline": self.agent.timeline})
         elif path == "/api/edit_event":
             self.api_edit_event()
         elif path == "/api/regen_reply":
@@ -5665,10 +6232,8 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(mi, int) and 1 <= mi <= len(agent.messages) \
                     and agent.messages[mi - 1].get("role") == "assistant":
                 agent.messages[mi - 1]["content"] = text
-            agent.clear_feedback()     # it rated the old wording
             agent._save_state()
-            self._json({"ok": True, "text": text, "timeline": agent.timeline,
-                        "feedback": agent.feedback})
+            self._json({"ok": True, "text": text, "timeline": agent.timeline})
         finally:
             agent.lock.release()
 
@@ -5758,11 +6323,13 @@ class Handler(BaseHTTPRequestHandler):
 
         def worker():
             out = {"evt": None, "error": None}
+            seen: dict = {}
 
             def work():
                 try:
                     out["evt"] = run_regeneration(
-                        agent, rel, instr, lambda e: q.put(e), overrides)
+                        agent, rel, instr, lambda e: q.put(e), overrides,
+                        seen)
                 except Exception as e:            # noqa: BLE001 — report all
                     out["error"] = f"{type(e).__name__}: {e}"
 
@@ -5790,8 +6357,11 @@ class Handler(BaseHTTPRequestHandler):
                     saved = [rel_from_url(f) for f in evt["files"]]
                     new_rel = saved[0]
                     # the picture changed — the conversation must follow it,
-                    # or the next turn keeps describing the old one
-                    agent.sync_gen_context(rel, new_rel, evt.get("gen"))
+                    # or the next turn keeps describing the old one. The model
+                    # gets the pre-rule prompt, when there was one, so the
+                    # card's tag rewrites never enter its context.
+                    agent.sync_gen_context(rel, new_rel, evt.get("gen"),
+                                           seen.get("prompt"))
                     agent._save_state()
                     q.put({"type": "regen_done",
                            "file": new_rel,
@@ -5814,6 +6384,16 @@ class Handler(BaseHTTPRequestHandler):
         text = str(body.get("message", "")).strip()
         if not text:
             self._json({"error": "empty message"}, 400)
+            return
+        # A slash command is a chat action, not a turn: it is handled here and
+        # never reaches the LLM or needs an API key.
+        cmd = parse_command(text)
+        if cmd:
+            status, q = run_chat_command(self.agent, text, cmd)
+            if status == "busy":
+                self._json({"error": "busy — a turn is already running"}, 409)
+                return
+            self._sse_stream(q)
             return
         status, q = run_chat_turn(self.agent, text,
                                   clean_refs(body.get("refs")))
@@ -5878,8 +6458,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             agent.select_chat(cid, chat_id)
             self._json({"ok": True, "timeline": agent.timeline,
-                        "auto_images": agent.auto_images,
-                        "feedback": agent.feedback})
+                        "auto_images": agent.auto_images})
         except ValueError as e:
             self._json({"error": str(e)}, 400)
         except Exception as e:                      # noqa: BLE001
@@ -5898,37 +6477,30 @@ class Handler(BaseHTTPRequestHandler):
         try:
             agent.delete_chat(cid, chat_id)
             self._json({"ok": True, "timeline": agent.timeline,
-                        "auto_images": agent.auto_images,
-                        "feedback": agent.feedback})
+                        "auto_images": agent.auto_images})
         finally:
             agent.lock.release()
 
-    def api_chat_feedback(self):
-        """Rate the active conversation: "like", "dislike", or "" to clear.
+    def api_chat_request(self):
+        """The body of the newest request this chat sent, verbatim.
 
-        Captured, not acted on — there is nothing downstream that reads it
-        yet. Stored per chat so it survives restarts and archived into the
-        chat's own log when the conversation moves on.
+        Served as the JSON document itself rather than wrapped in one: what
+        the client copies is then exactly what went over the wire, images and
+        all, with no re-serialising in between.
+
+        Memory first (the turn that just ran), then the per-chat file. The
+        archived copy is the reason this endpoint works on a conversation
+        opened from the history list or after a restart: `last_request` alone
+        is cleared by every chat switch, which read as the feature failing on
+        everything except the newest turn.
         """
-        body = self._body()
-        rating = body.get("rating", "")
-        if not isinstance(rating, str):
-            self._json({"error": "rating must be a string"}, 400)
-            return
         agent = self.agent
-        # a verdict on a chat with nothing in it is noise, and it would sit in
-        # the archive until the first reply silently retired it
-        if not any(e.get("type") in ("user", "reply") for e in agent.timeline):
-            self._json({"error": "nothing to rate yet"}, 400)
+        body = agent.last_request or agent.saved_request()
+        if not body:
+            self._json({"error": "no request archived for this chat yet — "
+                                 "send a message and Copy will have it"}, 404)
             return
-        if not agent.lock.acquire(blocking=False):
-            self._json({"error": "busy — a turn is already running"}, 409)
-            return
-        try:
-            fb = agent.set_feedback(rating)
-            self._json({"ok": True, "feedback": fb})
-        finally:
-            agent.lock.release()
+        self._json_text(body)
 
     def api_chat_auto_images(self):
         """Chat top-bar toggle: may the model generate images on its own?
@@ -5977,7 +6549,6 @@ class Handler(BaseHTTPRequestHandler):
             "gallery_count": gallery_total(),
             "busy": agent.lock.locked(),
             "auto_images": agent.auto_images,
-            "feedback": agent.feedback,
             "character": ({"id": char["id"],
                            "name": char.get("name", "")}
                           if char else None),
@@ -6129,6 +6700,77 @@ class Handler(BaseHTTPRequestHandler):
             agent.messages[0] = agent._sys_msg()
         self._json({"ok": True, "loras": self._loras_merged(),
                     "current_arch": self._safe_arch()})
+
+    def api_model_guides(self):
+        """The per-model guide library (GET) and its edits (POST).
+
+        GET returns every record plus the installed checkpoints and the loaded
+        one, so the editor can offer titles and mark the record that is live.
+        POST saves or deletes one record. Records are matched to checkpoints
+        only by the server (resolve_model_guide) — the agent is handed the one
+        for the loaded checkpoint and never the library.
+        """
+        if self.command == "GET":
+            self._json(self._model_guides_view())
+            return
+        body = self._body()
+        action = str(body.get("action") or "").strip()
+        name = str(body.get("name") or "").strip()[:200]
+        lib = load_model_guides()
+        if action == "delete":
+            if not name:
+                self._json({"error": "name required"}, 400)
+                return
+            lib.pop(name, None)
+        elif action == "save":
+            rec = _clean_model_guide_record(body.get("record") or {}, name)
+            key = name
+            if not key:
+                base = (rec["model"] or rec["arch"] or "guide").strip()[:180] \
+                    or "guide"
+                key = base
+                n = 2
+                while key in lib:
+                    key = f"{base} ({n})"
+                    n += 1
+            lib[key] = rec
+        else:
+            self._json({"error": "unknown action"}, 400)
+            return
+        try:
+            save_model_guides(lib)
+        except OSError as e:
+            self._json({"error": f"could not save: {e}"}, 500)
+            return
+        # The guide rides on the system message, so a saved edit has to reach
+        # the live conversation without a restart.
+        agent = self.agent
+        if agent.messages and agent.messages[0].get("role") == "system":
+            agent.messages[0] = agent._sys_msg()
+        self._json(self._model_guides_view())
+
+    def _model_guides_view(self) -> dict:
+        """The library plus the two things the editor needs to place it: the
+        installed checkpoints and the one that is loaded right now."""
+        lib = load_model_guides()
+        client = self.agent.client
+        try:
+            models = [m["title"] for m in client.list_models()]
+        except Exception:                              # noqa: BLE001
+            models = []
+        try:
+            current = client.current_model()
+            arch = client.current_arch()
+        except Exception:                              # noqa: BLE001
+            current = arch = ""
+        active = resolve_model_guide(current, arch, lib)
+        active_names = set(active.get("_names") or []) if active else set()
+        rows = []
+        for nm in sorted(lib, key=str.lower):
+            rec = _clean_model_guide_record(lib[nm], nm)
+            rows.append({"name": nm, **rec, "active": nm in active_names})
+        return {"guides": rows, "models": models,
+                "current_model": current, "current_arch": arch}
 
     def _safe_arch(self) -> str:
         try:
@@ -6385,22 +7027,41 @@ class Handler(BaseHTTPRequestHandler):
                 card["size"] = []
         else:
             card["size"] = []
-        try:
-            card["temp"] = round(float(body.get("temp")), 3) \
-                if body.get("temp") is not None else None
-        except (TypeError, ValueError):
-            card["temp"] = None
-        if isinstance(card["temp"], float) and \
-                not (0.1 <= card["temp"] <= 2.0):
-            card["temp"] = None
-        try:
-            card["max_tokens"] = int(body.get("max_tokens")) \
-                if body.get("max_tokens") is not None else None
-        except (TypeError, ValueError):
-            card["max_tokens"] = None
-        if isinstance(card["max_tokens"], int) and \
-                not (16 <= card["max_tokens"] <= 8192):
-            card["max_tokens"] = None
+        # Deterministic rewrites for the image tool call. Action + tag (+ the
+        # replacement for "replace"); unknown actions and blank tags are
+        # dropped rather than stored, so a stale form cannot wedge a card.
+        raw_rules = body.get("tag_rules")
+        rules_in: list[dict] = []
+        if isinstance(raw_rules, (list, tuple)):
+            for r in raw_rules[:TAG_RULES_PER_CARD]:
+                if not isinstance(r, dict):
+                    continue
+                action = str(r.get("action") or "").strip().lower()
+                tag = str(r.get("tag") or "").strip()[:160]
+                if action not in TAG_RULE_ACTIONS or not tag:
+                    continue
+                rules_in.append({"action": action, "tag": tag,
+                                 "with": str(r.get("with") or "")
+                                 .strip()[:160]})
+        card["tag_rules"] = rules_in
+        # How much of its own work this character may see. None follows the
+        # user's Settings; 0 means it cannot see images at all; -1 is every
+        # one of them; n is the newest n. The form's value "all" arrives as
+        # -1, because the cap's own 0 already means "all" and the two
+        # sentinels must not collide.
+        raw_vision = body.get("vision")
+        if raw_vision is None or raw_vision == "":
+            card["vision"] = None
+        else:
+            try:
+                v = int(raw_vision)
+            except (TypeError, ValueError):
+                v = None
+            card["vision"] = None if v is None or v < -1 else min(v, 20)
+        # Sampling was taken off the form; a card written while it existed
+        # must not keep a temperature nobody can see or change.
+        card.pop("temp", None)
+        card.pop("max_tokens", None)
         avatar = str(body.get("avatar", "") or "")
         m = re.match(r"data:image/(png|jpe?g|webp);base64,(.+)", avatar,
                      re.S)
@@ -6462,8 +7123,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 agent.set_character(None)
             self._json({"ok": True, "timeline": agent.timeline,
-                        "auto_images": agent.auto_images,
-                        "feedback": agent.feedback})
+                        "auto_images": agent.auto_images})
         finally:
             agent.lock.release()
 
@@ -6607,6 +7267,91 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
             return
         self._json({"ok": True, "removed": len(removed), "partial": failed})
+
+    def api_gallery_download(self):
+        """POST {names: [...]} -> the selected images as one zip attachment.
+
+        Select-mode bulk download. N anchors would mean N save dialogs on
+        desktop and none on iOS, which refuses the second programmatic
+        download; one request and one archive is the shape that works
+        everywhere. Entries keep their folder path, so unzipping restores the
+        gallery layout, and a name that no longer resolves is skipped rather
+        than failing the whole batch.
+
+        The archive is built in a temp file rather than memory: a folder of
+        PNGs is easily hundreds of megabytes, and this box may be serving a
+        phone over a tailnet. Images are already compressed, so ZIP_STORED
+        avoids spending CPU to make them no smaller.
+        """
+        body = self._body()
+        raw = body.get("names")
+        if not isinstance(raw, list):
+            raw = body.get("name")
+        if not isinstance(raw, list):
+            raw = [raw] if raw else []
+        raw = [str(v) for v in raw]
+        if len(raw) > 5000:
+            self._json({"error": "too many images — select 5000 or fewer"}, 400)
+            return
+        rels = [r for r in (_safe_rel(v) for v in raw) if r]
+        picked: list[tuple[str, Path]] = []
+        for rel in rels:
+            f = out_file(rel)
+            if f is not None:
+                picked.append((rel, f))
+        if not picked:
+            self._json({"error": "nothing to download"}, 404)
+            return
+
+        # Name the archive after the folder when the whole selection is in
+        # one; a mixed selection is just "gallery".
+        parents = {rel.rpartition("/")[0] for rel, _ in picked}
+        if len(parents) == 1:
+            base = next(iter(parents)).rpartition("/")[2] or "gallery"
+        else:
+            base = "gallery"
+        base = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._-") or "gallery"
+        filename = base + ".zip"
+
+        tmp: Path | None = None
+        try:
+            fd, tmp_name = tempfile.mkstemp(prefix="anima-gallery-",
+                                            suffix=".zip")
+            os.close(fd)
+            tmp = Path(tmp_name)
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
+                for rel, f in picked:
+                    try:
+                        z.write(f, arcname=rel)
+                    except OSError:
+                        continue          # moved or deleted mid-request
+        except OSError as e:
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            self._json({"error": f"could not build the archive: {e}"}, 500)
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(tmp.stat().st_size))
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{filename}"; '
+                f"filename*=UTF-8''{urllib.parse.quote(filename)}")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if not self._head:
+                with tmp.open("rb") as fh:
+                    shutil.copyfileobj(fh, self.wfile, 256 * 1024)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
     def api_gallery_folder(self):
         """POST {action}: create | rename | delete | move_images | move |
@@ -6949,7 +7694,6 @@ class Handler(BaseHTTPRequestHandler):
             masked = (key[:7] + "…" + key[-4:]) if len(key) > 14 \
                 else ("set" if key else "")
             override = cfg.get("system_prompt") or ""
-            guide = cfg.get("model_guide") or ""
             # from the snapshot, not from a live probe: this is the request the
             # Settings page waits on before it will paint anything at all
             sd = self.sd_state.snapshot()
@@ -6957,8 +7701,6 @@ class Handler(BaseHTTPRequestHandler):
                         "key_masked": masked, "has_key": bool(key),
                         "system_prompt": override or DEFAULT_BASE_PROMPT,
                         "system_prompt_custom": bool(override),
-                        "model_guide": guide or default_guide_text(),
-                        "model_guide_custom": bool(guide),
                         "username": cfg.get("username", ""),
                         "inject_char_tags": cfg.get("inject_char_tags", True),
                         "inject_persona_tags":
@@ -6977,7 +7719,6 @@ class Handler(BaseHTTPRequestHandler):
         body = self._body()
         cfg = dict(agent.cfg)
         sys_touched = False
-        guide_touched = False
         switched = None
         shared_note = ""
         if "sd_url" in body:
@@ -7048,18 +7789,6 @@ class Handler(BaseHTTPRequestHandler):
                   f"{len(text)} chars")
             cfg["system_prompt"] = text        # empty = default
             sys_touched = True
-        if body.get("model_guide_reset"):
-            cfg["model_guide"] = ""            # back to model_guide.txt
-            guide_touched = True
-        elif "model_guide" in body:
-            text = str(body["model_guide"]).strip()
-            # twice the system message's cap: the stock guide is already 19k
-            if len(text) > 64000:
-                self._json({"error": "model guide too long "
-                                     "(64000 characters max)"}, 400)
-                return
-            cfg["model_guide"] = text          # empty = model_guide.txt
-            guide_touched = True
         if "username" in body:
             cfg["username"] = str(body["username"]).strip()[:60]
         for key in ("inject_char_tags", "inject_persona_tags",
@@ -7129,10 +7858,6 @@ class Handler(BaseHTTPRequestHandler):
             out.update({"system_prompt": cfg["system_prompt"]
                         or DEFAULT_BASE_PROMPT,
                         "system_prompt_custom": bool(cfg["system_prompt"])})
-        if guide_touched:
-            out.update({"model_guide": cfg["model_guide"]
-                        or default_guide_text(),
-                        "model_guide_custom": bool(cfg["model_guide"])})
         self._json(out)
 
     def api_personas_list(self):
@@ -7460,9 +8185,11 @@ class Handler(BaseHTTPRequestHandler):
             cp = (card or {}).get("checkpoint", "")
             cp = str(cp).strip() if cp else ""
             if cp:
-                args["model"] = cp
+                args["_model"] = cp
                 arch = agent.client.arch_for(cp)
-                args.update(agent.saved_components(arch))
+                comps = agent.saved_components(arch)
+                if comps:
+                    args["_components"] = comps
             else:
                 arch = agent.client.current_arch()
             try:
@@ -7534,6 +8261,10 @@ class Handler(BaseHTTPRequestHandler):
                 info = agent.client.set_model(
                     title, arch=arch,
                     **{k: v for k, v in components.items() if v})
+            # the loaded checkpoint decides the model guide, so the system
+            # message is rebuilt now rather than at the next turn
+            if agent.messages and agent.messages[0].get("role") == "system":
+                agent.messages[0] = agent._sys_msg()
             self._json({"ok": True,
                         "current_model": info.get("model") or title,
                         "arch": info.get("arch", arch),
@@ -7670,8 +8401,9 @@ class App:
     # ------------------------------------------------------- per-user agents
     #
     # An Agent is a conversation: messages, active character, active chat,
-    # timeline, feedback, and a lock so one user cannot double-submit. All of
-    # that is per-user state, which is why there used to be exactly one.
+    # timeline, the newest request body, and a lock so one user cannot
+    # double-submit. All of that is per-user state, which is why there used to
+    # be exactly one.
     #
     # Each Agent also holds its whole conversation in RAM and nothing trims it
     # (see MULTIUSER.md Phase 3), so agents are evicted when idle rather than
@@ -7892,9 +8624,12 @@ def main():
     print(f"  Key     : {'configured' if agent.has_key() else 'NOT set — add in Settings'}")
     print(f"  LLM     : {', '.join(cfg['llm_models'])}")
     print(f"  SysMsg  : {'custom' if cfg.get('system_prompt') else 'default'}")
-    guide = cfg.get("model_guide") or ""
-    print(f"  Guide   : {'custom' if guide else 'model_guide.txt'}"
-          f"  [{len(guide or default_guide_text())} chars]")
+    try:
+        n_guides = len(load_model_guides())
+    except Exception:                                  # noqa: BLE001
+        n_guides = 0
+    print(f"  Guides  : {n_guides} per-model "
+          f"{'record' if n_guides == 1 else 'records'}")
     print(f"  SD      : {cfg['sd_url']}  [{model}]")
     print(f"  Output  : {OUT_DIR}")
     for u in advertise_urls(args.port):

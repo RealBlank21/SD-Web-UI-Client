@@ -474,6 +474,16 @@ button.tagchip.on {
   border: 1px solid color-mix(in srgb, var(--err) 35%, var(--line));
   color: #ffc9cf; font-size: 13.5px;
 }
+/* A slash command's answer: local, monospace, deliberately not an AI bubble —
+   the model never wrote it and never saw the command. */
+.msg.notice {
+  align-self: flex-start; max-width: 100%;
+  background: color-mix(in srgb, var(--accent) 8%, var(--panel));
+  border: 1px dashed color-mix(in srgb, var(--accent) 42%, var(--line));
+  color: var(--text); font-size: 13px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  white-space: pre-wrap;
+}
 
 /* markdown-rendered AI bubbles, and the model's reasoning block — the same
    renderer, smaller */
@@ -704,8 +714,12 @@ button.tagchip.on {
   background: var(--accent); border-color: var(--accent); color: #14101f;
 }
 #page-gallery.selecting .gcell img { opacity: .82; }
-#pg-move.armed, #pg-del.armed { color: var(--accent); }
+/* Include the bulk-download icon in the select-mode "armed" accent state. */
+#pg-move.armed, #pg-download.armed, #pg-del.armed { color: var(--accent); }
 #pg-del.armed { color: var(--err); }
+/* Five icon buttons fit beside the title only if the title can give way. */
+#pg-title { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; }
 
 @media (min-width: 640px) {
   .grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
@@ -984,11 +998,13 @@ button.tagchip.on {
 .sc-row:active { background: var(--panel2); }
 .sc-row b { font-size: 13.5px; }
 .sc-row .dim { font-size: 12px; }
-#sc-add, #ps-add {
+#sc-add, #ps-add, #ch-rule-add {
   margin-top: 4px; padding: 9px 14px; border-radius: 10px;
   background: var(--panel2); border: 1px solid var(--line);
   font-size: 13px; align-self: flex-start;
 }
+#ch-rule-add { margin-top: 8px; color: var(--text); }
+#ch-rule-add:hover { border-color: var(--accent); }
 
 /* LLM chain editor (Settings → LLM) */
 .llm-chain { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
@@ -1446,6 +1462,7 @@ button.tagchip.on {
   background: var(--panel2); overflow: hidden;
 }
 .lora-row.bad { border-color: var(--err); }
+.lora-row.on { border-color: var(--accent); }
 
 .lora-head {
   display: flex; align-items: flex-start; gap: 8px; padding: 10px;
@@ -1480,10 +1497,18 @@ button.tagchip.on {
   width: 100%;
 }
 .sh-body .lora-body textarea { font-size: 13px; resize: vertical; }
+/* The guide's numeric settings sit two to a line, the way the regeneration
+   sheet lays out the same fields, rather than seven full-width rows. */
+.guide-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+}
 .lora-statusrow {
   display: flex; align-items: center; gap: 10px; margin-top: 2px;
 }
-.lora-status { flex: 1; font-size: 11px; }
+/* The Enabled switch belongs in the save row, not as a flex child of the
+   column body: there the shared .tgl basis stretched it into a tall block. */
+.sh-body .lora-statusrow .tgl { flex: 0 0 auto; }
+.lora-status { flex: 1; font-size: 11px; min-width: 0; }
 
 /* the card's picker
    `.page-body input { width: 100% }` and `.page-body label { text-transform:
@@ -1512,6 +1537,50 @@ button.tagchip.on {
 }
 .ch-lora-txt .dim, .ch-lora-txt .warn { font-size: 11px; }
 .warn { color: var(--err); }
+
+/* The card's two optional blocks fold away: a card with fifty LoRAs or a
+   dozen tag rules was pushing Visibility and Scenarios below the fold on a
+   phone, and neither is something you touch on every edit. */
+#ch-lora-box, #ch-rules-box {
+  margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px;
+}
+#ch-lora-box summary, #ch-rules-box summary {
+  cursor: pointer; list-style: none; font-size: 11px;
+  text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+}
+#ch-lora-box summary::-webkit-details-marker,
+#ch-rules-box summary::-webkit-details-marker { display: none; }
+#ch-lora-box summary::before, #ch-rules-box summary::before {
+  content: "▸ "; color: var(--dim);
+}
+#ch-lora-box[open] summary::before,
+#ch-rules-box[open] summary::before { content: "▾ "; }
+#ch-lora-box[open] summary, #ch-rules-box[open] summary { margin-bottom: 8px; }
+#ch-lora-box summary .dim, #ch-rules-box summary .dim {
+  text-transform: none; letter-spacing: 0;
+}
+
+/* one row per rule: action, tag, replacement, delete */
+.ch-rule-list { display: flex; flex-direction: column; gap: 6px; }
+.ch-rule {
+  display: flex; gap: 6px; align-items: center;
+  padding: 7px 8px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel2);
+}
+.ch-rule select {
+  flex: 0 0 38%; min-width: 0; font-size: 12.5px; padding: 7px 8px;
+}
+.ch-rule input {
+  flex: 1 1 0; min-width: 0; font-size: 12.5px; padding: 7px 8px;
+  margin: 0; width: auto;
+}
+.ch-rule input:disabled { opacity: .45; }
+.ch-rule-del {
+  flex: none; width: 30px; height: 30px; border-radius: 9px;
+  background: var(--panel); border: 1px solid var(--line);
+  color: var(--dim); font-size: 14px; line-height: 1;
+}
+.ch-rule-del:hover { color: var(--err); border-color: var(--err); }
 
 /* ---------------------------------------------------- CivitAI browse panel
    Separate from the installed list on purpose: those are on disk, these are

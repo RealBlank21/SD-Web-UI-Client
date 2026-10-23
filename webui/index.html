@@ -11,7 +11,7 @@
 <link rel="apple-touch-icon" href="/static/icon-192.png">
 <title>Anima</title>
 <link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
-<link rel="stylesheet" href="/static/style.css?v=118">
+<link rel="stylesheet" href="/static/style.css?v=126">
 </head>
 <body>
 
@@ -107,6 +107,9 @@
       <button id="pg-move" class="iconbtn" title="Move selected" aria-label="Move selected" hidden>
         <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9.5 14.5h5m-2-2 2 2-2 2"/></svg>
       </button>
+      <button id="pg-download" class="iconbtn" title="Download selected" aria-label="Download selected" hidden>
+        <svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+      </button>
       <button id="pg-del" class="iconbtn" title="Delete selected" aria-label="Delete selected" hidden>
         <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg>
       </button>
@@ -132,13 +135,13 @@
       <div class="empty-spark">✦</div>
       <span id="gempty-text">No images here yet.</span>
     </div>
-    <div class="hint">Long-press an image to move, download or delete it. Long-press a folder to rename, nest or remove it. Use the tag button to file images by prompt keyword.</div>
+    <div class="hint">Long-press an image to move, download or delete it. Long-press a folder to rename, nest or remove it. Use the tag button to file images by prompt keyword, or the select button to move, download or delete several at once.</div>
   </div>
 </div>
 
 <div id="composer" hidden>
   <div id="attach" hidden></div>
-  <textarea id="input" rows="1" placeholder="Describe an image… or just chat" enterkeyhint="send"></textarea>
+  <textarea id="input" rows="1" placeholder="Describe an image… /help for commands" enterkeyhint="send"></textarea>
   <button id="btn-send" aria-label="Send">
     <svg class="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
     <svg class="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
@@ -231,16 +234,29 @@
       <option value="768x1344">768×1344 — tall</option>
       <option value="1344x768">1344×768 — wide</option>
     </select>
-    <label>LoRAs <span class="dim" id="ch-loracount">— loaded on every image of this character</span></label>
-    <div id="ch-lora-list" class="ch-lora-list"></div>
-    <div class="hint">Ticked here means worn by this character, always. Describe a LoRA once in Settings &rarr; LoRAs and every card that uses it picks up the same notes. Order matters — the first ticked is applied first.</div>
-    <label>Sampling <span class="dim">— optional, per character</span></label>
-    <div class="row">
-      <input id="ch-temp" class="mono" type="number" step="0.05" min="0.1" max="2"
-             placeholder="temp 0.7" inputmode="decimal">
-      <input id="ch-maxtok" class="mono" type="number" step="1" min="16" max="8192"
-             placeholder="max tokens" inputmode="numeric">
-    </div>
+    <details id="ch-lora-box">
+      <summary>LoRAs <span class="dim" id="ch-loracount">— loaded on every image of this character</span></summary>
+      <div id="ch-lora-list" class="ch-lora-list"></div>
+      <div class="hint">Ticked here means worn by this character, always. Describe a LoRA once in Settings &rarr; LoRAs and every card that uses it picks up the same notes. Order matters — the first ticked is applied first.</div>
+    </details>
+    <details id="ch-rules-box">
+      <summary>Tag rules <span class="dim" id="ch-rulecount">— rewrite image prompts</span></summary>
+      <div id="ch-rule-list" class="ch-rule-list"></div>
+      <button id="ch-rule-add">+ Add rule</button>
+      <div class="hint">Applied to every <span class="mono">generate_image</span> call for this character, after its look tags are injected. <span class="mono">Add to prompt</span> puts the tag at the <b>start</b> of the prompt — where the sampler weighs it most — and takes it out of the negative; <span class="mono">Add to negative</span> does the reverse, so a rule cannot contradict itself. <span class="mono">Replace</span> rewrites the tag in the prompt (blank replacement removes it); <span class="mono">Remove</span> drops it from both prompts. Whole comma-separated tags only, matched without case or escapes.</div>
+    </details>
+    <label>Sees its own images</label>
+    <select id="ch-vision">
+      <option value="">Default — from Settings</option>
+      <option value="0">Off — it cannot see images at all</option>
+      <option value="1">Newest 1</option>
+      <option value="2">Newest 2</option>
+      <option value="3">Newest 3</option>
+      <option value="5">Newest 5</option>
+      <option value="8">Newest 8</option>
+      <option value="all">All of them</option>
+    </select>
+    <div class="hint">Overrides Settings → Generation → Text for this character. Off means no picture is ever attached, so it can neither describe nor correct one; the other options are how many of its own images a turn sends.</div>
     <label>Visibility</label>
     <label class="check" for="ch-shared">
       <input type="checkbox" id="ch-shared" checked>
@@ -335,6 +351,7 @@
       <button class="on" data-gtab="text">Text</button>
       <button data-gtab="image">Image</button>
       <button data-gtab="lora">LoRA</button>
+      <button data-gtab="guides">Guides</button>
     </nav>
     <div class="gen-pane" data-gpane="text" hidden>
       <label>OpenRouter API key <span class="dim" id="sh-keymask"></span></label>
@@ -373,18 +390,7 @@
         <button id="sh-save-sys">Save message</button>
         <button id="sh-reset-sys">Reset to default</button>
       </div>
-      <div class="hint">Core instructions for the AI model. The model guide is appended after this automatically. Applies from the next message on.</div>
-
-      <details id="sh-guide-box">
-        <summary>Model guide <span class="dim" id="sh-guidestate"></span></summary>
-        <textarea id="sh-guide" class="mono" rows="8" spellcheck="false"
-                  autocapitalize="off" autocomplete="off"></textarea>
-        <div class="row">
-          <button id="sh-save-guide">Save guide</button>
-          <button id="sh-reset-guide">Reset to model_guide.txt</button>
-        </div>
-        <div class="hint">One <span class="mono">### checkpoint.safetensors</span> block per model: prompt, then <span class="mono">Negative prompt:</span>, then <span class="mono">Steps:</span> / <span class="mono">CFG scale:</span> / <span class="mono">Sampler:</span>. Saving stores an override in the config — model_guide.txt itself is left untouched, so reset always brings the file back. Applies from the next message on.</div>
-      </details>
+      <div class="hint">Core instructions for the AI model. The settings guide for whichever checkpoint is loaded is appended after this automatically — write those per model in Generation → Guides. Applies from the next message on.</div>
 
       <label>Auto-injected tags</label>
       <div class="row">
@@ -478,6 +484,16 @@
         <button id="sh-dl-more" hidden>Load more</button>
         <div class="hint">Tag is CivitAI's own tagging — an unknown tag is ignored and you get everything back, so check the results actually changed. Downloads land in the app's own <span class="mono">data/loras</span> folder, which the SD server also scans. Every file is checksummed before being kept, and the list above refreshes the moment one lands.</div>
       </details>
+    </div>
+    <div class="gen-pane" data-gpane="guides" hidden>
+      <label>Model guides <span class="dim" id="sh-guidecount"></span></label>
+      <div class="lora-tools">
+        <input id="sh-guide-q" class="mono wide" spellcheck="false" autocomplete="off"
+               autocapitalize="off" placeholder="Search model, notes…">
+        <button id="sh-guide-add" class="grow">+ New guide</button>
+      </div>
+      <div id="sh-guide-list" class="lora-list"></div>
+      <div class="hint">Notes written for <em>one</em> checkpoint: how it likes its prompts, an example, and the settings that suit it. The server hands the AI only the entry for whichever checkpoint is loaded right now — the AI is never told that other models exist or which one it is running on, and it cannot change the model. Pick the checkpoint from <span class="mono">Model</span>; leave it blank and set <span class="mono">Arch</span> to cover a whole family. You switch checkpoints yourself in <span class="mono">Image</span> or with the chat command <span class="mono">/model</span>.</div>
     </div>
     </section>
 
@@ -778,6 +794,6 @@
 
 </div><!-- /app -->
 
-<script src="/static/app.js?v=118"></script>
+<script src="/static/app.js?v=126"></script>
 </body>
 </html>

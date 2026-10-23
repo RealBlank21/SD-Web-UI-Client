@@ -132,7 +132,7 @@ const els = {
   gemptyText: $("gempty-text"),
   pgTitle: $("pg-title"), pgNewFolder: $("pg-newfolder"),
   pgSelect: $("pg-select"), pgAll: $("pg-all"), pgMove: $("pg-move"),
-  pgDel: $("pg-del"), pgTag: $("pg-tag"),
+  pgDownload: $("pg-download"), pgDel: $("pg-del"), pgTag: $("pg-tag"),
   gSearch: $("g-search"),
   foldSheet: $("foldsheet"), foldTitle: $("fold-title"), foldSub: $("fold-sub"),
   foldName: $("fold-name"), foldOk: $("fold-ok"), foldCancel: $("fold-cancel"),
@@ -166,7 +166,8 @@ const els = {
   shCompActions: $("sh-comp-actions"),
   shUsername: $("sh-username"),
   shSys: $("sh-sysprompt"), shSysState: $("sh-sysstate"),
-  shGuide: $("sh-guide"), shGuideState: $("sh-guidestate"),
+  shGuideList: $("sh-guide-list"), shGuideQ: $("sh-guide-q"),
+  shGuideAdd: $("sh-guide-add"), shGuideCount: $("sh-guidecount"),
   chName: $("ch-name"),
   chAvatarImg: $("ch-avatar-img"), chAvatarBtn: $("ch-avatar-btn"),
   chAvatarFile: $("ch-avatar-file"),
@@ -188,6 +189,8 @@ const els = {
   chGreeting: $("ch-greeting"), chModel: $("ch-model"), chSize: $("ch-size"),
   chTags: $("ch-tags"),
   chLoraList: $("ch-lora-list"), chLoraCount: $("ch-loracount"),
+  chRuleList: $("ch-rule-list"), chRuleCount: $("ch-rulecount"),
+  chRuleAdd: $("ch-rule-add"), chVision: $("ch-vision"),
   shLoraList: $("sh-lora-list"), shLoraQ: $("sh-lora-q"),
   shLoraArch: $("sh-lora-arch"), shLoraRefresh: $("sh-lora-refresh"),
   shLoraNote: $("sh-lora-note"), shLoraUse: $("sh-lora-use"),
@@ -197,7 +200,6 @@ const els = {
   shDlState: $("sh-dl-state"), shDlPeriod: $("sh-dl-period"),
   shDlTag: $("sh-dl-tag"), shDlArch: $("sh-dl-arch"), shDlSfw: $("sh-dl-sfw"),
   loraModal: $("lora-modal"), loraModalCard: $("lora-modal-card"),
-  chTemp: $("ch-temp"), chMaxtok: $("ch-maxtok"),
   chShared: $("ch-shared"),
   chDelete: $("ch-delete"),
   shInjChar: $("sh-inj-char"), shInjPersona: $("sh-inj-persona"),
@@ -415,6 +417,7 @@ function forgetUser() {
   activePersonaId = "";
   chLoraSel = [];
   chLoraDirty = false;
+  chTagRules = [];
   galFolder = "";
   galFolders = [];
   galTree = [];
@@ -729,6 +732,7 @@ function renderHistory(timeline) {
     else if (evt.type === "reply") { const m = addBubble("ai", evt.text); m.dataset.idx = i; }
     else if (evt.type === "think") { addThink(evt.text); }
     else if (evt.type === "error") { const m = addBubble("error", evt.text); m.dataset.idx = i; }
+    else if (evt.type === "notice") { const m = addBubble("notice", evt.text); m.dataset.idx = i; }
     else if (evt.type === "tool_error") { const m = addBubble("error", `✗ ${evt.name} — ${evt.error}`); m.dataset.idx = i; }
     else if (evt.type === "generation") { addGeneration(evt, i); markToolDone(lastTool()); }
     else if (evt.type === "cover") { addCoverCard(evt); }
@@ -1138,6 +1142,14 @@ function handleEvent(evt) {
       tagIdx(m, evt.idx);
       break;
     }
+    case "notice":
+      // a slash command's answer — local, never the LLM's words. The command
+      // itself already showed as the user's own bubble on send.
+      stopProgressPolling();
+      dropStream();
+      markToolDone(lastTool());
+      tagIdx(addBubble("notice", evt.text), evt.idx);
+      break;
     case "error":
       stopProgressPolling();
       dropStream();
@@ -1156,9 +1168,6 @@ function handleEvent(evt) {
       // a turn that ended without its reply landing leaves nothing half-written
       dropStream();
       pillHide();
-      // the server retires the rating once the reply lands — the chat it was
-      // given for is gone
-      chatRating = "";
       break;
   }
   if (evt.type !== "progress" && evt.type !== "delta"
@@ -1388,6 +1397,7 @@ function galTitleSync() {
     : (galSearchQuery ? "Search"
                      : (galFolder ? baseName(galFolder) : "Gallery"));
   els.pgMove.classList.toggle("armed", n > 0);
+  if (els.pgDownload) els.pgDownload.classList.toggle("armed", n > 0);
   els.pgDel.classList.toggle("armed", n > 0);
 }
 
@@ -1411,6 +1421,7 @@ function setGalSelect(on) {
   els.pgTag.hidden = on;
   els.pgAll.hidden = !on;
   els.pgMove.hidden = !on;
+  if (els.pgDownload) els.pgDownload.hidden = !on;
   els.pgDel.hidden = !on;
   for (const c of els.grid.querySelectorAll(".gcell.sel")) {
     c.classList.remove("sel");
@@ -1555,6 +1566,34 @@ function downloadImage(rel) {
   a.href = "/outputs/" + rel;
   a.download = baseName(rel);
   a.click();
+}
+
+/* Select-mode bulk download: one request, one .zip. N separate anchors would
+   pop N save dialogs on desktop and none at all on iOS, which refuses a
+   second programmatic download. A plain form submit (rather than fetch and a
+   blob URL) keeps the download inside the click's user gesture, so the
+   browser's own download manager handles a large archive without holding it
+   in page memory. The response is an attachment, so the page does not
+   navigate. */
+function downloadImages(rels) {
+  const names = [...rels];
+  const n = names.length;
+  if (!n) { toast("Nothing selected", true); return; }
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = "/api/gallery/download";
+  form.hidden = true;
+  for (const rel of names) {
+    const inp = document.createElement("input");
+    inp.type = "hidden";
+    inp.name = "name";
+    inp.value = rel;
+    form.appendChild(inp);
+  }
+  document.body.appendChild(form);
+  form.submit();
+  setTimeout(() => form.remove(), 1000);
+  toast(`Downloading ${n} image${n === 1 ? "" : "s"}…`);
 }
 
 async function deleteImages(rels) {
@@ -2072,10 +2111,11 @@ function setGenTab(name) {
     s.hidden = s.dataset.gpane !== name;
   }
   // Each pane fetches its own content on first open: the model picker needs
-  // its catalogue and the LoRA list is the pane. The image pane needs
-  // nothing — paintImageTab is repainted by the status poll.
+  // its catalogue, and the LoRA and guide lists are the pane. The image pane
+  // needs nothing — paintImageTab is repainted by the status poll.
   if (name === "text") loadLlmModels(false);
   if (name === "lora") loadLoras();
+  if (name === "guides") loadGuides();
 }
 
 function setPsTab(name) {
@@ -2511,8 +2551,6 @@ async function openSettings() {
       }
       els.shSys.value = cfg.system_prompt || "";
       els.shSysState.textContent = cfg.system_prompt_custom ? "· custom" : "· default";
-      els.shGuide.value = cfg.model_guide || "";
-      els.shGuideState.textContent = cfg.model_guide_custom ? "· custom" : "· model_guide.txt";
       els.shUsername.value = cfg.username || "";
       // injection switches: absent in an older config means on
       for (const [el, key] of INJ_TOGGLES) {
@@ -2672,6 +2710,9 @@ let loraRows = [];
 let loraArchNow = "";
 let chLoraSel = [];      // names ticked on the card being edited, in order
 let chLoraDirty = false;
+/* Tag rules on the card being edited: {action, tag, with}. Order is the
+   order they are applied server-side, so the list is not sorted. */
+let chTagRules = [];
 
 const ARCH_LABEL = {
   xl: "SDXL", sd: "SD 1.5", sd3: "SD3", flux: "Flux", qwen: "Qwen",
@@ -2900,6 +2941,234 @@ function renderLoras() {
     return;
   }
   for (const r of rows) box.appendChild(loraRow(r));
+}
+
+// --------------------------------------------------------- model guides
+
+// One record per checkpoint (or per architecture, when that is all the user
+// wants to say). Each holds notes for the AI plus an optional reference prompt
+// and settings. The server resolves the record for the checkpoint it has
+// loaded and appends only that one to the AI's instructions — the AI is never
+// handed the library, never told which checkpoints exist, and cannot switch
+// models at all. That resolution is why this lives in Settings rather than in
+// the prompt: the model has to be chosen by the server, which knows what is
+// loaded.
+let guideRows = [];
+let guideModels = [];     // installed checkpoint titles, for the Model picker
+let guideCurrent = "";    // the loaded checkpoint, marked in the list
+
+function guideArchLabel(a) { return ARCH_LABEL[a] || a || ""; }
+
+async function loadGuides() {
+  try {
+    const d = await api("/api/model_guides");
+    guideRows = d.guides || [];
+    guideModels = d.models || [];
+    guideCurrent = d.current_model || "";
+    renderGuides();
+  } catch (e) {
+    if (els.shGuideList) {
+      els.shGuideList.textContent = "";
+      els.shGuideList.appendChild(el("div", "hint",
+        "Could not load model guides: " + e));
+    }
+  }
+}
+
+function guideFiltered() {
+  const q = (els.shGuideQ ? els.shGuideQ.value : "").trim().toLowerCase();
+  if (!q) return guideRows;
+  return guideRows.filter((r) =>
+    [r.name, r.model, r.arch, r.notes, r.prompt, r.negative]
+      .some((v) => String(v || "").toLowerCase().includes(q)));
+}
+
+function renderGuides() {
+  const box = els.shGuideList;
+  if (!box) return;
+  box.textContent = "";
+  if (els.shGuideCount) {
+    els.shGuideCount.textContent = guideRows.length
+      ? "— " + guideRows.length + " record"
+        + (guideRows.length === 1 ? "" : "s")
+      : "";
+  }
+  if (!guideRows.length) {
+    box.appendChild(el("div", "hint",
+      "No guides yet — the AI gets a stock example until you write one for "
+      + "the model you use most. Press “+ New guide”."));
+    return;
+  }
+  const rows = guideFiltered();
+  if (!rows.length) {
+    box.appendChild(el("div", "hint", "Nothing matches that search."));
+    return;
+  }
+  for (const r of rows) box.appendChild(guideRow(r));
+}
+
+function guideRow(r) {
+  const row = el("div", "lora-row" + (r.active ? " on" : ""));
+  const head = el("div", "lora-head");
+
+  const caret = el("button", "lora-caret", "▸");
+  caret.setAttribute("aria-label", "Expand");
+  head.appendChild(caret);
+
+  const names = el("div", "lora-names");
+  names.appendChild(el("span", "lora-name",
+    r.model || guideArchLabel(r.arch) || "untitled guide"));
+  const bits = [];
+  if (r.active) bits.push("used right now");
+  else if (!r.enabled) bits.push("off");
+  else if (!r.model && r.arch) bits.push("any " + guideArchLabel(r.arch));
+  if (bits.length) names.appendChild(el("span", "dim", bits.join(" · ")));
+  head.appendChild(names);
+
+  const del = el("button", "lora-del", "✕");
+  del.setAttribute("aria-label", "Delete this guide");
+  del.title = "Delete this guide record";
+  head.appendChild(del);
+
+  const body = el("div", "lora-body");
+  body.hidden = !r._open;
+  caret.textContent = body.hidden ? "▸" : "▾";
+
+  const f = (labelText, key, ph, area) => {
+    const wrap = el("label", null, labelText);
+    const inp = area ? el("textarea", "mono") : el("input", "mono");
+    if (!area) inp.type = "text";
+    inp.value = r[key] || "";
+    inp.placeholder = ph || "";
+    inp.spellcheck = false;
+    wrap.appendChild(inp);
+    body.appendChild(wrap);
+    return inp;
+  };
+  const model = f("Model", "model",
+    "Any checkpoint — match by Architecture");
+  ddWrapInput(model, () => guideModels.map((t) => ({ value: t, label: t })));
+  const arch = f("Architecture (fallback)", "arch",
+    "xl, anima, qwen… — used only when no Model matches");
+  const notes = f("Notes for the AI", "notes",
+    "how this model likes its prompts…", true);
+  const prompt = f("Example prompt", "prompt",
+    "a reference prompt that works well on this checkpoint", true);
+  const negative = f("Example negative prompt", "negative",
+    "the negative prompt that goes with it", true);
+
+  const st = r.settings || {};
+  const grid = el("div", "guide-grid");
+  body.appendChild(grid);
+  const g = (labelText, key, ph, mode) => {
+    const wrap = el("label", null, labelText);
+    const inp = el("input", "mono");
+    inp.type = "text";
+    inp.inputMode = mode || "decimal";
+    inp.value = st[key] != null ? st[key] : "";
+    inp.placeholder = ph || "";
+    inp.spellcheck = false;
+    wrap.appendChild(inp);
+    grid.appendChild(wrap);
+    return inp;
+  };
+  const w = g("Width", "width", "832", "numeric");
+  const h = g("Height", "height", "1216", "numeric");
+  const cfgS = g("CFG scale", "cfg_scale", "5");
+  const steps = g("Steps", "steps", "leave blank for the server's default",
+    "numeric");
+  const sampler = g("Sampler", "sampler_name", "Euler a");
+  const sched = g("Schedule type", "scheduler", "Karras");
+  const clip = g("Clip skip", "clip_skip", "", "numeric");
+
+  const enab = el("label", "tgl");
+  const enabCb = el("input");
+  enabCb.type = "checkbox";
+  enabCb.checked = r.enabled !== false;
+  enab.classList.toggle("on", enabCb.checked);
+  enabCb.addEventListener("change", () =>
+    enab.classList.toggle("on", enabCb.checked));
+  enab.appendChild(enabCb);
+  enab.appendChild(document.createTextNode(" Enabled"));
+
+  const num = (v) => {
+    const s = String(v).trim();
+    if (!s) return undefined;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const str = (v) => String(v).trim() || undefined;
+  const gather = () => ({
+    model: model.value.trim(),
+    arch: arch.value.trim().toLowerCase(),
+    notes: notes.value.trim(),
+    prompt: prompt.value.trim(),
+    negative: negative.value.trim(),
+    enabled: enabCb.checked,
+    settings: {
+      width: num(w.value), height: num(h.value),
+      cfg_scale: num(cfgS.value), steps: num(steps.value),
+      sampler_name: str(sampler.value), scheduler: str(sched.value),
+      clip_skip: num(clip.value),
+    },
+  });
+
+  const statusRow = el("div", "lora-statusrow");
+  statusRow.appendChild(el("span", "dim lora-status",
+    r.active ? "used for the checkpoint loaded right now"
+             : (!r.enabled ? "off — kept, but not sent to the AI"
+                           : (r.model
+                              ? "applies when a loaded checkpoint matches this text"
+                              : (r.arch
+                                 ? "applies to any " + guideArchLabel(r.arch)
+                                 : "applies to every checkpoint")))));
+  statusRow.appendChild(enab);
+  const save = el("button", "primary", "Save");
+  statusRow.appendChild(save);
+  body.appendChild(statusRow);
+
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    try {
+      const d = await api("/api/model_guides", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "save", name: r.name || "",
+                               record: gather() }),
+      });
+      guideRows = d.guides || guideRows;
+      guideModels = d.models || guideModels;
+      guideCurrent = d.current_model || guideCurrent;
+      renderGuides();
+      toast("Saved");
+    } catch (e) { toast(String(e), true); }
+    save.disabled = false;
+  });
+
+  del.addEventListener("click", async () => {
+    if (r._new) { guideRows = guideRows.filter((x) => x !== r); renderGuides(); return; }
+    if (!confirm("Delete the guide “"
+      + (r.model || guideArchLabel(r.arch) || r.name) + "”?")) return;
+    try {
+      const d = await api("/api/model_guides", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete", name: r.name }),
+      });
+      guideRows = d.guides || [];
+      renderGuides();
+      toast("Deleted");
+    } catch (e) { toast(String(e), true); }
+  });
+
+  caret.addEventListener("click", () => {
+    body.hidden = !body.hidden;
+    caret.textContent = body.hidden ? "▸" : "▾";
+  });
+
+  row.appendChild(head);
+  row.appendChild(body);
+  return row;
 }
 
 // -------------------------------------------------------- CivitAI browsing
@@ -3221,6 +3490,75 @@ function renderChLoras() {
     els.chLoraCount.textContent = chLoraSel.length
       ? "— " + chLoraSel.length + " of 3 selected"
       : "— loaded on every image of this character";
+  }
+}
+
+/* The card's tag rules: one row per rewrite, in application order.
+
+   The value is written straight back into `chTagRules` on every change, so
+   Save reads state rather than scraping the DOM — the rows are rebuilt on
+   every render, which would otherwise throw away a half-typed rule. */
+const TAG_RULE_LABELS = [
+  ["add_pos", "Add to prompt"],
+  ["add_neg", "Add to negative"],
+  ["replace", "Replace"],
+  ["remove", "Remove"],
+];
+
+function renderChTagRules() {
+  const box = els.chRuleList;
+  if (!box) return;
+  box.textContent = "";
+  chTagRules.forEach((rule, i) => {
+    const row = el("div", "ch-rule");
+
+    const sel = el("select");
+    sel.setAttribute("aria-label", "Action");
+    for (const [value, label] of TAG_RULE_LABELS) {
+      const o = el("option", null, label);
+      o.value = value;
+      sel.appendChild(o);
+    }
+    sel.value = rule.action || "add_pos";
+    rule.action = sel.value;
+    sel.addEventListener("change", () => {
+      rule.action = sel.value;
+      renderChTagRules();            // the replacement field enables/disables
+    });
+
+    const tag = el("input", "mono");
+    tag.value = rule.tag || "";
+    tag.placeholder = "tag";
+    tag.spellcheck = false;
+    tag.autocapitalize = "off";
+    tag.addEventListener("input", () => { rule.tag = tag.value; });
+
+    const rep = el("input", "mono");
+    rep.value = rule.with || "";
+    rep.placeholder = "→ replacement";
+    rep.spellcheck = false;
+    rep.autocapitalize = "off";
+    rep.disabled = rule.action !== "replace";
+    rep.addEventListener("input", () => { rule.with = rep.value; });
+
+    const del = el("button", "ch-rule-del", "✕");
+    del.type = "button";
+    del.setAttribute("aria-label", "Remove rule");
+    del.addEventListener("click", () => {
+      chTagRules.splice(i, 1);
+      renderChTagRules();
+    });
+
+    row.appendChild(sel);
+    row.appendChild(tag);
+    row.appendChild(rep);
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+  if (els.chRuleCount) {
+    els.chRuleCount.textContent = chTagRules.length
+      ? "— " + chTagRules.length + " rule" + (chTagRules.length === 1 ? "" : "s")
+      : "— rewrite image prompts";
   }
 }
 
@@ -3643,6 +3981,9 @@ function openCharForm(card) {
   editCharId = card ? card.id : null;
   chLoraSel = card && Array.isArray(card.loras) ? card.loras.slice() : [];
   chLoraDirty = false;
+  chTagRules = card && Array.isArray(card.tag_rules)
+    ? card.tag_rules.map((r) => ({ ...r })) : [];
+  renderChTagRules();
   if (!loraRows.length) loadLoras();   // first open on a fresh session
   else renderChLoras();
   aiReset();               // a different card is a different conversation
@@ -3658,8 +3999,9 @@ function openCharForm(card) {
   els.chGreeting.value = card ? (card.greeting || "") : "";
   els.chSize.value = card && card.size && card.size.length === 2
     ? card.size[0] + "x" + card.size[1] : "";
-  els.chTemp.value = card && card.temp != null ? card.temp : "";
-  els.chMaxtok.value = card && card.max_tokens != null ? card.max_tokens : "";
+  // null / absent follows Settings; -1 is "all of them"
+  els.chVision.value = card && card.vision != null
+    ? (card.vision === -1 ? "all" : String(card.vision)) : "";
   // A card written before sharing existed has no flag and was never private,
   // so default the box to ticked — same rule the server reads.
   els.chShared.checked = card ? (card.shared !== false) : true;
@@ -3693,8 +4035,6 @@ async function saveCharForm() {
   const name = els.chName.value.trim();
   if (!name) { toast("Name required", true); return; }
   const size = els.chSize.value;
-  const temp = parseFloat(els.chTemp.value);
-  const mtok = parseInt(els.chMaxtok.value, 10);
   const payload = {
     id: editCharId || "",
     name,
@@ -3705,10 +4045,15 @@ async function saveCharForm() {
     size: size ? size.split("x").map(Number) : [],
     tags: els.chTags.value.split(",").map((s) => s.trim()).filter(Boolean),
     loras: chLoraSel.slice(0, 3),
+    tag_rules: chTagRules.map((r) => ({
+      action: r.action, tag: r.tag, with: r.with || "",
+    })),
+    // "" = follow Settings, "all" = every image, anything else a count; the
+    // server turns 0 into "cannot see images at all"
+    vision: els.chVision.value === ""
+      ? null : (els.chVision.value === "all" ? -1 : Number(els.chVision.value)),
     shared: !!(els.chShared && els.chShared.checked),
   };
-  if (!isNaN(temp)) payload.temp = Math.min(2, Math.max(0.1, temp));
-  if (!isNaN(mtok)) payload.max_tokens = Math.min(8192, Math.max(16, mtok));
   if (pendingAvatar) payload.avatar = pendingAvatar;
   if (clearAvatar) payload.avatar_remove = true;
   if (pendingCover) payload.cover = pendingCover;
@@ -4131,6 +4476,10 @@ els.pgMove.addEventListener("click", () => {
   if (!galSelected.size) { toast("Nothing selected", true); return; }
   openFolderPicker([...galSelected], false);
 });
+on(els.pgDownload, "click", () => {
+  if (!galSelected.size) { toast("Nothing selected", true); return; }
+  downloadImages([...galSelected]);
+});
 els.pgDel.addEventListener("click", () => {
   if (!galSelected.size) { toast("Nothing selected", true); return; }
   deleteImages([...galSelected]);
@@ -4230,54 +4579,44 @@ els.btnChmenu.addEventListener("click", openChatMenu);
 /* ------------------------------------------------------- chat options menu
  *
  * Everything chat-wide that isn't worth a permanent header button lives
- * here. Both settings are per chat and owned by the server; this file only
- * mirrors them so the menu can show the current state.
+ * here. Auto images is per chat and owned by the server; this file only
+ * mirrors it so the menu can show the current state.
  *
- * Auto images: off means the image tools are withheld from the model
- * entirely, so the chat is plain text — regenerating an existing image from
- * the UI still works.
- *
- * Like/dislike: one verdict on the conversation as it stands. The server
- * clears it when the next reply lands (and archives it), so tapping is
- * always about what is on screen right now. Captured only — nothing reads
- * it yet.
+ * Copy is the request body the server last POSTed to OpenRouter for this
+ * chat, verbatim: model, messages with the images inline as base64, tools,
+ * and the reasoning/provider params. It is what the model actually saw.
  */
 
 let autoImages = true;
-let chatRating = "";        // "" | "like" | "dislike"
 
 /* chat-mutating endpoints (new / select / delete / character switch) carry
    the active chat's flags, so the menu follows the chat without a refetch */
 function applyChatFlags(d) {
   if (!d) return;
   if (typeof d.auto_images === "boolean") autoImages = d.auto_images;
-  // present-but-empty clears the rating: deleting the open chat lands on
-  // another one, which is unrated
-  if ("feedback" in d) chatRating = (d.feedback && d.feedback.rating) || "";
 }
 
 function openChatMenu() {
-  const rated = chatRating;
   openCtx([
-    { label: rated === "like" ? "Liked" : "Like", on: rated === "like",
-      action: () => rateChat("like") },
-    { label: rated === "dislike" ? "Disliked" : "Dislike",
-      on: rated === "dislike", action: () => rateChat("dislike") },
+    { label: "Copy request JSON", action: () => copyChatRequest() },
     { label: autoImages ? "Auto images on" : "Auto images off",
       on: autoImages, action: () => toggleAutoImages() },
   ]);
 }
 
-async function rateChat(rating) {
+/* The endpoint serves the document itself rather than wrapping it, so the
+   success path is a plain text read — no JSON.parse, no re-stringify, no
+   escaping of a body that may carry megabytes of base64. */
+async function copyChatRequest() {
   try {
-    const d = await api("/api/chat/feedback", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rating }),
-    });
-    chatRating = (d.feedback && d.feedback.rating) || "";
-    toast(chatRating ? (chatRating === "like" ? "Liked" : "Disliked")
-                     : "Rating cleared");
+    const r = await fetch("/api/chat/request");
+    if (r.status === 401) { showGate(); throw new Error("locked"); }
+    if (!r.ok) {
+      let d = {};
+      try { d = await r.json(); } catch { /* not a JSON error */ }
+      throw new Error(d.error || `HTTP ${r.status}`);
+    }
+    copyText(await r.text());
   } catch (e) {
     if (e.message !== "locked") toast("Failed: " + e.message, true);
   }
@@ -4302,6 +4641,18 @@ async function toggleAutoImages() {
 }
 
 els.cfSave.addEventListener("click", saveCharForm);
+els.chRuleAdd.addEventListener("click", () => {
+  if (chTagRules.length >= 24) {
+    toast("24 rules is the limit per character", true);
+    return;
+  }
+  chTagRules.push({ action: "add_pos", tag: "", with: "" });
+  renderChTagRules();
+  // focus the new row's tag box — the action is already the default one
+  const last = els.chRuleList && els.chRuleList.lastElementChild;
+  const box = last && last.querySelector("input");
+  if (box) box.focus();
+});
 els.chDelete.addEventListener("click", () =>
   deleteCharById(editCharId, els.chName.value.trim()));
 els.chAvatarBtn.addEventListener("click", () => openGalPick("avatar"));
@@ -5405,6 +5756,21 @@ els.shLoraRefresh.addEventListener("click", async () => {
   els.shLoraRefresh.disabled = false;
 });
 
+// --- Model guides ---
+// The "+ New guide" row is client-side only until Save: a record is named
+// after the checkpoint it targets (or an arch), and that is the user's to
+// type, so there is nothing to create up front.
+els.shGuideQ.addEventListener("input", renderGuides);
+els.shGuideAdd.addEventListener("click", () => {
+  guideRows.unshift({
+    name: "", model: "", arch: "", notes: "", prompt: "", negative: "",
+    settings: {}, enabled: true, _new: true, _open: true,
+  });
+  renderGuides();
+  const first = els.shGuideList.querySelector(".lora-body");
+  if (first) first.scrollIntoView({ block: "nearest" });
+});
+
 // --- CivitAI browse ---
 els.shDlGo.addEventListener("click", () => searchLoras(true));
 els.shDlMore.addEventListener("click", () => searchLoras(false));
@@ -5524,40 +5890,6 @@ $("sh-reset-sys").addEventListener("click", async () => {
     els.shSys.value = d.system_prompt || "";
     els.shSysState.textContent = "· default";
     toast("System message reset to default");
-  } catch (e) {
-    if (e.message !== "locked") toast("Reset failed: " + e.message, true);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = orig;
-  }
-});
-$("sh-save-guide").addEventListener("click", () => {
-  const v = els.shGuide.value.trim();
-  if (!v) {
-    toast("Clear the box or use Reset to go back to model_guide.txt", true);
-    return;
-  }
-  saveSettings({ model_guide: v }, $("sh-save-guide"), "Model guide saved")
-    .then((d) => {
-      if (d) els.shGuideState.textContent =
-        d.model_guide_custom ? "· custom" : "· model_guide.txt";
-    });
-});
-$("sh-reset-guide").addEventListener("click", async () => {
-  if (!confirm("Go back to the model_guide.txt file? Your saved edits "
-             + "here will be discarded.")) return;
-  const btn = $("sh-reset-guide"), orig = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "Resetting…";
-  try {
-    const d = await api("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model_guide_reset: true }),
-    });
-    els.shGuide.value = d.model_guide || "";
-    els.shGuideState.textContent = "· model_guide.txt";
-    toast("Model guide reset to model_guide.txt");
   } catch (e) {
     if (e.message !== "locked") toast("Reset failed: " + e.message, true);
   } finally {

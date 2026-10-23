@@ -1754,19 +1754,22 @@ def forge_lease(client: "SDClient", model: str | None = None,
 
     Acquires the per-URL lock, drops this client's cached view of the
     server's options so nothing downstream reads another user's leftovers,
-    then optionally sets the model. Yields the model that will actually run,
-    which may differ from `model` if the caller did not pin one."""
+    then optionally sets the model. Yields ``(running, info)`` — the model
+    that will actually run, which may differ from `model` if the caller did
+    not pin one, and the `set_model()` result (or None) so a caller can carry
+    the switch's notes into what it records."""
     with forge_lock(client.base_url):
         try:
             client.options(force=True)     # cache is 3s; another user moved
         except Exception:                  # noqa: BLE001 — soft, never fatal
             pass
         chosen = model or ""
+        info = None
         if model and set_model:
-            client.set_model(model, arch=arch, **(components or {}))
+            info = client.set_model(model, arch=arch, **(components or {}))
             chosen = client.current_model() or model
         elif components:
             client.configure(arch, **(components or {}))
         if not chosen:
             chosen = client.current_model() or ""
-        yield chosen
+        yield chosen, info
